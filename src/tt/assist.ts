@@ -587,10 +587,15 @@ export class Assist {
             excludedNames.add(ast.name);
             return ast;
         }
+        if (ast.nodes?.length === 1) {
+            const nast = Core.clone(ast);
+            nast.nodes[0] = this.genReplaceFn(nast.nodes[0], search, varname, excludedNames, freevarsinSearch, scope);
+            return nast;
+        }
         if (ast.nodes?.length === 2) {
             const nast = Core.clone(ast);
             const nscope = scope.slice(0);
-            nscope.push(ast.name);
+            if (ast.type === "L" || ast.type === "P" || ast.type === "W" || ast.type === "S") nscope.push(ast.name);
             nast.nodes[1] = this.genReplaceFn(nast.nodes[1], search, varname, excludedNames, freevarsinSearch, nscope);
             nast.nodes[0] = this.genReplaceFn(nast.nodes[0], search, varname, excludedNames, freevarsinSearch, scope);
             return nast;
@@ -1031,9 +1036,9 @@ export class Assist {
             if (ast.name !== src) {
                 this.replaceFreeVar(ast.nodes[1], src, dst, freevarInDst);
             }
-        } else if (ast.nodes?.length === 2) {
+        } else if (ast.nodes?.length) {
             this.replaceFreeVar(ast.nodes[0], src, dst, freevarInDst);
-            this.replaceFreeVar(ast.nodes[1], src, dst, freevarInDst);
+            if (ast.nodes[1]) this.replaceFreeVar(ast.nodes[1], src, dst, freevarInDst);
         }
     }
     // private replaceVar(ast: AST, varname: string, dst: AST, context: Context = []) {
