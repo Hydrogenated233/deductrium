@@ -1257,6 +1257,10 @@ export class FormalSystem {
             throw TR("检测到可能的循环定义");
         const R = astmgr.clone(exprAst);
         astmgr.replace(R, varAst, constAst);
+        const allVars = assert.getVarNamesAndIsNots(exprAst, {}, /./);
+        if (Object.keys(allVars).find(e => e !== varAst.name && !assert.isConst(e))) {
+            throw TR("表达式不能有自由变量");
+        }
         if (assert.nf(constAst.name, R) !== -1)
             throw TR("定义的常量没在结论中出现");
         astmgr.assign(deduction.nodes[1].nodes[0].nodes[1], R);
@@ -1310,8 +1314,8 @@ export class FormalSystem {
         const wrapVs = (ast) => {
             const res = {};
             const allVars = assert.getVarNamesAndIsNots(exprAst, res, /./);
-            if (Object.keys(allVars).find(e => e !== varAst.name && !paramAsts.find(p => p.name === e))) {
-                throw TR("函数的表达式不能有自由变量");
+            if (Object.keys(allVars).find(e => e !== varAst.name && !paramAsts.find(p => p.name === e) && !assert.isConst(e))) {
+                throw TR("表达式不能有自由变量");
             }
             console.assert(ast.name === "V");
             let first = true;
