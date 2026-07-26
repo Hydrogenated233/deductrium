@@ -432,6 +432,28 @@ export class AssertionSystem {
             return F;
         }
     }
+    getFreeVars(ast, res, scope = new Set) {
+        const varname = this.getVarName(ast);
+        if (varname) {
+            if (!scope.has(varname))
+                res.add(varname);
+            return;
+        }
+        const nfp = this.getNfParams(ast);
+        if (nfp) {
+            return this.getFreeVars(nfp[0], res, scope);
+        }
+        const q = this.getQuantParams(ast);
+        if (q) {
+            const nsc = new Set([...scope]);
+            nsc.add(this.getVarName(q[0]));
+            return this.getFreeVars(q[1], res, nsc);
+        }
+        if (ast.nodes)
+            for (const n of ast.nodes) {
+                this.getFreeVars(n, res, scope);
+            }
+    }
     getVarNamesAndIsNots(ast, res, reg, scope = new Set) {
         const varname = this.getVarName(ast);
         if (varname) {
