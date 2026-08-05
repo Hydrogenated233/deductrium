@@ -827,8 +827,24 @@ export class TTGui {
                         this.core.checkType(ast, [], false);
                     }
                     checkInfer(ast);
-                    if (ast.type === ":=" && ast.nodes[1].type === ":")
+                    if (ast.type === ":=" && ast.nodes[1].type === ":") {
                         checkInfer(ast.nodes[1].nodes[1]);
+                        const check = (ast) => {
+                            if (ast.type === "var" && ast.name[0] === "?" || ast.name === "_") {
+                                return (ast.checked && ast.checked.type === ":" && check(ast.checked.nodes[0]));
+                            }
+                            if (!ast.nodes?.length)
+                                return true;
+                            for (const n of ast.nodes) {
+                                if (!check(n))
+                                    return false;
+                            }
+                            return true;
+                        };
+                        if (!check(ast.nodes[1].nodes[0]))
+                            wrapper.classList.add("infering");
+                    }
+                    ;
                 }
                 catch (e) {
                     error += e;
