@@ -801,7 +801,9 @@ export class TTGui {
                 if (ast.type === ":") {
                     if (this.core.checkType(Core.clone({
                         name: "", type: "===", nodes: [ast.nodes[1], ref]
-                    }), [], true)) return true;
+                    }), [], true) && (!Array.from(Core.getAllVars(ast.nodes[1])).find(e => e === "_" || e.startsWith("?")) || this.core.checkType(Core.clone({
+                        name: "", type: ":", nodes: [ast.nodes[0], ref]
+                    }), [], true))) return true;
                 } else if (ast.type === ":=") {
                     if (this.core.checkType(Core.clone({
                         name: "", type: ":", nodes: [ast.nodes[0], ref]
