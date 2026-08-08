@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const script = fileURLToPath(new URL("../work/check-pi1-complete.mjs", import.meta.url));
+const script = fileURLToPath(new URL("./helpers/check-pi1-complete.mjs", import.meta.url));
 const result = spawnSync(process.execPath, [script], {
     cwd: fileURLToPath(new URL("..", import.meta.url)),
     encoding: "utf8"
