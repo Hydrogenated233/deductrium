@@ -10,7 +10,7 @@ import { Assist } from "./assist.js";
 import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { TypeRule, initTypeSystem } from "./initial.js";
-import { canReuseTheoremResultOnBlur, isKnownTheoremIdentifier, theoremInputIndexBeforeItem, TheoremValidationCoordinator } from "./theorem-validation.js";
+import { canReuseTheoremResultOnBlur, isKnownTheoremIdentifier, theoremInputIndexBeforeItem, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator } from "./theorem-validation.js";
 const parser = new ASTParser;
 const constructors = new Set<string>();
 const destructors = new Set<string>();
@@ -21,13 +21,14 @@ const sysmacro = new Set<string>();
 let consts = new Set<string>;
 type definedConst = [string, AST, DefinitionTypeCacheSnapshot?];
 export type TTTheoremSaveItem =
-    | { kind: "theorem", value: string }
+    | { kind: "theorem", value: string, local?: boolean }
     | { kind: "folder", id: string, name: string, length: number, open: boolean, disabled: boolean };
 type TTTheoremItem = {
     kind: "theorem",
     id: string,
     wrapper: HTMLDivElement,
-    input: HTMLInputElement
+    input: HTMLInputElement,
+    localCheckbox: HTMLInputElement
 } | {
     kind: "folder",
     id: string,
@@ -84,15 +85,25 @@ export class TTGui {
     private assistWorkerSessionReady = false;
     private tacticBusy = false;
     private tacticRequestId = 0;
+    private tacticTargetInput: HTMLInputElement | null = null;
+    private tacticScopeFolderId: string | null = null;
+    private tacticScopeExplicit = false;
     private tacticDefinitionsRevision = -1;
     private coreWorkerGeneration = -1;
     private coreWorkerConfigKey = "";
     private coreWorkerConfigurePromise: Promise<void> = null;
     private readonly coreWorkerMutations = new TTWorkerMutationQueue();
     private definitionRevision = 0;
+    /** Changes whenever theorem rows are inserted, removed, or reordered. */
+    private theoremStructureRevision = 0;
     private workerRequestId = 0;
     private readonly theoremValidation = new TheoremValidationCoordinator();
     private gateQueryCache = new Map<string, boolean>();
+    private gatePreviewRevision = -1;
+    private gatePreviewStructureRevision = -1;
+    private gatePreviewScopeId: string | null = null;
+    /** Explicit scope used while synchronously rendering a gate preview. */
+    private astRenderScopeFolderId: string | null | undefined;
     initTypeList() {
         const expand = {};
         for (const rule of allrules) {
@@ -183,6 +194,23 @@ export class TTGui {
         (document.getElementById('timeSelect') as HTMLSelectElement).addEventListener('change', function () {
             Core.timeout = Number(this.value) * 1000;
         });
+        document.getElementById("tactic-scope")?.addEventListener("change", () => {
+            if (!(this.mode instanceof Array) || this.tacticBusy) return;
+            const select = document.getElementById("tactic-scope") as HTMLSelectElement;
+            this.tacticScopeFolderId = select.value || null;
+            this.tacticScopeExplicit = true;
+            this.tacticDefinitionsRevision = -1;
+            const requestId = ++this.tacticRequestId;
+            this.renderTacticScopeOptions();
+            this.ensureAssistSessionCurrent().then(snapshot => {
+                if (requestId !== this.tacticRequestId || !(this.mode instanceof Array)) return;
+                this.renderAssistSnapshot(snapshot);
+            }).catch(error => {
+                if (requestId === this.tacticRequestId) {
+                    document.getElementById("tactic-errmsg").innerText = this.formatTacticError(error);
+                }
+            });
+        });
         document.getElementById("tactic-remove").addEventListener("click", () => void this.removeTactic());
         document.getElementById("tactic-clear").addEventListener("click", () => void this.removeTactic(true));
         document.getElementById("tactic-begin").addEventListener("click", () => {
@@ -190,17 +218,61 @@ export class TTGui {
         });
     }
     setLastGateTarget(target: string) {
-        if (target === this.lastGateTarget) return;
-        this.lastGateTarget = target;
-        document.getElementById("copygate").innerText = "";
-        const btn = document.createElement("button");
-        document.getElementById("copygate").appendChild(document.createTextNode(TR("最近#t门上的目标：")));
-        btn.classList.add("inhabitat-modify"); btn.innerText = "+";
-        document.getElementById("copygate").appendChild(btn);
-        btn.onclick = () => {
-            this.executeTactic(target);
+        if (!theoremPreviewNeedsRefresh(
+            target,
+            this.lastGateTarget,
+            this.definitionRevision,
+            this.gatePreviewRevision,
+            this.theoremStructureRevision,
+            this.gatePreviewStructureRevision
+        )) return;
+        if (target !== this.lastGateTarget) this.gatePreviewScopeId = null;
+        if (this.gatePreviewScopeId
+            && !this.getAllTheoremFolders().some(folder => folder.id === this.gatePreviewScopeId)) {
+            this.gatePreviewScopeId = null;
         }
-        document.getElementById("copygate").appendChild(this.ast2HTML("", parser.parse(target)));
+        this.lastGateTarget = target;
+        this.gatePreviewRevision = this.definitionRevision;
+        this.gatePreviewStructureRevision = this.theoremStructureRevision;
+        const copygate = document.getElementById("copygate");
+        copygate.innerText = "";
+        const btn = document.createElement("button");
+        copygate.appendChild(document.createTextNode(TR("最近#t门上的目标：")));
+        const scopeLabel = document.createElement("label");
+        scopeLabel.className = "tactic-scope-picker";
+        scopeLabel.appendChild(document.createTextNode(TR("引用文件夹：")));
+        const scopeSelect = document.createElement("select");
+        const global = document.createElement("option");
+        global.value = "";
+        global.innerText = TR("不使用局部常量");
+        scopeSelect.appendChild(global);
+        for (const folder of this.getAllTheoremFolders()) {
+            const option = document.createElement("option");
+            option.value = folder.id;
+            option.innerText = this.getFolderPath(folder.id);
+            scopeSelect.appendChild(option);
+        }
+        scopeLabel.appendChild(scopeSelect);
+        copygate.appendChild(scopeLabel);
+        btn.classList.add("inhabitat-modify"); btn.innerText = "+";
+        copygate.appendChild(btn);
+        scopeSelect.value = this.gatePreviewScopeId ?? "";
+        scopeSelect.addEventListener("change", () => {
+            this.gatePreviewScopeId = scopeSelect.value || null;
+            this.gatePreviewRevision = -1;
+            this.setLastGateTarget(target);
+        });
+        btn.onclick = () => {
+            this.executeTactic(target, null, scopeSelect.value || null);
+        }
+        copygate.appendChild(this.renderAstInScope(
+            "",
+            parser.parse(target),
+            [],
+            [],
+            this.getInhabitatArray().length,
+            this.gatePreviewScopeId
+        ));
     }
     private autofillTactics(allTactics: string[]) {
         let tactics: string[];
@@ -301,6 +373,10 @@ export class TTGui {
         this.assistSnapshot = null;
         this.tacticDefinitionsRevision = -1;
         this.assistWorkerSessionReady = false;
+        this.tacticTargetInput = null;
+        this.tacticScopeFolderId = null;
+        this.tacticScopeExplicit = false;
+        this.renderTacticScopeOptions();
         document.getElementById("tactic-autofill").innerHTML = "";
         document.getElementById("tactic-hint").innerHTML = "";
         document.getElementById("tactic-errmsg").innerText = "";
@@ -351,9 +427,11 @@ export class TTGui {
         }
     }
     private async startAssistSession(target: string, history: string[] = []) {
+        const definitionEnd = this.getTacticDefinitionEnd();
+        const scopeFolderId = this.getActiveTacticScopeId();
         if (this.assistWorker) {
             try {
-                await this.prepareAssistWorker(this.getInhabitatArray().length, this.getWorkerSystemConfig());
+                await this.prepareAssistWorker(definitionEnd, this.getWorkerSystemConfig(), undefined, scopeFolderId);
                 await this.assistWorkerMutations.wait();
                 const snapshot = await this.assistWorker.start(target, this.assistOptions, history, Core.timeout);
                 this.assistWorkerSessionReady = true;
@@ -370,7 +448,10 @@ export class TTGui {
         }
         return this.startAssistFallback(target, history);
     }
-    private async startAssistFallback(target: string, history: string[], config = this.getWorkerConfig(this.getInhabitatArray().length)) {
+    private async startAssistFallback(target: string, history: string[], config?: TTCoreConfig) {
+        const definitionEnd = this.getTacticDefinitionEnd();
+        const scopeFolderId = this.getActiveTacticScopeId();
+        config ??= this.getWorkerConfig(definitionEnd, scopeFolderId);
         this.assistFallback.configure(config);
         return this.assistFallback.start(target, this.assistOptions, history);
     }
@@ -428,7 +509,8 @@ export class TTGui {
     }
     private renderAssistSnapshot(snapshot: TTAssistSnapshot) {
         this.assistSnapshot = snapshot;
-        this.getHottDefCtxt(this.getInhabitatArray().length);
+        this.getHottDefCtxt(this.getTacticDefinitionEnd(), this.getActiveTacticScopeId());
+        this.renderTacticScopeOptions();
         const hint = document.getElementById("tactic-hint");
         const statediv = document.getElementById("tactic-state") as HTMLDivElement;
         hint.innerHTML = "";
@@ -457,6 +539,22 @@ export class TTGui {
     }
     private formatTacticError(error: unknown) {
         return String(error).replace(/^Error:\s*/, "");
+    }
+    private renderAstInScope(
+        idx: string,
+        ast: AST,
+        scopes: AST[] = [],
+        context: Context = [],
+        userLineNumber = 0,
+        scopeFolderId: string | null = null
+    ) {
+        const previousScope = this.astRenderScopeFolderId;
+        this.astRenderScopeFolderId = scopeFolderId;
+        try {
+            return this.ast2HTML(idx, ast, scopes, context, userLineNumber);
+        } finally {
+            this.astRenderScopeFolderId = previousScope;
+        }
     }
     private addSpan(parentSpan: HTMLSpanElement, text: string, parseHTML?: boolean) {
         const span = document.createElement("span");
@@ -503,7 +601,7 @@ export class TTGui {
             else if (destructors.has(astname)) el.classList.add("ind_fn");
             else if (constructors.has(astname)) el.classList.add("constructors");
             else if (consts.has(astname)) el.classList.add("constant");
-            else if (this.isKnownTheoremName(astname)) el.classList.add("macro");
+            else if (this.isKnownTheoremName(astname, userLineNumber)) el.classList.add("macro");
             else if (!ast.name.startsWith("U@")) {
                 el.classList.add("freeVar");
             }
@@ -637,6 +735,9 @@ export class TTGui {
             node => !(node as HTMLSpanElement).getAttribute("ast-string")
         ) as HTMLSpanElement[];
         const floatTypeDiv = document.querySelector(".float-type") as HTMLDivElement;
+        const renderedInput = this.getInhabitatArray()[userLineNumber];
+        const renderedItemId = renderedInput ? this.getTheoremItemForInput(renderedInput)?.id : null;
+        const renderedScopeOverride = this.astRenderScopeFolderId;
         for (const node of spans) {
             const localCtxt = context;
             const localNumber = userLineNumber;
@@ -658,13 +759,30 @@ export class TTGui {
 
                 floatTypeDiv.style.left = (ev.pageX - 4) + "px";
                 floatTypeDiv.style.top = (ev.pageY + 30) + "px";
-                this.getHottDefCtxt(localNumber);
+                const localInput = renderedItemId
+                    ? this.theoremItems.find((item): item is Extract<TTTheoremItem, { kind: "theorem" }> =>
+                        item.kind === "theorem" && item.id === renderedItemId)?.input
+                    : this.getInhabitatArray()[localNumber];
+                const currentNumber = localInput ? this.getInhabitatArray().indexOf(localInput) : localNumber;
+                this.getHottDefCtxt(currentNumber, this.getDefaultTacticScope(localInput));
                 floatTypeDiv.style.display = "block";
                 if (ast.checked) {
                     if (scopes[0]?.type === "quantvar") {
                         scopes = scopes.slice(1);
                     }
-                    try { floatTypeDiv.appendChild(this.ast2HTML("Checked", ast.checked, scopes, localCtxt, userLineNumber)); } catch (e) {
+                    try {
+                        const checkedHtml = renderedScopeOverride === undefined
+                            ? this.ast2HTML("Checked", ast.checked, scopes, localCtxt, userLineNumber)
+                            : this.renderAstInScope(
+                                "Checked",
+                                ast.checked,
+                                scopes,
+                                localCtxt,
+                                userLineNumber,
+                                renderedScopeOverride
+                            );
+                        floatTypeDiv.appendChild(checkedHtml);
+                    } catch (e) {
                         floatTypeDiv.innerText = e;
                     }
                 } else if (ast.err) {
@@ -717,17 +835,31 @@ export class TTGui {
         for (let i = 0; i < this.userDefinedConsts.length; i++) {
             const definition = this.userDefinedConsts[i];
             if (!definition || this.isTheoremInputDisabled(inputs[i])) continue;
+            const item = this.getTheoremItemForInput(i);
+            if (item?.localCheckbox.checked) continue;
             this.userConstNames.add(definition[0]);
         }
     }
-    private isKnownTheoremName(name: string) {
-        if (isKnownTheoremIdentifier(name, consts, macro, sysmacro, this.userConstNames)) return true;
-        // The sets above are presentation state.  The Core is the source of
-        // truth during a revalidation, so use it as a fallback when another
-        // render pass has rebuilt the presentation sets in between checks.
-        return Object.prototype.hasOwnProperty.call(this.core.state.sysTypes, name)
-            || Object.prototype.hasOwnProperty.call(this.core.state.sysDefs, name)
-            || Object.prototype.hasOwnProperty.call(this.core.state.userDefs, name);
+    private isKnownTheoremName(name: string, userLineNumber: number) {
+        if (isKnownTheoremIdentifier(name, consts, sysmacro)) return true;
+        const inputs = this.getInhabitatArray();
+        const definitionEnd = Math.max(0, Math.min(userLineNumber, inputs.length));
+        const scopeId = this.astRenderScopeFolderId !== undefined
+            ? this.astRenderScopeFolderId
+            : definitionEnd < inputs.length
+            ? this.getDefaultTacticScope(inputs[definitionEnd])
+            : this.getActiveTacticScopeId();
+        // The declaration currently being rendered is not part of the
+        // preceding context (and must not be usable by its own type check),
+        // but its name should still render as a known declaration instead of
+        // a black free variable on the theorem row.
+        if (this.userDefinedConsts[definitionEnd]?.[0] === name) return true;
+        if (this.findVisibleDefinitionIndex(name, definitionEnd, scopeId) >= 0) return true;
+        // System declarations are always available. User definitions are
+        // handled above so a name from another local folder stays visually
+        // unknown instead of appearing as an available macro.
+        return Object.prototype.hasOwnProperty.call(this.core.state.sysTypes ?? {}, name)
+            || Object.prototype.hasOwnProperty.call(this.core.state.sysDefs ?? {}, name);
     }
     updateTypeList(terms: Set<string>) {
         const list = this.typeList;
@@ -884,6 +1016,144 @@ export class TTGui {
         }
         return result;
     }
+    private getTheoremItemForInput(input: HTMLInputElement | number) {
+        const target = typeof input === "number" ? this.getInhabitatArray()[input] : input;
+        return this.theoremItems.find((item): item is Extract<TTTheoremItem, { kind: "theorem" }> =>
+            item.kind === "theorem" && item.input === target) ?? null;
+    }
+    private getFolderScopeForFolder(folderId: string | null) {
+        if (!folderId) return [] as Extract<TTTheoremItem, { kind: "folder" }>[];
+        return this.scanTheoremFolderScope([folderId]).get(folderId) ?? [];
+    }
+    private getAllTheoremFolders() {
+        return this.theoremItems.filter((item): item is Extract<TTTheoremItem, { kind: "folder" }> => item.kind === "folder");
+    }
+    private getFolderPath(folderId: string) {
+        return this.getFolderScopeForFolder(folderId).map(folder => folder.name).join(" / ");
+    }
+    private getFolderScopeForInput(input: HTMLInputElement | number, selectedFolderId?: string | null) {
+        const item = this.getTheoremItemForInput(input);
+        if (!item) return [] as Extract<TTTheoremItem, { kind: "folder" }>[];
+        const scopes = this.scanTheoremFolderScope([item.id]).get(item.id) ?? [];
+        if (selectedFolderId && scopes.some(folder => folder.id === selectedFolderId)) {
+            return this.getFolderScopeForFolder(selectedFolderId);
+        }
+        return scopes;
+    }
+    private getDefaultTacticScope(input: HTMLInputElement | null) {
+        const scopes = input ? this.getFolderScopeForInput(input) : [];
+        return scopes.length ? scopes[scopes.length - 1].id : null;
+    }
+    private getDefinitionFolderId(index: number) {
+        const item = this.getTheoremItemForInput(index);
+        if (!item) return null;
+        const scopes = this.scanTheoremFolderScope([item.id]).get(item.id) ?? [];
+        return scopes.length ? scopes[scopes.length - 1].id : null;
+    }
+    private findVisibleDefinitionIndex(name: string, targetIndex: number, selectedFolderId: string | null) {
+        for (let index = Math.min(targetIndex - 1, this.userDefinedConsts.length - 1); index >= 0; index--) {
+            if (this.userDefinedConsts[index]?.[0] !== name) continue;
+            if (this.isDefinitionVisible(index, targetIndex, selectedFolderId)) return index;
+        }
+        return -1;
+    }
+    private hasDefinitionNameConflict(name: string, currentIndex: number, selectedFolderId: string | null) {
+        const currentItem = this.getTheoremItemForInput(currentIndex);
+        const currentFolderId = this.getDefinitionFolderId(currentIndex);
+        const currentIsLocal = !!currentItem?.localCheckbox.checked && !!currentFolderId;
+        for (let index = currentIndex - 1; index >= 0; index--) {
+            if (this.userDefinedConsts[index]?.[0] !== name) continue;
+            if (!this.isDefinitionVisible(index, currentIndex, selectedFolderId)) continue;
+            const previousFolderId = this.getDefinitionFolderId(index);
+            // A nested local scope may shadow an ancestor's local helper. A
+            // duplicate in the same folder, or any collision with a global
+            // definition, remains an error.
+            if (currentIsLocal && previousFolderId && previousFolderId !== currentFolderId) continue;
+            return true;
+        }
+        return false;
+    }
+    private isDefinitionVisible(index: number, targetIndex: number, selectedFolderId: string | null) {
+        if (index >= targetIndex) return false;
+        const inputs = this.getInhabitatArray();
+        if (this.isTheoremInputDisabled(inputs[index])) return false;
+        const definition = this.userDefinedConsts[index];
+        if (!definition) return false;
+        const item = this.getTheoremItemForInput(index);
+        if (!item?.localCheckbox.checked) return true;
+        const definitionFolderId = this.getDefinitionFolderId(index);
+        if (!definitionFolderId) return true;
+        if (!selectedFolderId) return false;
+        return this.getFolderScopeForFolder(selectedFolderId).some(folder => folder.id === definitionFolderId);
+    }
+    private clearUserDefinitionContext() {
+        const names = new Set(Object.keys(this.core.state.userDefs));
+        for (const definition of this.userDefinedConsts) {
+            if (definition) names.add(definition[0]);
+        }
+        for (const name of names) delete this.core.state.defTypes[name];
+        this.core.state.userDefs = {};
+    }
+    private addUserDefinitionToContext(name: string, definition: definedConst) {
+        this.core.state.userDefs[name] = definition[1];
+        if (definition[2]) this.core.restoreDefinitionCache(name, definition[2]);
+    }
+    private getActiveTacticScopeId() {
+        const scopes = this.getTacticScopeOptions();
+        if (this.tacticScopeExplicit) {
+            if (this.tacticScopeFolderId === null) return null;
+            if (scopes.some(folder => folder.id === this.tacticScopeFolderId)) {
+                return this.tacticScopeFolderId;
+            }
+            this.tacticScopeExplicit = false;
+            this.tacticScopeFolderId = null;
+        }
+        if (this.tacticScopeFolderId && scopes.some(folder => folder.id === this.tacticScopeFolderId)) {
+            return this.tacticScopeFolderId;
+        }
+        return this.tacticTargetInput ? this.getDefaultTacticScope(this.tacticTargetInput) : null;
+    }
+    private getTacticDefinitionEnd() {
+        const inputs = this.getInhabitatArray();
+        const targetIndex = this.tacticTargetInput ? inputs.indexOf(this.tacticTargetInput) : -1;
+        return targetIndex >= 0 ? targetIndex : inputs.length;
+    }
+    private getTacticScopeOptions() {
+        return this.tacticTargetInput
+            ? this.getFolderScopeForInput(this.tacticTargetInput)
+            : this.getAllTheoremFolders();
+    }
+    private renderTacticScopeOptions() {
+        const select = document.getElementById("tactic-scope") as HTMLSelectElement;
+        const label = document.getElementById("tactic-scope-label");
+        if (!select || !label) return;
+        const previous = this.tacticScopeFolderId;
+        select.innerHTML = "";
+        const scopes = this.getTacticScopeOptions();
+        const global = document.createElement("option");
+        global.value = "";
+        global.innerText = TR("不使用局部常量");
+        select.appendChild(global);
+        for (const folder of scopes) {
+            const option = document.createElement("option");
+            option.value = folder.id;
+            option.innerText = this.getFolderPath(folder.id);
+            select.appendChild(option);
+        }
+        const defaultScope = this.getDefaultTacticScope(this.tacticTargetInput);
+        if (this.tacticScopeExplicit) {
+            if (previous !== null && !scopes.some(folder => folder.id === previous)) {
+                this.tacticScopeExplicit = false;
+                this.tacticScopeFolderId = defaultScope;
+            }
+        } else {
+            this.tacticScopeFolderId = previous && scopes.some(folder => folder.id === previous)
+                ? previous
+                : defaultScope;
+        }
+        select.value = this.tacticScopeFolderId ?? "";
+        label.classList.toggle("hide", !(this.mode instanceof Array) || scopes.length === 0);
+    }
     private renderTheoremStructure() {
         if (!this.restoringTheoremItems) this.normalizeTheoremFolderLengths();
         this.syncTheoremDomOrder();
@@ -897,8 +1167,15 @@ export class TTGui {
             item.wrapper.classList.toggle("tt-folder-disabled", disabled || (item.kind === "folder" && item.disabled));
             item.wrapper.style.setProperty("--tt-folder-depth", String(stack.length));
             if (item.kind === "theorem") {
+                const canBeLocal = stack.length > 0;
                 item.input.dataset.ttDisabled = String(disabled);
                 item.wrapper.classList.toggle("tt-theorem-disabled", disabled);
+                item.localCheckbox.disabled = !canBeLocal;
+                if (!canBeLocal) item.localCheckbox.checked = false;
+                item.localCheckbox.title = TR(canBeLocal
+                    ? "局部常量仅在所在文件夹及子文件夹中可见"
+                    : "局部常量需放在文件夹中");
+                item.localCheckbox.parentElement.title = item.localCheckbox.title;
                 continue;
             }
             const folderLength = Math.max(0, Math.min(item.length, this.theoremItems.length - i - 1));
@@ -1061,6 +1338,9 @@ export class TTGui {
             this.syncTheoremDomOrder();
             this.realignUserDefinitions(previousInputs, previousDefinitions);
         }
+        this.definitionRevision++;
+        this.theoremStructureRevision++;
+        this.gatePreviewStructureRevision = -1;
         this.renderTheoremStructure();
         this.onStateChange();
         if (movingInputs.length) {
@@ -1095,6 +1375,13 @@ export class TTGui {
         label.appendChild(document.createTextNode(TR("停用子定理")));
         wrapper.appendChild(label);
 
+        const addTheorem = document.createElement("button");
+        addTheorem.type = "button";
+        addTheorem.className = "inhabitat-modify";
+        addTheorem.innerText = "+";
+        addTheorem.title = TR("在文件夹底部添加定理");
+        wrapper.appendChild(addTheorem);
+
         const rename = document.createElement("button");
         rename.type = "button";
         rename.className = "inhabitat-modify";
@@ -1127,9 +1414,17 @@ export class TTGui {
         checkbox.addEventListener("change", () => {
             const revalidateFrom = this.theoremInputIndexAtItem(folder);
             folder.disabled = checkbox.checked;
+            this.definitionRevision++;
+            this.theoremStructureRevision++;
+            this.gatePreviewStructureRevision = -1;
             this.renderTheoremStructure();
             this.onStateChange();
             this.revalidateTheorems(revalidateFrom);
+        });
+        addTheorem.addEventListener("click", () => {
+            if (!folder.open) folder.open = true;
+            this.renderTheoremStructure();
+            this.updateInhabitList(undefined, folder);
         });
         rename.addEventListener("click", () => {
             const nextName = prompt(TR("文件夹名称："), folder.name)?.trim();
@@ -1148,6 +1443,9 @@ export class TTGui {
             }
             if (index >= 0) this.theoremItems.splice(index, 1);
             wrapper.remove();
+            this.definitionRevision++;
+            this.theoremStructureRevision++;
+            this.gatePreviewStructureRevision = -1;
             this.renderTheoremStructure();
             this.onStateChange();
             this.revalidateTheorems(revalidateFrom);
@@ -1161,7 +1459,7 @@ export class TTGui {
     serializeTheoremItems(): TTTheoremSaveItem[] {
         this.normalizeTheoremFolderLengths();
         return this.theoremItems.map(item => item.kind === "theorem"
-            ? { kind: "theorem", value: item.input.value }
+            ? { kind: "theorem", value: item.input.value, local: item.localCheckbox.checked }
             : {
                 kind: "folder",
                 id: item.id,
@@ -1172,6 +1470,9 @@ export class TTGui {
             });
     }
     restoreTheoremItems(items: TTTheoremSaveItem[]) {
+        this.definitionRevision++;
+        this.theoremStructureRevision++;
+        this.gatePreviewStructureRevision = -1;
         // Drop caches belonging to the previous theorem list before replacing
         // it. They are keyed by name and otherwise survive a save restore.
         for (const definition of this.userDefinedConsts) {
@@ -1190,7 +1491,10 @@ export class TTGui {
                 } else {
                     this.updateInhabitList();
                     const theorem = this.theoremItems[this.theoremItems.length - 1];
-                    if (theorem?.kind === "theorem") theorem.input.value = String(item.value ?? "");
+                    if (theorem?.kind === "theorem") {
+                        theorem.input.value = String(item.value ?? "");
+                        theorem.localCheckbox.checked = !!item.local;
+                    }
                 }
             }
         } finally {
@@ -1204,37 +1508,23 @@ export class TTGui {
         this.renderTheoremStructure();
         this.revalidateTheorems();
     }
-    getHottDefCtxt(input: HTMLInputElement | number) {
+    getHottDefCtxt(input: HTMLInputElement | number, selectedFolderId: string | null = null) {
         macro.clear();
         for (const s of sysmacro) macro.add(s);
-        this.core.state.userDefs = {};
+        this.clearUserDefinitionContext();
         const inputs = this.getInhabitatArray();
-        if (typeof input === "number") {
-            for (let i = 0; i <= input; i++) {
-                if (this.isTheoremInputDisabled(inputs[i])) continue;
-                const def = this.userDefinedConsts[i];
-                if (!def) continue;
-                macro.add(def[0]);
-                this.core.state.userDefs[def[0]] = def[1];
-            }
-            return input;
-        }
-        const arr = inputs;
-        let currentIdx: number;
-        for (let i = 0; i < arr.length; i++) {
+        const currentIdx = typeof input === "number" ? input : inputs.indexOf(input);
+        const end = typeof input === "number" ? Math.min(inputs.length - 1, input) : currentIdx - 1;
+        const scopeId = selectedFolderId ?? (typeof input === "number"
+            ? this.getActiveTacticScopeId()
+            : this.getDefaultTacticScope(input));
+        for (let i = 0; i <= end; i++) {
             const def = this.userDefinedConsts[i];
-            if (this.isTheoremInputDisabled(arr[i])) {
-                if (arr[i] === input) { currentIdx = i; break; }
-                continue;
-            }
-            if (!def) {
-                if (arr[i] === input) { currentIdx = i; break; } else { continue; }
-            }
+            if (!def || !this.isDefinitionVisible(i, currentIdx + (typeof input === "number" ? 0 : 1), scopeId)) continue;
             macro.add(def[0]);
-            if (arr[i] === input) { currentIdx = i; break; }
-            this.core.state.userDefs[def[0]] = def[1];
+            this.addUserDefinitionToContext(def[0], def);
         }
-        return currentIdx ?? arr.indexOf(input);
+        return currentIdx;
     }
     private getWorkerSystemConfig(): TTCoreConfig {
         return {
@@ -1246,11 +1536,11 @@ export class TTGui {
             language: langMgr.lang,
         };
     }
-    private getWorkerDefinitionSlots(definitionEnd: number): TTDefinitionSlot[] {
+    private getWorkerDefinitionSlots(definitionEnd: number, scopeFolderId: string | null = null): TTDefinitionSlot[] {
         const definitions: TTDefinitionSlot[] = [];
         const inputs = this.getInhabitatArray();
         for (let i = 0; i < definitionEnd; i++) {
-            if (this.isTheoremInputDisabled(inputs[i])) {
+            if (!this.isDefinitionVisible(i, definitionEnd, scopeFolderId)) {
                 definitions.push(null);
                 continue;
             }
@@ -1259,35 +1549,31 @@ export class TTGui {
                 definitions.push(null);
                 continue;
             }
-            const cache = definition[2] ?? this.core.serializeDefinitionCache(definition[0]);
-            if (cache) {
-                definition[2] = cache;
-            }
-            definitions.push([definition[0], Core.clone(definition[1]), cache]);
+            definitions.push([definition[0], Core.clone(definition[1]), definition[2]]);
         }
         return definitions;
     }
-    private getWorkerConfig(definitionEnd: number): TTCoreConfig {
-        const definitions = this.getWorkerDefinitionSlots(definitionEnd);
+    private getWorkerConfig(definitionEnd: number, scopeFolderId: string | null = null): TTCoreConfig {
+        const definitions = this.getWorkerDefinitionSlots(definitionEnd, scopeFolderId);
         return {
             ...this.getWorkerSystemConfig(),
             userDefinitions: definitions.filter(Boolean).map(definition => [definition[0], definition[1]]),
             userDefinitionCaches: definitions.filter(definition => definition?.[2]).map(definition => [definition[0], definition[2]])
         };
     }
-    private prepareCoreWorker(definitionEnd: number) {
+    private prepareCoreWorker(definitionEnd: number, scopeFolderId: string | null = null) {
         if (!this.coreWorker) return Promise.reject(new Error("Type-theory worker unavailable"));
         const config = this.getWorkerSystemConfig();
-        const configKey = JSON.stringify(config);
+        const configKey = JSON.stringify({ config, definitionEnd, scopeFolderId });
         const generation = this.coreWorker.generation;
         if (this.coreWorkerGeneration === generation && this.coreWorkerConfigKey === configKey) {
             return this.coreWorkerMutations.wait();
         }
         this.coreWorkerGeneration = generation;
         this.coreWorkerConfigKey = configKey;
-        const definitions = this.getWorkerDefinitionSlots(definitionEnd);
+        const definitions = this.getWorkerDefinitionSlots(definitionEnd, scopeFolderId);
         const promise = this.coreWorkerMutations.enqueue(() => this.coreWorker.configure(config, definitions));
-        this.prepareAssistWorker(definitionEnd, config, definitions).catch(() => { });
+        this.prepareAssistWorker(definitionEnd, config, definitions, scopeFolderId).catch(() => { });
         this.coreWorkerConfigurePromise = promise.catch(error => {
             if (this.coreWorkerGeneration === generation && this.coreWorkerConfigKey === configKey) {
                 this.coreWorkerGeneration = -1;
@@ -1301,10 +1587,11 @@ export class TTGui {
     private prepareAssistWorker(
         definitionEnd: number,
         config = this.getWorkerSystemConfig(),
-        definitions?: TTDefinitionSlot[]
+        definitions?: TTDefinitionSlot[],
+        scopeFolderId: string | null = null
     ) {
         if (!this.assistWorker) return Promise.reject(new Error("Proof-assistant worker unavailable"));
-        const configKey = JSON.stringify(config);
+        const configKey = JSON.stringify({ config, definitionEnd, scopeFolderId });
         const generation = this.assistWorker.generation;
         if (this.assistWorkerGeneration === generation && this.assistWorkerConfigKey === configKey) {
             return this.assistWorkerMutations.wait();
@@ -1314,7 +1601,7 @@ export class TTGui {
         this.assistWorkerSessionReady = false;
         const promise = this.assistWorkerMutations.enqueue(() => this.assistWorker.configure(
             config,
-            definitions ?? this.getWorkerDefinitionSlots(definitionEnd)
+            definitions ?? this.getWorkerDefinitionSlots(definitionEnd, scopeFolderId)
         ));
         this.assistWorkerConfigurePromise = promise.catch(error => {
             if (this.assistWorkerGeneration === generation && this.assistWorkerConfigKey === configKey) {
@@ -1370,7 +1657,28 @@ export class TTGui {
         });
     }
 
-    updateInhabitList(insertPos?: HTMLDivElement) {
+    updateInhabitList(
+        insertPos?: HTMLDivElement,
+        destinationFolder?: Extract<TTTheoremItem, { kind: "folder" }>
+    ) {
+        // Inserting a row shifts every later theorem index.  Cancel any
+        // in-flight checks in that suffix before changing the arrays; otherwise
+        // an old Worker response can write its result into the new row's slot.
+        let insertionItemIndex = this.theoremItems.length;
+        if (destinationFolder) {
+            insertionItemIndex = this.getFolderAppendIndex(destinationFolder);
+        } else if (insertPos) {
+            const afterIndex = this.theoremItems.findIndex(item => item.wrapper === insertPos);
+            if (afterIndex >= 0) insertionItemIndex = afterIndex + 1;
+        }
+        if (insertionItemIndex < 0) insertionItemIndex = this.theoremItems.length;
+        const previousInputs = this.getInhabitatArray();
+        const insertionInputIndex = theoremInputIndexBeforeItem(this.theoremItems, insertionItemIndex);
+        const hasShiftedSuffix = insertionInputIndex < previousInputs.length;
+        if (hasShiftedSuffix) this.invalidateTheoremChecks(insertionInputIndex, true);
+        this.definitionRevision++;
+        this.theoremStructureRevision++;
+        this.gatePreviewStructureRevision = -1;
         const input = document.createElement("input");
         input.classList.add("tt-theorem-input");
 
@@ -1378,6 +1686,13 @@ export class TTGui {
         const button = document.createElement("button");
         div.classList.add("inhabitat-div");
         div.classList.add("hide");
+        const localLabel = document.createElement("label");
+        localLabel.className = "tt-local-const";
+        const localCheckbox = document.createElement("input");
+        localCheckbox.type = "checkbox";
+        localCheckbox.setAttribute("aria-label", TR("局部常量"));
+        localLabel.title = TR("局部常量仅在所在文件夹及子文件夹中可见");
+        localLabel.appendChild(localCheckbox);
         let composing = false;
         input.addEventListener("compositionstart", () => composing = true);
         input.addEventListener("compositionend", () => composing = false);
@@ -1460,6 +1775,14 @@ export class TTGui {
             delete input["needUpdate"];
             this.onStateChange();
             const currentIdx = this.getHottDefCtxt(input);
+            const validationItemId = this.getTheoremItemForInput(input)?.id ?? null;
+            const rowPositionMatches = () => theoremValidationPositionMatches(
+                this.getInhabitatArray(),
+                input,
+                currentIdx,
+                validationItemId,
+                currentInput => this.getTheoremItemForInput(currentInput)?.id ?? null
+            );
             if (ev["updateDefs"]) this.invalidateWorkerDefinitions(currentIdx);
             this.invalidateTheoremTypeTags(currentIdx);
             input["validationInvalidated"] = true;
@@ -1486,6 +1809,14 @@ export class TTGui {
             wrapper.classList.remove("infering");
             if (!input.value.trim()) {
                 const current = this.getInhabitatArray().indexOf(input);
+                if (current < 0) {
+                    if (validationRunId !== null) this.completeTheoremValidation(validationRunId);
+                    return;
+                }
+                if (current >= 0) this.invalidateTheoremChecks(current, true);
+                this.definitionRevision++;
+                this.theoremStructureRevision++;
+                this.gatePreviewStructureRevision = -1;
                 const [removed] = this.userDefinedConsts.splice(current, 1);
                 const itemIndex = this.theoremItems.findIndex(item => item.kind === "theorem" && item.input === input);
                 if (itemIndex >= 0) {
@@ -1541,7 +1872,11 @@ export class TTGui {
                         }
                         if (!context.find(e => e[0] === ast.name)) {
                             // if this is a constant, check its value recursively
-                            const pos = this.userDefinedConsts.findIndex(e => e && e[0] === ast.name);
+                            const pos = this.findVisibleDefinitionIndex(
+                                ast.name,
+                                currentIdx,
+                                this.getDefaultTacticScope(input)
+                            );
                             if (pos >= 0 && inputsarr[pos]?.parentElement?.classList.contains("infering")) {
                                 expandConsts.add(ast.name);
                             }
@@ -1590,6 +1925,14 @@ export class TTGui {
                     if (validationRunId !== null) this.completeTheoremValidation(validationRunId);
                     return;
                 }
+                if (!rowPositionMatches()) {
+                    // The row moved while the Worker was checking it.  Its
+                    // old index is no longer safe for definition/cache writes;
+                    // the structural mutation will schedule a fresh suffix
+                    // validation using the new position.
+                    if (validationRunId !== null) this.completeTheoremValidation(validationRunId);
+                    return;
+                }
                 if (checkedAst) ast = checkedAst;
                 error = validationError;
                 wrapper.classList.remove("checking");
@@ -1611,6 +1954,11 @@ export class TTGui {
                             const storedCache = definitionCache
                                 ?? (workerCommitted ? undefined : this.core.serializeDefinitionCache(defname));
                             this.userDefinedConsts[currentIdx] = [defname, storedDefinition, storedCache];
+                            // A previously rendered #t copy preview may have
+                            // classified this name as a free variable.  Force
+                            // its cached presentation to be rebuilt after the
+                            // definition becomes valid.
+                            this.gatePreviewRevision = -1;
                             this.refreshUserConstNames();
                             if (this.puzzleDefs.has(defname) && !this.queryDefPuzzle(defname)) {
                                 delete this.userDefinedConsts[currentIdx];
@@ -1651,7 +1999,9 @@ export class TTGui {
                     if (ast.type === ":=") {
                         if (ast.nodes[0].type !== "var") throw TR(":=符号左侧仅允许出现自定义常量");
                         const defname = ast.nodes[0].name;
-                        if (this.core.checkConst(defname, [])) throw defname + TR("的定义重复");
+                        if (this.hasDefinitionNameConflict(defname, currentIdx, this.getDefaultTacticScope(input))) {
+                            throw defname + TR("的定义重复");
+                        }
                         if (reservedConsts.has(defname)) throw defname + TR("由系统保留");
                         this.core.checkType(ast, [], false);
                         filledDefinition = this.core.registConstType(defname, ast.nodes[1]);
@@ -1671,7 +2021,9 @@ export class TTGui {
                 try {
                     if (ast.nodes[0].type !== "var") throw TR(":=符号左侧仅允许出现自定义常量");
                     const defname = ast.nodes[0].name;
-                    if (this.core.checkConst(defname, [])) throw defname + TR("的定义重复");
+                    if (this.hasDefinitionNameConflict(defname, currentIdx, this.getDefaultTacticScope(input))) {
+                        throw defname + TR("的定义重复");
+                    }
                     if (reservedConsts.has(defname)) throw defname + TR("由系统保留");
                 } catch (e) {
                     finish(ast, String(e));
@@ -1684,13 +2036,23 @@ export class TTGui {
             }
             const inputValue = input.value;
             wrapper.classList.add("checking");
-            this.prepareCoreWorker(currentIdx).then(() => this.coreWorker.validate(
-                currentIdx,
-                Core.clone(ast, true),
-                [],
-                Core.timeout
-            )).then(result => {
+            const rowStillCurrent = () => input["workerRequestId"] === requestId
+                && input.value === inputValue
+                && input.isConnected
+                && rowPositionMatches();
+            this.prepareCoreWorker(currentIdx, this.getDefaultTacticScope(input)).then(() => {
+                if (!rowStillCurrent()) {
+                    if (validationRunId !== null) this.completeTheoremValidation(validationRunId);
+                    return null;
+                }
+                return this.coreWorker.validate(currentIdx, Core.clone(ast, true), [], Core.timeout);
+            }).then(result => {
+                if (!result) return;
                 if (input["workerRequestId"] !== requestId || input.value !== inputValue || !input.isConnected) {
+                    if (validationRunId !== null) this.completeTheoremValidation(validationRunId);
+                    return;
+                }
+                if (!rowPositionMatches()) {
                     if (validationRunId !== null) this.completeTheoremValidation(validationRunId);
                     return;
                 }
@@ -1702,12 +2064,16 @@ export class TTGui {
                     if (validationRunId !== null) this.completeTheoremValidation(validationRunId);
                     return;
                 }
+                if (!rowPositionMatches()) {
+                    if (validationRunId !== null) this.completeTheoremValidation(validationRunId);
+                    return;
+                }
                 validateSynchronously();
             });
         };
         div.addEventListener("click", ev => {
             if (this.mode === "tactic-begin" && !this.isTheoremInputDisabled(input)) {
-                this.executeTactic(input.value);
+                this.executeTactic(input.value, input);
             } else {
                 input["editingCanReuseRenderedResult"] = true;
                 this.suspendTheoremTypeTag(input);
@@ -1721,20 +2087,61 @@ export class TTGui {
         const wrapper = document.createElement("div");
         wrapper.classList.add("wrapper");
         const id = this.createTheoremItemId("theorem");
-        const previousInputs = this.getInhabitatArray();
         const previousDefinitions = this.userDefinedConsts.slice();
         this.createTheoremDragHandle(wrapper, id);
         wrapper.appendChild(button);
+        wrapper.appendChild(localLabel);
         wrapper.appendChild(input);
         wrapper.appendChild(div);
-        this.insertTheoremItem({ kind: "theorem", id, wrapper, input }, insertPos);
+        const theorem: Extract<TTTheoremItem, { kind: "theorem" }> = { kind: "theorem", id, wrapper, input, localCheckbox };
+        const insertIndex = destinationFolder ? this.getFolderAppendIndex(destinationFolder) : -1;
+        if (insertIndex >= 0) {
+            for (const folder of this.getFolderScopeForFolder(destinationFolder.id)) folder.length++;
+            this.theoremItems.splice(insertIndex, 0, theorem);
+        } else {
+            this.insertTheoremItem(theorem, insertPos);
+        }
         this.syncTheoremDomOrder();
         this.realignUserDefinitions(previousInputs, previousDefinitions);
         this.renderTheoremStructure();
+        // The newly inserted row is intentionally left empty and focused.  If
+        // there are existing rows after it, validate those rows starting after
+        // the new row so they regain their correct definition slots.
+        const suffixStart = insertionInputIndex + 1;
+        if (!this.restoringTheoremItems && suffixStart < this.getInhabitatArray().length) {
+            this.revalidateTheorems(suffixStart);
+        }
         button.addEventListener("click", () => {
             this.updateInhabitList(wrapper);
         });
+        localCheckbox.addEventListener("change", () => {
+            const currentIdx = this.getInhabitatArray().indexOf(input);
+            if (currentIdx < 0) return;
+            this.definitionRevision++;
+            this.theoremStructureRevision++;
+            this.gatePreviewStructureRevision = -1;
+            this.onStateChange();
+            this.revalidateTheorems(currentIdx);
+        });
         if (!this.restoringTheoremItems) input.focus();
+        return input;
+    }
+    private getTacticOutputInsertPosition() {
+        const target = this.tacticTargetInput && this.getTheoremItemForInput(this.tacticTargetInput);
+        if (target) return target.wrapper;
+        return undefined;
+    }
+    private getTacticOutputFolder() {
+        if (this.tacticTargetInput) return undefined;
+        const scopeId = this.getActiveTacticScopeId();
+        return this.theoremItems.find((item): item is Extract<TTTheoremItem, { kind: "folder" }> =>
+            item.kind === "folder" && item.id === scopeId);
+    }
+    private getFolderAppendIndex(folder: Extract<TTTheoremItem, { kind: "folder" }>) {
+        const folderIndex = this.theoremItems.indexOf(folder);
+        return folderIndex < 0
+            ? -1
+            : Math.min(this.theoremItems.length, folderIndex + folder.length + 1);
     }
     private settlePendingTheorems() {
         const inputs = this.getInhabitatArray();
@@ -1937,7 +2344,11 @@ export class TTGui {
         }
         return true;
     }
-    async executeTactic(value: string | AST) {
+    async executeTactic(
+        value: string | AST,
+        targetInput: HTMLInputElement | null = null,
+        initialScopeFolderId?: string | null
+    ) {
         if (this.tacticBusy) return;
         // A definition immediately above may still be in the Core Worker.
         // Commit that pending validation before taking the definition snapshot
@@ -1945,6 +2356,12 @@ export class TTGui {
         this.settlePendingTheorems();
         const target = typeof value === "string" ? value : parser.stringify(value);
         const requestId = ++this.tacticRequestId;
+        this.tacticTargetInput = targetInput;
+        this.tacticScopeExplicit = initialScopeFolderId !== undefined;
+        this.tacticScopeFolderId = this.tacticScopeExplicit
+            ? initialScopeFolderId
+            : this.getDefaultTacticScope(targetInput);
+        this.renderTacticScopeOptions();
         this.mode = [target];
         this.setTacticBusy(true);
         document.getElementById("tactic-errmsg").innerText = "";
@@ -1966,6 +2383,10 @@ export class TTGui {
             document.getElementById("tactic-input").classList.add("hide");
             this.mode = null;
             this.assistSnapshot = null;
+            this.tacticTargetInput = null;
+            this.tacticScopeFolderId = null;
+            this.tacticScopeExplicit = false;
+            this.renderTacticScopeOptions();
         } finally {
             if (requestId === this.tacticRequestId) this.setTacticBusy(false);
         }
@@ -2001,9 +2422,10 @@ export class TTGui {
                 }
                 const result = await this.finishAssistProof();
                 if (requestId !== this.tacticRequestId || !(this.mode instanceof Array)) return;
-                this.updateInhabitList();
-                const inputs = this.getInhabitatArray();
-                const output = inputs[inputs.length - 1];
+                const output = this.updateInhabitList(
+                    this.getTacticOutputInsertPosition(),
+                    this.getTacticOutputFolder()
+                );
                 output.focus();
                 output.value = qedName
                     ? `${qedName}:=${result.proof}:${result.theorem}`

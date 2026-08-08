@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
     canReuseTheoremResultOnBlur,
     theoremInputIndexBeforeItem,
+    theoremValidationPositionMatches,
     TheoremValidationCoordinator
 } from "../js/tt/theorem-validation.js";
 
@@ -43,5 +44,38 @@ const promotedRun = coordinator.complete(firstRun.id);
 assert.deepEqual(promotedRun, { id: 2, startIndex: 9 }, "the newest suffix starts after the old worker call settles");
 assert.equal(coordinator.isCurrent(promotedRun.id), true);
 assert.equal(coordinator.complete(promotedRun.id), null);
+
+// A pending result must be rejected when a row is inserted before its input.
+// The original input remains connected, so this identity/position check is
+// the guard that prevents writing the result into the newly inserted slot.
+const firstInput = {};
+const pendingInput = {};
+const insertedInput = {};
+const itemIds = new Map([
+    [firstInput, "first"],
+    [pendingInput, "pending"],
+    [insertedInput, "inserted"]
+]);
+assert.equal(
+    theoremValidationPositionMatches(
+        [firstInput, pendingInput],
+        pendingInput,
+        1,
+        "pending",
+        input => itemIds.get(input) ?? null
+    ),
+    true
+);
+assert.equal(
+    theoremValidationPositionMatches(
+        [firstInput, insertedInput, pendingInput],
+        pendingInput,
+        1,
+        "pending",
+        input => itemIds.get(input) ?? null
+    ),
+    false,
+    "inserting a row before a pending theorem invalidates its old index"
+);
 
 console.log("theorem validation scheduling regression passed");

@@ -18,6 +18,21 @@ export function theoremInputIndexBeforeItem(items, itemIndex) {
     }
     return theoremIndex;
 }
+/**
+ * An async validation result may only be committed if its input is still at
+ * the position and theorem row that produced the request.  Row objects remain
+ * connected when a preceding row is inserted, so checking connectivity alone
+ * is insufficient.
+ */
+export function theoremValidationPositionMatches(inputs, input, expectedIndex, expectedItemId, getItemId) {
+    return inputs.indexOf(input) === expectedIndex && getItemId(input) === expectedItemId;
+}
+/** A cached #t preview is stale when its target or either context revision changed. */
+export function theoremPreviewNeedsRefresh(target, previousTarget, definitionRevision, previousDefinitionRevision, structureRevision, previousStructureRevision) {
+    return target !== previousTarget
+        || definitionRevision !== previousDefinitionRevision
+        || structureRevision !== previousStructureRevision;
+}
 /** A click-through with no edit can reuse its already-rendered validation result. */
 export function canReuseTheoremResultOnBlur(state) {
     return !state.programmatic

@@ -24,14 +24,26 @@ export class TTCoreSession {
 
     truncate(startIndex: number) {
         const start = Math.max(0, Math.floor(startIndex));
+        const retainedNames = new Set<string>();
+        for (let i = 0; i < start; i++) {
+            const definition = this.definitions[i];
+            if (definition) retainedNames.add(definition[0]);
+        }
+        let needsRebuild = false;
         for (let i = start; i < this.loadedThrough; i++) {
             const definition = this.definitions[i];
             if (!definition) continue;
+            if (retainedNames.has(definition[0])) needsRebuild = true;
             delete this.engine.core.state.userDefs[definition[0]];
             delete this.engine.core.state.defTypes[definition[0]];
         }
         this.definitions.length = Math.min(this.definitions.length, start);
         this.loadedThrough = Math.min(this.loadedThrough, start);
+        // A local definition may intentionally shadow an ancestor using the
+        // same short name (for example `f` in two proof folders). Removing
+        // the child must restore the retained ancestor, not leave the name
+        // absent from the persistent Worker session.
+        if (needsRebuild) this.rebuild(this.loadedThrough);
     }
 
     validate(index: number, ast: AST, context: Context = []): TTCoreCheckResult {

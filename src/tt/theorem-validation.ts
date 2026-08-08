@@ -21,6 +21,36 @@ export function theoremInputIndexBeforeItem(items: readonly OrderedTheoremItem[]
     return theoremIndex;
 }
 
+/**
+ * An async validation result may only be committed if its input is still at
+ * the position and theorem row that produced the request.  Row objects remain
+ * connected when a preceding row is inserted, so checking connectivity alone
+ * is insufficient.
+ */
+export function theoremValidationPositionMatches<T>(
+    inputs: readonly T[],
+    input: T,
+    expectedIndex: number,
+    expectedItemId: string | null,
+    getItemId: (input: T) => string | null
+) {
+    return inputs.indexOf(input) === expectedIndex && getItemId(input) === expectedItemId;
+}
+
+/** A cached #t preview is stale when its target or either context revision changed. */
+export function theoremPreviewNeedsRefresh(
+    target: string,
+    previousTarget: string,
+    definitionRevision: number,
+    previousDefinitionRevision: number,
+    structureRevision: number,
+    previousStructureRevision: number
+) {
+    return target !== previousTarget
+        || definitionRevision !== previousDefinitionRevision
+        || structureRevision !== previousStructureRevision;
+}
+
 export type TheoremBlurState = {
     programmatic: boolean;
     canReuseRenderedResult: boolean;
