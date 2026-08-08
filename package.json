@@ -1,0 +1,29 @@
+{
+  "name": "deductrium-hott-optimization",
+  "version": "2026.8.8",
+  "description": "Deductrium with an optimized worker-based HoTT/type-theory engine",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "prebuild": "node scripts/clean-build.mjs",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest": "npm run build",
+    "test": "node tests/run.mjs",
+    "prebenchmark": "npm run build",
+    "benchmark": "node tests/benchmarks/type-theory-complex.mjs",
+    "benchmark:save": "node tests/benchmarks/save-load-memory.mjs",
+    "test:tt-assist-even": "node tests/tt-assist-even.test.mjs",
+    "test:tt-definition-caches": "node tests/tt-worker-definition-caches.test.mjs",
+    "test:tt-worker-cache": "node tests/tt-worker-cache.test.mjs",
+    "test:tt-validation": "node tests/tt-validation-scheduling.test.mjs",
+    "package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

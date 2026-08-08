@@ -1,0 +1,85 @@
+name: Package Release
+
+on:
+  push:
+    tags:
+      - "hott-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (defaults to hott-v<package version>)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build release archive
+        run: npm run package
+
+      - name: Resolve release metadata
+        id: release
+        shell: pwsh
+        run: |
+          $package = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
+          $tag = "${{ inputs.tag }}".Trim()
+          if (-not $tag) {
+            $tag = if ("${{ github.ref_type }}" -eq "tag") {
+              "${{ github.ref_name }}"
+            } else {
+              "hott-v$($package.version)"
+            }
+          }
+          if ($tag -notmatch '^hott-v[0-9A-Za-z._-]+$') {
+            throw "Release tag must start with hott-v and contain only letters, digits, dot, underscore, or hyphen."
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "title=Deductrium HoTT Optimization $($package.version)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.release.outputs.tag }}
+          path: release/*.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.release.outputs.title }}
+        run: |
+          $archive = Get-ChildItem -LiteralPath release -Filter *.zip -File | Select-Object -First 1
+          if (-not $archive) { throw "Release archive was not generated." }
+
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG $archive.FullName --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $env:RELEASE_TAG $archive.FullName `
+              --repo $env:GITHUB_REPOSITORY `
+              --target $env:GITHUB_SHA `
+              --title $env:RELEASE_TITLE `
+              --generate-notes
+          }

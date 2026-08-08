@@ -12,6 +12,10 @@ export class ListDragger {
     onExecute: (src: string, dst: string) => void = () => { };
     queryAllowDrag: () => boolean = () => true;
     startY = 0;
+    private readonly mouseMoveListener = (event: MouseEvent) => this.onMove(event);
+    private readonly mouseUpListener = () => this.onUp();
+    private readonly touchMoveListener = (event: TouchEvent) => this.onTouchMove(event);
+    private readonly touchEndListener = () => this.onTouchEnd();
     attachIdxListener(dom?: HTMLElement) {
         const cb = (idx: HTMLElement) => {
             idx.onmousedown = null;
@@ -66,9 +70,18 @@ export class ListDragger {
         this.attachIdxListener();
     }
 
+    private getRowElement(element: HTMLElement) {
+        return element.closest<HTMLElement>("[data-drag-row]") ?? element;
+    }
+
+    private getRowName(element: HTMLElement) {
+        return element.dataset.dragId ?? element.innerText;
+    }
+
     startDrag(idxEl: HTMLElement, ev: MouseEvent) {
         this.moved = false;
         if (this.queryAllowDrag && !this.queryAllowDrag()) return;
+        idxEl = this.getRowElement(idxEl);
         const allChildren = Array.from(this.list.children) as HTMLElement[];
         const childIndex = allChildren.indexOf(idxEl);
         if (childIndex === -1) return;
@@ -81,12 +94,12 @@ export class ListDragger {
         }
         this.dragging = true;
         this.startY = ev.clientY;
-        this.srcName = idxEl.innerText;
+        this.srcName = this.getRowName(idxEl);
 
-        document.addEventListener('mousemove', this.onMove.bind(this));
-        document.addEventListener('mouseup', this.onUp.bind(this));
-        document.addEventListener('touchmove', this.onTouchMove.bind(this), { passive: false });
-        document.addEventListener('touchend', this.onTouchEnd.bind(this));
+        document.addEventListener('mousemove', this.mouseMoveListener);
+        document.addEventListener('mouseup', this.mouseUpListener);
+        document.addEventListener('touchmove', this.touchMoveListener, { passive: false });
+        document.addEventListener('touchend', this.touchEndListener);
     }
 
     onTouchMove(e: TouchEvent) {
@@ -102,13 +115,16 @@ export class ListDragger {
     onMove(e: MouseEvent) {
         if (!this.dragging) return;
         this.moved = true;
-        const children = Array.from(this.list.children) as HTMLElement[];
+        const children = (Array.from(this.list.children) as HTMLElement[]).filter(
+            element => !element.hasAttribute("data-drag-row") || !element.classList.contains("hide")
+        );
         const rowCount = Math.ceil(children.length / this.cols);
 
         let inserted = false;
-        this.list.querySelectorAll(".idx").forEach(e => {
+        this.list.querySelectorAll(".dragging-bottom, .dragging-top, .dragging-inside").forEach(e => {
             e.classList.remove("dragging-bottom");
             e.classList.remove("dragging-top");
+            e.classList.remove("dragging-inside");
         });
         for (let r = 0; r < rowCount; r++) {
             const firstIndex = r * this.cols;
@@ -117,33 +133,45 @@ export class ListDragger {
             const rect = firstChild.getBoundingClientRect();
             const midY = rect.top + rect.height / 2;
             if (e.clientY < midY) {
-                this.dstName = firstChild.innerText;
+                this.dstName = this.getRowName(firstChild);
                 firstChild.classList.add("dragging-top");
+                inserted = true;
+                break;
+            }
+            if (
+                firstChild.dataset.dragFolder === "true"
+                && firstChild.dataset.dragFolderOpen === "true"
+                && e.clientY <= rect.bottom
+            ) {
+                this.dstName = "inside:" + this.getRowName(firstChild);
+                firstChild.classList.add("dragging-inside");
                 inserted = true;
                 break;
             }
         }
         if (!inserted) {
             this.dstName = " ";
-            children[(rowCount - 1) * this.cols].classList.add("dragging-bottom");
+            children[(rowCount - 1) * this.cols]?.classList.add("dragging-bottom");
         }
     }
 
     onUp() {
         if (!this.dragging) return;
         this.dragging = false;
-        this.list.querySelectorAll("div").forEach(e => {
+        this.list.querySelectorAll(".dragging, .dragging-bottom, .dragging-top, .dragging-inside").forEach(e => {
             e.classList.remove("dragging-bottom");
             e.classList.remove("dragging-top");
+            e.classList.remove("dragging-inside");
             e.classList.remove("dragging");
         });
         if (this.moved) this.onExecute(this.srcName, this.dstName);
         this.moved = false;
         this.srcName = null;
-        document.removeEventListener('mousemove', this.onMove);
-        document.removeEventListener('mouseup', this.onUp);
-        document.removeEventListener('touchmove', this.onTouchMove);
-        document.removeEventListener('touchend', this.onTouchEnd);
+        this.dstName = null;
+        document.removeEventListener('mousemove', this.mouseMoveListener);
+        document.removeEventListener('mouseup', this.mouseUpListener);
+        document.removeEventListener('touchmove', this.touchMoveListener);
+        document.removeEventListener('touchend', this.touchEndListener);
 
     }
 }

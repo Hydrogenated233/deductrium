@@ -1,0 +1,19 @@
+code_nat:=ind_nat(λ_:_._)(ind_nat(λ_:_._)True(λ_:_.λ_:_.False))(λ_:_.λa:_.ind_nat(λ_:_._)False(λb:_.λ_:_.a b))
+
+code_nat_refl:=(λx:nat.ind_nat (λx:nat.code_nat x x) true (λx:nat.(λx_:code_nat x x.x_)) x):(Πx:nat,code_nat x x)
+
+encode_nat:=(λx:nat.(λy:nat.(λh:(x=y).trans (λx':nat.code_nat x x') h (code_nat_refl x)))):(Πx:nat,(Πy:nat,((x=y)→(code_nat x y))))
+
+decode_nat:=(λx:nat.ind_nat (λx:nat.(Πy:nat,((code_nat x y)→(x=y)))) (λy:nat.ind_nat (λy:nat.((code_nat 0 y)→(0=y))) (λh:code_nat 0 0.rfl) (λy:nat.(λy_:((code_nat 0 y)→(0=y)).(λh:code_nat 0 (succ y).ind_False (λx:_._) h))) y) (λx:nat.(λx_:(Πy:nat,((code_nat x y)→(x=y))).(λy:nat.ind_nat (λy:nat.((code_nat (succ x) y)→((succ x)=y))) (λh:code_nat (succ x) 0.ind_False (λx':_._) h) (λy':nat.(λy_:((code_nat (succ x) y')→((succ x)=y')).(λh:code_nat (succ x) (succ y').ap succ (x_ y' h)))) y))) x):(Πx:nat,(Πy:nat,((code_nat x y)→(x=y))))
+
+code_nat_dec:=(λx:nat.ind_nat (λx:nat.(Πy:nat,(((code_nat x y)=True)+((code_nat x y)=False)))) (λy:nat.ind_nat (λy:nat.(((code_nat 0 y)=True)+((code_nat 0 y)=False))) (inl rfl) (λy:nat.(λy_:(((code_nat 0 y)=True)+((code_nat 0 y)=False)).inr rfl)) y) (λx:nat.(λx_:(Πy:nat,(((code_nat x y)=True)+((code_nat x y)=False))).(λy:nat.ind_nat (λy:nat.(((code_nat (succ x) y)=True)+((code_nat (succ x) y)=False))) (inr rfl) (λy':nat.(λy_:(((code_nat (succ x) y')=True)+((code_nat (succ x) y')=False)).x_ y')) y))) x):(Πx:nat,(Πy:nat,(((code_nat x y)=True)+((code_nat x y)=False))))
+
+code_nat_prop:=(λx:nat.(λy:nat.(λa:(((code_nat x y)=True)+((code_nat x y)=False)).ind_Sum (λa:(((code_nat x y)=True)+((code_nat x y)=False)).isProp (code_nat x y)) (λal:((code_nat x y)=True).trans (λx':U.isProp x') (inveq al) (λx':True.(λy':True.ind_True (λy':True.(x'=y')) (ind_True (λx':True.(x'=true)) rfl x') y'))) (λar:((code_nat x y)=False).trans (λx':U.isProp x') (inveq ar) (λx':False.ind_False (λx':False.(Πy:False,(x'=y))) x')) a) (code_nat_dec x y))):(Πx:nat,(Πy:nat,isProp (code_nat x y)))
+
+en_decode_nat:=(λx:nat.(λy:nat.(λx':code_nat x y.code_nat_prop x y x' (encode_nat x y (decode_nat x y x'))))):(Πx:nat,(Πy:nat,(Πx':code_nat x y,(x'=(encode_nat x y (decode_nat x y x'))))))
+
+de_encode_nat:=(λx:nat.(λy:nat.(λx':(x=y).ind_eq x (λy':nat.(λx':(x=y').(x'=(decode_nat x y' (encode_nat x y' x'))))) (ind_nat (λx:nat.((refl x)=(decode_nat x x (code_nat_refl x)))) rfl (λx:nat.(λx_:((refl x)=(decode_nat x x (code_nat_refl x))).ap (ap succ) x_)) x) y x'))):(Πx:nat,(Πy:nat,(Πx':(x=y),(x'=(decode_nat x y (encode_nat x y x'))))))
+
+code_nat_eqv_eq:=(λx:nat.(λy:nat.pair (λf:((code_nat x y)→(x=y)).((Σg:((x=y)→(code_nat x y)),(Πx:code_nat x y,(x=(g (f x)))))×(Σh:((x=y)→(code_nat x y)),(Πx:(x=y),(x=(f (h x))))))) (decode_nat x y) ((pair (λg:((x=y)→(code_nat x y)).(Πx':code_nat x y,(x'=(g (decode_nat x y x'))))) (encode_nat x y) (en_decode_nat x y)),(pair (λh:((x=y)→(code_nat x y)).(Πx':(x=y),(x'=(decode_nat x y (h x'))))) (encode_nat x y) (de_encode_nat x y))))):(Πx:nat,(Πy:nat,((code_nat x y)≃(x=y))))
+
+set_nat:=(λx:nat.(λy:nat.trans (λx':U.isProp x') (ua (code_nat_eqv_eq x y)) (code_nat_prop x y))):(isSet nat)

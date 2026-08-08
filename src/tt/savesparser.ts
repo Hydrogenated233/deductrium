@@ -1,20 +1,16 @@
-import { TTGui } from "./gui.js";
+import { TTGui, TTTheoremSaveItem } from "./gui.js";
 
 export class SavesParser {
 
     serialize(gui: TTGui) {
-        const arrs = gui.getInhabitatArray().map(e => e.value);
-        return JSON.stringify(arrs);
+        return JSON.stringify({ version: 2, items: gui.serializeTheoremItems() });
     }
     deserialize(gui: TTGui, s: string) {
-        const arr = JSON.parse(s);
-        for (const n of Array.from(gui.inhabitList.children)) {
-            if (n.id !== "add-btn") n.remove();
-        }
-        arr.forEach(_ => gui.updateInhabitList());
-        gui.getInhabitatArray().forEach(
-            (e, idx) => { e.value = arr[idx]; }
-        );
+        const saved = JSON.parse(s);
+        const items: TTTheoremSaveItem[] = Array.isArray(saved)
+            ? saved.map(value => ({ kind: "theorem", value }))
+            : saved?.items;
+        gui.restoreTheoremItems(Array.isArray(items) ? items : []);
         // gui.updateAfterUnlock();
         // gui.getInhabitatArray()[0]?.onblur({} as any);
     }

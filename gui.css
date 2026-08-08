@@ -318,6 +318,10 @@ div.dir-val:not(.dir-info):hover {
     border-top: 2px solid orange !important;
 }
 
+.dragging-inside {
+    box-shadow: inset 0 -3px orange;
+}
+
 .macro-substep {
     color: #999;
 }
@@ -462,7 +466,7 @@ div.hintbar {
 }
 
 .inhabitat-div {
-    width: calc(100% - 32px);
+    width: calc(100% - 64px);
     display: inline-block;
 }
 
@@ -482,8 +486,65 @@ div.wrapper.error {
 }
 
 
-.inhabitat input {
-    width: calc(100% - 32px);
+.inhabitat .tt-theorem-input {
+    width: calc(100% - 64px);
+}
+
+.inhabitat .wrapper {
+    box-sizing: border-box;
+    padding-left: calc(var(--tt-folder-depth, 0) * 16px);
+}
+
+.tt-drag-handle {
+    cursor: grab;
+}
+
+.tt-folder-row {
+    display: flex;
+    align-items: center;
+    min-height: 28px;
+    gap: 4px;
+    background-color: #f0f0f0;
+    border-top: 1px solid #ccc;
+    border-bottom: 1px solid #ccc;
+}
+
+.tt-folder-title {
+    flex: 1;
+    min-width: 0;
+    font-weight: bold;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+
+.tt-folder-disable {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: small;
+    white-space: nowrap;
+}
+
+.tt-folder-disable input {
+    width: auto;
+}
+
+.tt-theorem-disabled {
+    opacity: 0.55;
+    background-color: #eee !important;
+}
+
+.tt-folder-disabled {
+    color: #777;
+}
+
+.wrapper.checking {
+    border-left: 3px solid #3c78d8;
+}
+
+#tt-theorem-controls {
+    margin-top: 0.5em;
+    margin-bottom: 1em;
 }
 
 .mediumlighted {

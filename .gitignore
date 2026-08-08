@@ -1,2 +1,10 @@
 old/*
 v2/*
+node_modules/
+npm-debug.log*
+release/
+work/
+*.log
+.env
+.DS_Store
+Thumbs.db

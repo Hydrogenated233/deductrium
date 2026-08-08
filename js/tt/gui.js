@@ -1,8 +1,14 @@
-import { TR } from "../lang.js";
-import { Assist } from "./assist.js";
+import { langMgr, TR } from "../lang.js";
 import { ASTParser, debugBoundVarId } from "./astparser.js";
 import { Core, assignContext, wrapApply, wrapVar, wrapLambda } from "./core.js";
+import { TTCoreWorkerClient } from "./core-worker-client.js";
+import { TTAssistEngine } from "./assist-engine.js";
+import { TTAssistWorkerClient } from "./assist-worker-client.js";
+import { Assist } from "./assist.js";
+import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
+import { ListDragger } from "../fs/itemdragger.js";
 import { initTypeSystem } from "./initial.js";
+import { canReuseTheoremResultOnBlur, isKnownTheoremIdentifier, theoremInputIndexBeforeItem, TheoremValidationCoordinator } from "./theorem-validation.js";
 const parser = new ASTParser;
 const constructors = new Set();
 const destructors = new Set();
@@ -27,12 +33,43 @@ export class TTGui {
     unlockedTypes;
     unlockedTactics;
     inhabitList = document.getElementById("inhabit-list");
+    theoremItems = [];
+    theoremItemSequence = 0;
+    restoringTheoremItems = false;
+    theoremDragger = new ListDragger(this.inhabitList);
     // tactic mode: tactic-begin for waiting clicking theorem
     mode = null;
     // "_" for infered, "@" for original
     inferDisplayMode = "_";
     userDefinedConsts = [];
+    /** Names of successfully checked user definitions used by AST rendering. */
+    userConstNames = new Set();
     sysDefinedConsts = [];
+    coreWorker = null;
+    assistWorker = null;
+    assistWorkerGeneration = -1;
+    assistWorkerConfigKey = "";
+    assistWorkerConfigurePromise = null;
+    assistWorkerMutations = new TTWorkerMutationQueue();
+    assistFallback = new TTAssistEngine();
+    assistOptions = {
+        disableMultipleApply: true,
+        disableDestructConds: true,
+        disableDestructEq: true
+    };
+    assistSnapshot = null;
+    assistWorkerSessionReady = false;
+    tacticBusy = false;
+    tacticRequestId = 0;
+    tacticDefinitionsRevision = -1;
+    coreWorkerGeneration = -1;
+    coreWorkerConfigKey = "";
+    coreWorkerConfigurePromise = null;
+    coreWorkerMutations = new TTWorkerMutationQueue();
+    definitionRevision = 0;
+    workerRequestId = 0;
+    theoremValidation = new TheoremValidationCoordinator();
+    gateQueryCache = new Map();
     initTypeList() {
         const expand = {};
         for (const rule of allrules) {
@@ -82,7 +119,23 @@ export class TTGui {
         }
     }
     constructor(creative, skipRendering) {
+        if (typeof Worker !== "undefined") {
+            try {
+                this.coreWorker = new TTCoreWorkerClient();
+            }
+            catch (error) {
+                console.warn("Type-theory worker unavailable", error);
+            }
+            try {
+                this.assistWorker = new TTAssistWorkerClient();
+            }
+            catch (error) {
+                console.warn("Proof-assistant worker unavailable", error);
+            }
+        }
         this.skipRendering = skipRendering;
+        this.theoremDragger.cols = 1;
+        this.theoremDragger.onExecute = (src, dst) => this.moveTheoremItem(src, dst === "+" ? " " : dst);
         this.unlockedTypes = new Set(creative ? allrules.map(r => r.id) : ["True", "False"]);
         if (!skipRendering)
             this.updateTypeList(this.unlockedTypes);
@@ -97,9 +150,11 @@ export class TTGui {
             ]);
         }
         else {
-            Assist.disableDestructConds = false;
-            Assist.disableDestructEq = false;
-            Assist.disableMultipleApply = false;
+            this.assistOptions = {
+                disableMultipleApply: false,
+                disableDestructConds: false,
+                disableDestructEq: false
+            };
             document.getElementById("displayPi-label").classList.remove("hide");
             document.getElementById("tactic-div").classList.remove("hide");
         }
@@ -108,6 +163,8 @@ export class TTGui {
         document.getElementById("add-btn").addEventListener("click", () => {
             this.updateInhabitList();
         });
+        document.getElementById("tt-add-theorem")?.addEventListener("click", () => this.updateInhabitList());
+        document.getElementById("tt-add-folder")?.addEventListener("click", () => this.addTheoremFolder());
         const input = document.getElementById("tactic-input");
         input.addEventListener("keydown", (ev) => {
             if (ev.key === "Enter" || ev.key === "Escape") {
@@ -117,38 +174,15 @@ export class TTGui {
         document.getElementById('timeSelect').addEventListener('change', function () {
             Core.timeout = Number(this.value) * 1000;
         });
-        const remove = (all) => {
-            if (this.mode.length === 1 || all) {
-                this.mode = null;
-            }
-            document.getElementById("tactic-autofill").innerHTML = "";
-            document.getElementById("tactic-hint").innerHTML = "";
-            document.getElementById("tactic-errmsg").innerText = "";
-            document.getElementById("tactic-state").innerHTML = "";
-            document.getElementById("tactic-remove").classList.add("hide");
-            document.getElementById("tactic-clear").classList.add("hide");
-            document.getElementById("copygate").classList.remove("hide");
-            input.value = "";
-            document.getElementById("tactic-input").classList.add("hide");
-            if (this.mode?.length > 1) {
-                this.mode.pop();
-                const newmode = this.mode.slice(1);
-                // input.value = parser.stringify(this.mode[0].theorem);
-                this.executeTactic(this.mode[0].theorem);
-                for (let i = 0; i < newmode.length; i++) {
-                    input.value = newmode[i];
-                    this.addTactic(i < newmode.length - 1);
-                }
-                input.value = "";
-            }
-        };
-        document.getElementById("tactic-remove").addEventListener("click", () => remove());
-        document.getElementById("tactic-clear").addEventListener("click", () => remove(true));
+        document.getElementById("tactic-remove").addEventListener("click", () => void this.removeTactic());
+        document.getElementById("tactic-clear").addEventListener("click", () => void this.removeTactic(true));
         document.getElementById("tactic-begin").addEventListener("click", () => {
             this.addTactic(false);
         });
     }
     setLastGateTarget(target) {
+        if (target === this.lastGateTarget)
+            return;
         this.lastGateTarget = target;
         document.getElementById("copygate").innerText = "";
         const btn = document.createElement("button");
@@ -161,8 +195,7 @@ export class TTGui {
         };
         document.getElementById("copygate").appendChild(this.ast2HTML("", parser.parse(target)));
     }
-    autofillTactics(assist) {
-        const allTactics = assist.autofillTactics();
+    autofillTactics(allTactics) {
         let tactics;
         if (this.unlockedTactics) {
             tactics = [];
@@ -198,12 +231,12 @@ export class TTGui {
             });
         }
     }
-    updateTacticStateDisplay(assist, statediv) {
-        if (!assist.goal.length) {
+    updateTacticStateDisplay(snapshot, statediv) {
+        if (!snapshot.goals.length) {
             this.addSpan(statediv, TR("无目标，请输入qed结束"));
         }
-        for (let count = assist.goal.length - 1; count >= 0; count--) {
-            const g = assist.goal[count];
+        for (let count = snapshot.goals.length - 1; count >= 0; count--) {
+            const g = snapshot.goals[count];
             statediv.appendChild(document.createElement("hr"));
             const goalDiv = document.createElement("div");
             const scope = g.context.map(e => ({ type: "var", name: e[0], bondVarId: e[2] }));
@@ -217,12 +250,7 @@ export class TTGui {
             }
             goalDiv.appendChild(document.createElement("br"));
             this.addSpan(goalDiv, count ? TR("目标") + (count) + TR("：") : TR("当前目标："));
-            const printType = Core.clone(g.type);
-            try {
-                this.core.checkType(printType, g.context, false);
-            }
-            catch (e) { }
-            goalDiv.appendChild(this.ast2HTML("", printType, scope, g.context, this.getInhabitatArray().length));
+            goalDiv.appendChild(this.ast2HTML("", g.type, scope, g.context, this.getInhabitatArray().length));
             if (count) {
                 goalDiv.style.opacity = "0.5";
                 goalDiv.style.backgroundColor = "#DDD";
@@ -230,6 +258,217 @@ export class TTGui {
             goalDiv.appendChild(document.createElement("br"));
             statediv.appendChild(goalDiv);
         }
+    }
+    setTacticBusy(busy) {
+        this.tacticBusy = busy;
+        // Keep the original assistant's controls interactive. The internal
+        // flag still prevents overlapping async commands.
+    }
+    /**
+     * Assist tactics are configured when a Worker session starts.  Keep the
+     * option change in TTGui as the source of truth and invalidate the active
+     * session so the next command is rebuilt with the newly unlocked tactic.
+     */
+    setAssistOption(option, value) {
+        if (this.assistOptions[option] === value)
+            return;
+        this.assistOptions = { ...this.assistOptions, [option]: value };
+        this.assistSnapshot = null;
+        this.tacticDefinitionsRevision = -1;
+        this.assistWorkerSessionReady = false;
+        this.tacticRequestId++;
+        this.setTacticBusy(false);
+    }
+    enableAssistDestructEq() {
+        this.setAssistOption("disableDestructEq", false);
+        Assist.disableDestructEq = false;
+    }
+    enableAssistDestructConds() {
+        this.setAssistOption("disableDestructConds", false);
+        Assist.disableDestructConds = false;
+    }
+    enableAssistMultipleApply() {
+        this.setAssistOption("disableMultipleApply", false);
+        Assist.disableMultipleApply = false;
+    }
+    closeTacticSession() {
+        this.tacticRequestId++;
+        this.mode = null;
+        this.assistSnapshot = null;
+        this.tacticDefinitionsRevision = -1;
+        this.assistWorkerSessionReady = false;
+        document.getElementById("tactic-autofill").innerHTML = "";
+        document.getElementById("tactic-hint").innerHTML = "";
+        document.getElementById("tactic-errmsg").innerText = "";
+        document.getElementById("tactic-state").innerHTML = "";
+        document.getElementById("tactic-remove").classList.add("hide");
+        document.getElementById("tactic-clear").classList.add("hide");
+        document.getElementById("copygate").classList.remove("hide");
+        const input = document.getElementById("tactic-input");
+        input.value = "";
+        input.classList.add("hide");
+        this.setTacticBusy(false);
+        this.assistWorker?.clear().catch(() => { });
+        this.assistFallback.clear();
+    }
+    async removeTactic(all = false) {
+        if (this.tacticBusy)
+            return;
+        if (!(this.mode instanceof Array) || this.mode.length <= 1 || all) {
+            this.closeTacticSession();
+            return;
+        }
+        this.mode.pop();
+        this.setTacticBusy(true);
+        const requestId = ++this.tacticRequestId;
+        try {
+            let snapshot;
+            if (this.tacticDefinitionsRevision === this.definitionRevision && this.assistWorker) {
+                try {
+                    snapshot = await this.assistWorker.undo(Core.timeout);
+                    this.assistWorkerSessionReady = true;
+                }
+                catch {
+                    snapshot = await this.startAssistFallback(this.mode[0], this.mode.slice(1));
+                    this.assistWorkerSessionReady = false;
+                }
+            }
+            else {
+                snapshot = await this.startAssistSession(this.mode[0], this.mode.slice(1));
+            }
+            if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
+                return;
+            this.tacticDefinitionsRevision = this.definitionRevision;
+            this.mode = [this.mode[0], ...snapshot.history];
+            this.renderAssistSnapshot(snapshot);
+        }
+        catch (error) {
+            if (requestId === this.tacticRequestId) {
+                document.getElementById("tactic-errmsg").innerText = this.formatTacticError(error);
+            }
+        }
+        finally {
+            if (requestId === this.tacticRequestId)
+                this.setTacticBusy(false);
+        }
+    }
+    async startAssistSession(target, history = []) {
+        if (this.assistWorker) {
+            try {
+                await this.prepareAssistWorker(this.getInhabitatArray().length, this.getWorkerSystemConfig());
+                await this.assistWorkerMutations.wait();
+                const snapshot = await this.assistWorker.start(target, this.assistOptions, history, Core.timeout);
+                this.assistWorkerSessionReady = true;
+                return snapshot;
+            }
+            catch (workerError) {
+                try {
+                    const snapshot = await this.startAssistFallback(target, history);
+                    this.assistWorkerSessionReady = false;
+                    return snapshot;
+                }
+                catch (fallbackError) {
+                    throw fallbackError ?? workerError;
+                }
+            }
+        }
+        return this.startAssistFallback(target, history);
+    }
+    async startAssistFallback(target, history, config = this.getWorkerConfig(this.getInhabitatArray().length)) {
+        this.assistFallback.configure(config);
+        return this.assistFallback.start(target, this.assistOptions, history);
+    }
+    async ensureAssistSessionCurrent() {
+        if (!(this.mode instanceof Array))
+            throw new Error(TR("请在定理列表中点选待证命题"));
+        const workerSessionCurrent = !this.assistWorker
+            || (this.assistWorkerSessionReady && this.assistWorkerGeneration === this.assistWorker.generation);
+        if (this.tacticDefinitionsRevision === this.definitionRevision
+            && workerSessionCurrent)
+            return this.assistSnapshot;
+        const snapshot = await this.startAssistSession(this.mode[0], this.mode.slice(1));
+        this.tacticDefinitionsRevision = this.definitionRevision;
+        this.mode = [this.mode[0], ...snapshot.history];
+        this.assistSnapshot = snapshot;
+        return snapshot;
+    }
+    async applyAssistCommand(command) {
+        await this.ensureAssistSessionCurrent();
+        if (this.assistWorker) {
+            try {
+                const snapshot = await this.assistWorker.apply(command, Core.timeout);
+                this.assistWorkerSessionReady = true;
+                return snapshot;
+            }
+            catch (workerError) {
+                if (workerError?.operationError)
+                    throw workerError;
+                try {
+                    await this.startAssistFallback(this.mode[0], this.mode.slice(1));
+                    const snapshot = this.assistFallback.apply(command);
+                    this.assistWorkerSessionReady = false;
+                    return snapshot;
+                }
+                catch (fallbackError) {
+                    throw fallbackError ?? workerError;
+                }
+            }
+        }
+        await this.startAssistFallback(this.mode[0], this.mode.slice(1));
+        return this.assistFallback.apply(command);
+    }
+    async finishAssistProof() {
+        await this.ensureAssistSessionCurrent();
+        if (this.assistWorker) {
+            try {
+                return await this.assistWorker.qed(Core.timeout);
+            }
+            catch (workerError) {
+                if (workerError?.operationError)
+                    throw workerError;
+                try {
+                    await this.startAssistFallback(this.mode[0], this.mode.slice(1));
+                    return this.assistFallback.qed();
+                }
+                catch (fallbackError) {
+                    throw fallbackError ?? workerError;
+                }
+            }
+        }
+        await this.startAssistFallback(this.mode[0], this.mode.slice(1));
+        return this.assistFallback.qed();
+    }
+    renderAssistSnapshot(snapshot) {
+        this.assistSnapshot = snapshot;
+        this.getHottDefCtxt(this.getInhabitatArray().length);
+        const hint = document.getElementById("tactic-hint");
+        const statediv = document.getElementById("tactic-state");
+        hint.innerHTML = "";
+        statediv.innerHTML = "";
+        if (this.mode instanceof Array) {
+            for (const command of this.mode.slice(1)) {
+                this.addSpan(statediv, command + " . ").className = "blocked";
+            }
+        }
+        this.updateTacticStateDisplay(snapshot, statediv);
+        this.autofillTactics(snapshot.tactics);
+        const holes = snapshot.goals.map(goal => [goal.holeName, goal.type, 0]);
+        hint.appendChild(this.ast2HTML("", {
+            type: ":",
+            name: "",
+            nodes: [snapshot.elem, snapshot.theorem]
+        }, [], holes, this.getInhabitatArray().length));
+        document.getElementById("tactic-remove").classList.remove("hide");
+        document.getElementById("tactic-clear").classList.remove("hide");
+        document.getElementById("copygate").classList.add("hide");
+        const input = document.getElementById("tactic-input");
+        input.classList.remove("hide");
+        window.scrollTo(0, document.body.clientHeight);
+        const wrapperDiv = document.getElementById("tactic-list").parentElement;
+        wrapperDiv.scrollTo(0, document.getElementById("tactic-list").clientHeight);
+    }
+    formatTacticError(error) {
+        return String(error).replace(/^Error:\s*/, "");
     }
     addSpan(parentSpan, text, parseHTML) {
         const span = document.createElement("span");
@@ -286,7 +525,7 @@ export class TTGui {
                 el.classList.add("constructors");
             else if (consts.has(astname))
                 el.classList.add("constant");
-            else if (macro.has(astname) || sysmacro.has(astname))
+            else if (this.isKnownTheoremName(astname))
                 el.classList.add("macro");
             else if (!ast.name.startsWith("U@")) {
                 el.classList.add("freeVar");
@@ -516,6 +755,26 @@ export class TTGui {
         return varnode;
     }
     mouseoutTimeout;
+    refreshUserConstNames() {
+        this.userConstNames.clear();
+        const inputs = this.getInhabitatArray();
+        for (let i = 0; i < this.userDefinedConsts.length; i++) {
+            const definition = this.userDefinedConsts[i];
+            if (!definition || this.isTheoremInputDisabled(inputs[i]))
+                continue;
+            this.userConstNames.add(definition[0]);
+        }
+    }
+    isKnownTheoremName(name) {
+        if (isKnownTheoremIdentifier(name, consts, macro, sysmacro, this.userConstNames))
+            return true;
+        // The sets above are presentation state.  The Core is the source of
+        // truth during a revalidation, so use it as a fallback when another
+        // render pass has rebuilt the presentation sets in between checks.
+        return Object.prototype.hasOwnProperty.call(this.core.state.sysTypes, name)
+            || Object.prototype.hasOwnProperty.call(this.core.state.sysDefs, name)
+            || Object.prototype.hasOwnProperty.call(this.core.state.userDefs, name);
+    }
     updateTypeList(terms) {
         const list = this.typeList;
         consts.clear();
@@ -630,13 +889,425 @@ export class TTGui {
             }
         }
     }
+    createTheoremItemId(prefix) {
+        const uuid = globalThis.crypto?.randomUUID?.();
+        return prefix + "-" + (uuid ?? ++this.theoremItemSequence);
+    }
+    createTheoremDragHandle(wrapper, id) {
+        wrapper.dataset.dragRow = "true";
+        wrapper.dataset.dragId = id;
+        const handle = document.createElement("button");
+        handle.type = "button";
+        handle.className = "inhabitat-modify tt-drag-handle idx";
+        handle.innerText = "↕";
+        handle.title = TR("拖动排序");
+        wrapper.appendChild(handle);
+        this.theoremDragger.attachIdxListener(handle);
+        return handle;
+    }
+    insertTheoremItem(item, after) {
+        if (!after) {
+            this.theoremItems.push(item);
+            return;
+        }
+        const afterId = after.dataset.dragId;
+        const afterIndex = this.theoremItems.findIndex(entry => entry.id === afterId);
+        if (afterIndex < 0) {
+            this.theoremItems.push(item);
+            return;
+        }
+        const scopes = this.scanTheoremFolderScope([afterId]).get(afterId) ?? [];
+        for (const folder of scopes)
+            folder.length++;
+        this.theoremItems.splice(afterIndex + 1, 0, item);
+    }
+    syncTheoremDomOrder() {
+        const addButton = document.getElementById("add-btn");
+        let nextSibling = addButton;
+        for (let i = this.theoremItems.length - 1; i >= 0; i--) {
+            const wrapper = this.theoremItems[i].wrapper;
+            if (wrapper.parentElement !== this.inhabitList || wrapper.nextSibling !== nextSibling) {
+                this.inhabitList.insertBefore(wrapper, nextSibling);
+            }
+            nextSibling = wrapper;
+        }
+    }
+    normalizeTheoremFolderLengths() {
+        for (let i = 0; i < this.theoremItems.length; i++) {
+            const item = this.theoremItems[i];
+            if (item.kind !== "folder")
+                continue;
+            item.length = Math.max(0, Math.min(item.length, this.theoremItems.length - i - 1));
+        }
+    }
+    scanTheoremFolderScope(targets) {
+        const targetSet = new Set(targets.filter(Boolean));
+        const stack = [];
+        const result = new Map;
+        for (let i = 0; i < this.theoremItems.length; i++) {
+            while (stack.length && stack[stack.length - 1].end < i)
+                stack.pop();
+            const item = this.theoremItems[i];
+            if (item.kind === "folder") {
+                const length = Math.max(0, Math.min(item.length, this.theoremItems.length - i - 1));
+                stack.push({ folder: item, end: i + length });
+            }
+            if (targetSet.has(item.id))
+                result.set(item.id, stack.map(entry => entry.folder));
+        }
+        return result;
+    }
+    renderTheoremStructure() {
+        if (!this.restoringTheoremItems)
+            this.normalizeTheoremFolderLengths();
+        this.syncTheoremDomOrder();
+        const stack = [];
+        for (let i = 0; i < this.theoremItems.length; i++) {
+            while (stack.length && stack[stack.length - 1].end < i)
+                stack.pop();
+            const item = this.theoremItems[i];
+            const hidden = stack.some(entry => !entry.open);
+            const disabled = stack.some(entry => entry.disabled);
+            item.wrapper.classList.toggle("hide", hidden);
+            item.wrapper.classList.toggle("tt-folder-disabled", disabled || (item.kind === "folder" && item.disabled));
+            item.wrapper.style.setProperty("--tt-folder-depth", String(stack.length));
+            if (item.kind === "theorem") {
+                item.input.dataset.ttDisabled = String(disabled);
+                item.wrapper.classList.toggle("tt-theorem-disabled", disabled);
+                continue;
+            }
+            const folderLength = Math.max(0, Math.min(item.length, this.theoremItems.length - i - 1));
+            item.title.innerText = item.name;
+            item.title.classList.toggle("dir-open", item.open);
+            item.title.classList.toggle("dir-close", !item.open);
+            item.wrapper.dataset.dragFolderOpen = String(item.open);
+            item.checkbox.checked = item.disabled;
+            stack.push({ end: i + folderLength, open: item.open, disabled: disabled || item.disabled });
+        }
+    }
+    isTheoremInputDisabled(input) {
+        return input?.dataset.ttDisabled === "true";
+    }
+    invalidateTheoremTypeTags(startIndex = 0) {
+        const inputs = this.getInhabitatArray();
+        for (let i = Math.max(0, startIndex); i < inputs.length; i++) {
+            const input = inputs[i];
+            delete input["validatedType"];
+            delete input.dataset.validatedTypeKey;
+        }
+        this.gateQueryCache.clear();
+    }
+    setTheoremTypeTag(input, ast) {
+        if (!ast?.checked)
+            return;
+        const checked = Core.clone(ast.checked, true);
+        input["validatedType"] = checked;
+        input.dataset.validatedTypeKey = parser.stringify(checked);
+        delete input["validationInvalidated"];
+        this.gateQueryCache.clear();
+    }
+    suspendTheoremTypeTag(input) {
+        input["editingValidatedType"] = input["validatedType"];
+        input["editingValidatedTypeKey"] = input.dataset.validatedTypeKey;
+        delete input["validatedType"];
+        delete input.dataset.validatedTypeKey;
+        this.gateQueryCache.clear();
+    }
+    restoreSuspendedTheoremTypeTag(input) {
+        const checked = input["editingValidatedType"];
+        const key = input["editingValidatedTypeKey"];
+        if (checked)
+            input["validatedType"] = checked;
+        if (key)
+            input.dataset.validatedTypeKey = key;
+        delete input["editingValidatedType"];
+        delete input["editingValidatedTypeKey"];
+        this.gateQueryCache.clear();
+    }
+    discardSuspendedTheoremTypeTag(input) {
+        delete input["editingValidatedType"];
+        delete input["editingValidatedTypeKey"];
+    }
+    invalidateTheoremChecks(startIndex = 0, resetWorker = false) {
+        const inputs = this.getInhabitatArray();
+        // A persistent Worker cannot cancel a synchronous check already
+        // running. Restart it before invalidating a suffix so an older chain
+        // cannot mutate the session between two rapid revalidations.
+        if (resetWorker && this.coreWorker && inputs.some(input => input.parentElement?.classList.contains("checking"))) {
+            this.resetCoreWorkerSession();
+        }
+        for (let i = Math.max(0, startIndex); i < inputs.length; i++) {
+            const input = inputs[i];
+            input["workerRequestId"] = ++this.workerRequestId;
+            input.parentElement?.classList.remove("checking");
+        }
+        this.invalidateTheoremTypeTags(startIndex);
+    }
+    revalidateTheorems(startIndex = 0) {
+        const inputs = this.getInhabitatArray();
+        const earliestChecking = inputs.findIndex(input => input.parentElement?.classList.contains("checking"));
+        const effectiveStart = Math.min(Math.max(0, startIndex), ...(earliestChecking >= 0 ? [earliestChecking] : []));
+        const run = this.theoremValidation.request(effectiveStart);
+        this.invalidateTheoremChecks(effectiveStart, true);
+        if (!run)
+            return;
+        const first = this.getInhabitatArray()[effectiveStart];
+        if (first)
+            first.onblur({ updateDefs: true, validationRunId: run.id });
+        else
+            this.completeTheoremValidation(run.id);
+    }
+    resetCoreWorkerSession() {
+        if (!this.coreWorker)
+            return;
+        this.coreWorker.reset();
+        this.coreWorkerGeneration = -1;
+        this.coreWorkerConfigKey = "";
+        this.coreWorkerConfigurePromise = null;
+    }
+    completeTheoremValidation(runId) {
+        const next = this.theoremValidation.complete(runId);
+        if (!next)
+            return;
+        this.invalidateTheoremChecks(next.startIndex, true);
+        const first = this.getInhabitatArray()[next.startIndex];
+        if (first)
+            first.onblur({ updateDefs: true, validationRunId: next.id });
+        else
+            this.completeTheoremValidation(next.id);
+    }
+    theoremInputIndexAtItem(item) {
+        return theoremInputIndexBeforeItem(this.theoremItems, this.theoremItems.indexOf(item));
+    }
+    realignUserDefinitions(previousInputs, previousDefinitions) {
+        const byInput = new Map();
+        previousInputs.forEach((input, index) => byInput.set(input, previousDefinitions[index]));
+        this.userDefinedConsts = this.getInhabitatArray().map(input => byInput.get(input) ?? null);
+        this.refreshUserConstNames();
+    }
+    moveTheoremItem(srcId, dstId) {
+        if (!srcId)
+            return;
+        // Clamp malformed folder lengths before slicing a subtree.
+        this.renderTheoremStructure();
+        const srcIndex = this.theoremItems.findIndex(item => item.id === srcId);
+        if (srcIndex < 0)
+            return;
+        const source = this.theoremItems[srcIndex];
+        const movedCount = source.kind === "folder" ? source.length + 1 : 1;
+        const samePosition = srcId === dstId;
+        const moving = this.theoremItems.slice(srcIndex, srcIndex + movedCount);
+        const insideFolderId = dstId.startsWith("inside:") ? dstId.slice("inside:".length) : null;
+        const insideFolder = insideFolderId
+            ? this.theoremItems.find(item => item.id === insideFolderId && item.kind === "folder")
+            : null;
+        if (insideFolderId && !insideFolder)
+            return;
+        if (insideFolder && !insideFolder.open)
+            return;
+        if (!samePosition && moving.some(item => item.id === (insideFolderId ?? dstId)))
+            return;
+        const dstIndex = insideFolder
+            ? this.theoremItems.indexOf(insideFolder)
+            : dstId === " " ? -1 : this.theoremItems.findIndex(item => item.id === dstId);
+        if (dstIndex < 0 && dstId !== " ")
+            return;
+        const previousDestination = dstIndex < 0
+            ? this.theoremItems[this.theoremItems.length - 1]
+            : this.theoremItems[dstIndex - 1];
+        if (!insideFolder && previousDestination && moving.some(item => item.id === previousDestination.id))
+            return;
+        const scopeTargets = [srcId, insideFolderId, previousDestination?.id].filter(Boolean);
+        const scopes = this.scanTheoremFolderScope(scopeTargets);
+        for (const folder of scopes.get(srcId) ?? []) {
+            if (folder.id !== srcId)
+                folder.length = Math.max(0, folder.length - movedCount);
+        }
+        if (insideFolder) {
+            for (const folder of scopes.get(insideFolder.id) ?? [])
+                folder.length += movedCount;
+        }
+        else {
+            for (const folder of scopes.get(previousDestination?.id) ?? []) {
+                if (!folder.open)
+                    break;
+                folder.length += movedCount;
+            }
+        }
+        const previousInputs = this.getInhabitatArray();
+        const previousDefinitions = this.userDefinedConsts.slice();
+        const movingInputs = moving
+            .filter((item) => item.kind === "theorem")
+            .map(item => item.input);
+        const previousTheoremPositions = movingInputs.map(input => previousInputs.indexOf(input)).filter(index => index >= 0);
+        if (!samePosition) {
+            this.theoremItems.splice(srcIndex, movedCount);
+            const insertIndex = insideFolder
+                ? this.theoremItems.findIndex(item => item.id === insideFolder.id) + 1
+                : dstId === " "
+                    ? this.theoremItems.length
+                    : this.theoremItems.findIndex(item => item.id === dstId);
+            this.theoremItems.splice(insertIndex < 0 ? this.theoremItems.length : insertIndex, 0, ...moving);
+            this.syncTheoremDomOrder();
+            this.realignUserDefinitions(previousInputs, previousDefinitions);
+        }
+        this.renderTheoremStructure();
+        this.onStateChange();
+        if (movingInputs.length) {
+            const nextInputs = this.getInhabitatArray();
+            const nextTheoremPositions = movingInputs.map(input => nextInputs.indexOf(input)).filter(index => index >= 0);
+            const earliestChecking = nextInputs.findIndex(input => input.parentElement?.classList.contains("checking"));
+            const revalidateFrom = Math.min(...previousTheoremPositions, ...nextTheoremPositions, ...(earliestChecking >= 0 ? [earliestChecking] : []));
+            this.revalidateTheorems(Number.isFinite(revalidateFrom) ? revalidateFrom : 0);
+        }
+    }
+    addTheoremFolder(name, saved, silent = false) {
+        if (name === undefined)
+            name = prompt(TR("文件夹名称："), TR("新文件夹"))?.trim();
+        if (!name)
+            return;
+        const id = saved?.id || this.createTheoremItemId("folder");
+        const wrapper = document.createElement("div");
+        wrapper.className = "wrapper tt-folder-row";
+        wrapper.dataset.dragFolder = "true";
+        this.createTheoremDragHandle(wrapper, id);
+        const title = document.createElement("span");
+        title.className = "tt-folder-title";
+        wrapper.appendChild(title);
+        const label = document.createElement("label");
+        label.className = "tt-folder-disable";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(TR("停用子定理")));
+        wrapper.appendChild(label);
+        const rename = document.createElement("button");
+        rename.type = "button";
+        rename.className = "inhabitat-modify";
+        rename.innerText = "✎";
+        rename.title = TR("重命名文件夹");
+        wrapper.appendChild(rename);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "inhabitat-modify danger";
+        remove.innerText = "×";
+        remove.title = TR("删除文件夹");
+        wrapper.appendChild(remove);
+        const folder = {
+            kind: "folder",
+            id,
+            name,
+            length: Number(saved?.length) || 0,
+            open: saved?.open ?? true,
+            disabled: saved?.disabled ?? false,
+            wrapper,
+            title,
+            checkbox
+        };
+        title.addEventListener("click", () => {
+            folder.open = !folder.open;
+            this.renderTheoremStructure();
+            this.onStateChange();
+        });
+        checkbox.addEventListener("change", () => {
+            const revalidateFrom = this.theoremInputIndexAtItem(folder);
+            folder.disabled = checkbox.checked;
+            this.renderTheoremStructure();
+            this.onStateChange();
+            this.revalidateTheorems(revalidateFrom);
+        });
+        rename.addEventListener("click", () => {
+            const nextName = prompt(TR("文件夹名称："), folder.name)?.trim();
+            if (!nextName)
+                return;
+            folder.name = nextName;
+            this.renderTheoremStructure();
+            this.onStateChange();
+        });
+        remove.addEventListener("click", () => {
+            if (!confirm(TR("删除文件夹后，里面的定理会移动到上一级。确定继续吗？")))
+                return;
+            const index = this.theoremItems.indexOf(folder);
+            const revalidateFrom = this.theoremInputIndexAtItem(folder);
+            const scopes = this.scanTheoremFolderScope([folder.id]).get(folder.id) ?? [];
+            for (const parent of scopes) {
+                if (parent.id !== folder.id)
+                    parent.length = Math.max(0, parent.length - 1);
+            }
+            if (index >= 0)
+                this.theoremItems.splice(index, 1);
+            wrapper.remove();
+            this.renderTheoremStructure();
+            this.onStateChange();
+            this.revalidateTheorems(revalidateFrom);
+        });
+        this.theoremItems.push(folder);
+        this.renderTheoremStructure();
+        if (!silent)
+            this.onStateChange();
+        return folder;
+    }
+    serializeTheoremItems() {
+        this.normalizeTheoremFolderLengths();
+        return this.theoremItems.map(item => item.kind === "theorem"
+            ? { kind: "theorem", value: item.input.value }
+            : {
+                kind: "folder",
+                id: item.id,
+                name: item.name,
+                length: item.length,
+                open: item.open,
+                disabled: item.disabled
+            });
+    }
+    restoreTheoremItems(items) {
+        // Drop caches belonging to the previous theorem list before replacing
+        // it. They are keyed by name and otherwise survive a save restore.
+        for (const definition of this.userDefinedConsts) {
+            if (definition)
+                delete this.core.state.defTypes[definition[0]];
+        }
+        for (const item of this.theoremItems)
+            item.wrapper.remove();
+        this.theoremItems = [];
+        this.userDefinedConsts = [];
+        this.refreshUserConstNames();
+        this.gateQueryCache.clear();
+        this.restoringTheoremItems = true;
+        try {
+            for (const item of items) {
+                if (item.kind === "folder") {
+                    this.addTheoremFolder(item.name, item, true);
+                }
+                else {
+                    this.updateInhabitList();
+                    const theorem = this.theoremItems[this.theoremItems.length - 1];
+                    if (theorem?.kind === "theorem")
+                        theorem.input.value = String(item.value ?? "");
+                }
+            }
+        }
+        finally {
+            this.restoringTheoremItems = false;
+        }
+        this.theoremItems.forEach((item, index) => {
+            if (item.kind === "folder") {
+                item.length = Math.max(0, Math.min(item.length, this.theoremItems.length - index - 1));
+            }
+        });
+        this.renderTheoremStructure();
+        this.revalidateTheorems();
+    }
     getHottDefCtxt(input) {
         macro.clear();
         for (const s of sysmacro)
             macro.add(s);
         this.core.state.userDefs = {};
+        const inputs = this.getInhabitatArray();
         if (typeof input === "number") {
             for (let i = 0; i <= input; i++) {
+                if (this.isTheoremInputDisabled(inputs[i]))
+                    continue;
                 const def = this.userDefinedConsts[i];
                 if (!def)
                     continue;
@@ -645,10 +1316,17 @@ export class TTGui {
             }
             return input;
         }
-        const arr = this.getInhabitatArray();
+        const arr = inputs;
         let currentIdx;
         for (let i = 0; i < arr.length; i++) {
             const def = this.userDefinedConsts[i];
+            if (this.isTheoremInputDisabled(arr[i])) {
+                if (arr[i] === input) {
+                    currentIdx = i;
+                    break;
+                }
+                continue;
+            }
             if (!def) {
                 if (arr[i] === input) {
                     currentIdx = i;
@@ -667,22 +1345,226 @@ export class TTGui {
         }
         return currentIdx ?? arr.indexOf(input);
     }
+    getWorkerSystemConfig() {
+        return {
+            unlockedTypes: Array.from(this.unlockedTypes),
+            disableSimpleFn: this.disableSimpleFn,
+            disableSimpleEq: this.disableSimpleEq,
+            inferDisplayMode: this.inferDisplayMode,
+            timeout: Core.timeout,
+            language: langMgr.lang,
+        };
+    }
+    getWorkerDefinitionSlots(definitionEnd) {
+        const definitions = [];
+        const inputs = this.getInhabitatArray();
+        for (let i = 0; i < definitionEnd; i++) {
+            if (this.isTheoremInputDisabled(inputs[i])) {
+                definitions.push(null);
+                continue;
+            }
+            const definition = this.userDefinedConsts[i];
+            if (!definition) {
+                definitions.push(null);
+                continue;
+            }
+            const cache = definition[2] ?? this.core.serializeDefinitionCache(definition[0]);
+            if (cache) {
+                definition[2] = cache;
+            }
+            definitions.push([definition[0], Core.clone(definition[1]), cache]);
+        }
+        return definitions;
+    }
+    getWorkerConfig(definitionEnd) {
+        const definitions = this.getWorkerDefinitionSlots(definitionEnd);
+        return {
+            ...this.getWorkerSystemConfig(),
+            userDefinitions: definitions.filter(Boolean).map(definition => [definition[0], definition[1]]),
+            userDefinitionCaches: definitions.filter(definition => definition?.[2]).map(definition => [definition[0], definition[2]])
+        };
+    }
+    prepareCoreWorker(definitionEnd) {
+        if (!this.coreWorker)
+            return Promise.reject(new Error("Type-theory worker unavailable"));
+        const config = this.getWorkerSystemConfig();
+        const configKey = JSON.stringify(config);
+        const generation = this.coreWorker.generation;
+        if (this.coreWorkerGeneration === generation && this.coreWorkerConfigKey === configKey) {
+            return this.coreWorkerMutations.wait();
+        }
+        this.coreWorkerGeneration = generation;
+        this.coreWorkerConfigKey = configKey;
+        const definitions = this.getWorkerDefinitionSlots(definitionEnd);
+        const promise = this.coreWorkerMutations.enqueue(() => this.coreWorker.configure(config, definitions));
+        this.prepareAssistWorker(definitionEnd, config, definitions).catch(() => { });
+        this.coreWorkerConfigurePromise = promise.catch(error => {
+            if (this.coreWorkerGeneration === generation && this.coreWorkerConfigKey === configKey) {
+                this.coreWorkerGeneration = -1;
+                this.coreWorkerConfigKey = "";
+                this.coreWorkerConfigurePromise = null;
+            }
+            throw error;
+        });
+        return this.coreWorkerConfigurePromise;
+    }
+    prepareAssistWorker(definitionEnd, config = this.getWorkerSystemConfig(), definitions) {
+        if (!this.assistWorker)
+            return Promise.reject(new Error("Proof-assistant worker unavailable"));
+        const configKey = JSON.stringify(config);
+        const generation = this.assistWorker.generation;
+        if (this.assistWorkerGeneration === generation && this.assistWorkerConfigKey === configKey) {
+            return this.assistWorkerMutations.wait();
+        }
+        this.assistWorkerGeneration = generation;
+        this.assistWorkerConfigKey = configKey;
+        this.assistWorkerSessionReady = false;
+        const promise = this.assistWorkerMutations.enqueue(() => this.assistWorker.configure(config, definitions ?? this.getWorkerDefinitionSlots(definitionEnd)));
+        this.assistWorkerConfigurePromise = promise.catch(error => {
+            if (this.assistWorkerGeneration === generation && this.assistWorkerConfigKey === configKey) {
+                this.assistWorkerGeneration = -1;
+                this.assistWorkerConfigKey = "";
+                this.assistWorkerConfigurePromise = null;
+            }
+            throw error;
+        });
+        return this.assistWorkerConfigurePromise;
+    }
+    invalidateWorkerDefinitions(startIndex) {
+        this.definitionRevision++;
+        if (this.coreWorker) {
+            const generation = this.coreWorker.generation;
+            this.coreWorkerMutations.enqueue(() => this.coreWorker.truncate(startIndex)).catch(() => {
+                if (this.coreWorker.generation !== generation)
+                    return;
+                this.coreWorkerGeneration = -1;
+                this.coreWorkerConfigKey = "";
+                this.coreWorkerConfigurePromise = null;
+            });
+        }
+        if (this.assistWorker && this.assistWorkerGeneration === this.assistWorker.generation && this.assistWorkerConfigKey) {
+            this.assistWorkerSessionReady = false;
+            const generation = this.assistWorker.generation;
+            this.assistWorkerMutations.enqueue(() => this.assistWorker.truncate(startIndex)).catch(() => {
+                if (this.assistWorker.generation !== generation)
+                    return;
+                this.assistWorkerGeneration = -1;
+                this.assistWorkerConfigKey = "";
+                this.assistWorkerConfigurePromise = null;
+            });
+        }
+    }
+    syncCoreWorkerDefinition(index, definition) {
+        if (!this.coreWorker || this.coreWorkerGeneration !== this.coreWorker.generation || !this.coreWorkerConfigKey)
+            return;
+        const generation = this.coreWorker.generation;
+        this.coreWorkerMutations.enqueue(() => this.coreWorker.setDefinition(index, definition)).catch(() => {
+            if (this.coreWorker.generation !== generation)
+                return;
+            this.coreWorkerGeneration = -1;
+            this.coreWorkerConfigKey = "";
+            this.coreWorkerConfigurePromise = null;
+        });
+    }
+    syncAssistWorkerDefinition(index, definition) {
+        if (!this.assistWorker || this.assistWorkerGeneration !== this.assistWorker.generation || !this.assistWorkerConfigKey)
+            return;
+        this.assistWorkerSessionReady = false;
+        const generation = this.assistWorker.generation;
+        this.assistWorkerMutations.enqueue(() => this.assistWorker.setDefinition(index, definition)).catch(() => {
+            if (this.assistWorker.generation !== generation)
+                return;
+            this.assistWorkerGeneration = -1;
+            this.assistWorkerConfigKey = "";
+            this.assistWorkerConfigurePromise = null;
+        });
+    }
     updateInhabitList(insertPos) {
         const input = document.createElement("input");
+        input.classList.add("tt-theorem-input");
         const div = document.createElement("div");
         const button = document.createElement("button");
         div.classList.add("inhabitat-div");
         div.classList.add("hide");
+        let composing = false;
+        input.addEventListener("compositionstart", () => composing = true);
+        input.addEventListener("compositionend", () => composing = false);
         input.addEventListener("keydown", ev => {
+            if (composing || ev.isComposing || ev.keyCode === 229)
+                return;
             if (ev.key === "Enter" || ev.key === "Escape") {
                 input.blur();
             }
+        });
+        input.addEventListener("focus", () => {
+            input["editing"] = true;
+            input["editingOriginalValue"] = input.value;
+        });
+        input.addEventListener("input", () => {
+            if (!input["validationInvalidated"]) {
+                const currentIdx = this.getInhabitatArray().indexOf(input);
+                if (currentIdx >= 0)
+                    this.invalidateTheoremChecks(currentIdx);
+                input["validationInvalidated"] = true;
+            }
+            const originalValue = input["editingOriginalValue"];
+            if (originalValue?.includes(":=") || input.value.includes(":="))
+                input["needUpdate"] = true;
+            input["editingCanReuseRenderedResult"] = false;
+            this.onStateChange();
         });
         // updateDefs: true means update all inputs after it,
         // otherwise, update all inputs iff ast is xx := xxxx
         // todo: when remove a ":=", must be updated, so input must record value before edited
         // todo: left btn is to drag order(click: add new line after it), if trim ast str is empty, then remove it aotomatically
         input.onblur = ev => {
+            const programmatic = !(ev instanceof FocusEvent);
+            let validationRunId = typeof ev["validationRunId"] === "number" ? ev["validationRunId"] : null;
+            if (programmatic && validationRunId !== null && !this.theoremValidation.isCurrent(validationRunId)) {
+                this.completeTheoremValidation(validationRunId);
+                return;
+            }
+            if (programmatic && input["editing"]) {
+                input["pendingRevalidation"] = true;
+                if (validationRunId !== null)
+                    this.completeTheoremValidation(validationRunId);
+                return;
+            }
+            if (!programmatic)
+                input["editing"] = false;
+            if (!programmatic && input["pendingRevalidation"]) {
+                ev["updateDefs"] = true;
+                delete input["pendingRevalidation"];
+            }
+            if (!programmatic && validationRunId === null && input["validationInvalidated"] && this.theoremValidation.hasActiveRun) {
+                const currentIdx = this.getInhabitatArray().indexOf(input);
+                const queuedRun = this.theoremValidation.request(currentIdx);
+                if (!queuedRun) {
+                    input["pendingRevalidation"] = true;
+                    return;
+                }
+                validationRunId = queuedRun.id;
+                ev["validationRunId"] = validationRunId;
+            }
+            if (canReuseTheoremResultOnBlur({
+                programmatic,
+                canReuseRenderedResult: !!input["editingCanReuseRenderedResult"],
+                originalValue: input["editingOriginalValue"],
+                currentValue: input.value,
+                validationInvalidated: !!input["validationInvalidated"],
+                updateDefinitions: !!ev["updateDefs"] || !!input["needUpdate"]
+            })) {
+                delete input["editingOriginalValue"];
+                delete input["editingCanReuseRenderedResult"];
+                delete input["needUpdate"];
+                this.restoreSuspendedTheoremTypeTag(input);
+                input.classList.add("hide");
+                div.classList.remove("hide");
+                return;
+            }
+            delete input["editingOriginalValue"];
+            delete input["editingCanReuseRenderedResult"];
+            this.discardSuspendedTheoremTypeTag(input);
             if (Core.timeoutOccured) {
                 document.getElementById("timeout").classList.remove("hide");
             }
@@ -691,8 +1573,29 @@ export class TTGui {
             delete input["needUpdate"];
             this.onStateChange();
             const currentIdx = this.getHottDefCtxt(input);
+            if (ev["updateDefs"])
+                this.invalidateWorkerDefinitions(currentIdx);
+            this.invalidateTheoremTypeTags(currentIdx);
+            input["validationInvalidated"] = true;
             const inputsarr = this.getInhabitatArray();
             const nextInput = inputsarr[currentIdx + 1];
+            const continueValidation = (shouldContinue) => {
+                if (validationRunId !== null && !this.theoremValidation.isCurrent(validationRunId)) {
+                    this.completeTheoremValidation(validationRunId);
+                    return;
+                }
+                if (shouldContinue && nextInput?.isConnected) {
+                    const nextEvent = { updateDefs: true };
+                    if (validationRunId !== null)
+                        nextEvent.validationRunId = validationRunId;
+                    nextInput.onblur(nextEvent);
+                }
+                else if (validationRunId !== null) {
+                    this.completeTheoremValidation(validationRunId);
+                }
+            };
+            const requestId = ++this.workerRequestId;
+            input["workerRequestId"] = requestId;
             this.core.state.disableSimpleFn = this.disableSimpleFn;
             this.core.state.disableSimpleEq = this.disableSimpleEq;
             wrapper.classList.remove("error");
@@ -700,17 +1603,32 @@ export class TTGui {
             if (!input.value.trim()) {
                 const current = this.getInhabitatArray().indexOf(input);
                 const [removed] = this.userDefinedConsts.splice(current, 1);
+                const itemIndex = this.theoremItems.findIndex(item => item.kind === "theorem" && item.input === input);
+                if (itemIndex >= 0) {
+                    const item = this.theoremItems[itemIndex];
+                    const scopes = this.scanTheoremFolderScope([item.id]).get(item.id) ?? [];
+                    for (const folder of scopes)
+                        folder.length = Math.max(0, folder.length - 1);
+                    this.theoremItems.splice(itemIndex, 1);
+                }
+                this.refreshUserConstNames();
                 try {
                     wrapper.remove();
                 }
                 catch (e) { }
                 if (removed)
                     macro.delete(removed[0]);
-                if (nextInput && (removed || ev["updateDefs"]))
-                    nextInput.onblur({ updateDefs: true });
+                this.renderTheoremStructure();
+                continueValidation(!!nextInput && (!!removed || ev["updateDefs"]));
                 return;
             }
             this.userDefinedConsts[currentIdx] = null;
+            this.refreshUserConstNames();
+            if (this.isTheoremInputDisabled(input)) {
+                wrapper.classList.remove("error", "infering", "checking");
+                continueValidation(!!nextInput && !!ev["updateDefs"]);
+                return;
+            }
             let ast;
             let parseError = "";
             let error = "";
@@ -722,9 +1640,7 @@ export class TTGui {
                 wrapper.classList.add("error");
             }
             if (!ast && !parseError) {
-                if (nextInput && ev["updateDefs"]) {
-                    nextInput.onblur({ updateDefs: true });
-                }
+                continueValidation(!!nextInput && !!ev["updateDefs"]);
                 return false;
             }
             div.classList.remove("hide");
@@ -751,7 +1667,7 @@ export class TTGui {
                         if (!context.find(e => e[0] === ast.name)) {
                             // if this is a constant, check its value recursively
                             const pos = this.userDefinedConsts.findIndex(e => e && e[0] === ast.name);
-                            if (pos >= 0 && inputsarr[pos].parentElement.classList.contains("infering")) {
+                            if (pos >= 0 && inputsarr[pos]?.parentElement?.classList.contains("infering")) {
                                 expandConsts.add(ast.name);
                             }
                         }
@@ -786,93 +1702,165 @@ export class TTGui {
                     expandConsts = new Set;
                 }
             };
-            if (ast) {
-                try {
-                    if (ast.type === ":=") {
-                        if (ast.nodes[0].type !== "var") {
-                            throw TR(":=符号左侧仅允许出现自定义常量");
+            const clearBondId = (value) => {
+                value.bondVarId = null;
+                if (value.nodes)
+                    for (const node of value.nodes)
+                        clearBondId(node);
+                if (value.checked)
+                    clearBondId(value.checked);
+                return value;
+            };
+            const finish = (checkedAst, validationError = "", filledDefinition, definitionCache, workerCommitted = false) => {
+                if (validationRunId !== null && !this.theoremValidation.isCurrent(validationRunId)) {
+                    this.completeTheoremValidation(validationRunId);
+                    return;
+                }
+                if (input["workerRequestId"] !== requestId || !input.isConnected) {
+                    if (validationRunId !== null)
+                        this.completeTheoremValidation(validationRunId);
+                    return;
+                }
+                if (checkedAst)
+                    ast = checkedAst;
+                error = validationError;
+                wrapper.classList.remove("checking");
+                if (Core.timeoutOccured)
+                    document.getElementById("timeout").classList.remove("hide");
+                if (ast && !error) {
+                    try {
+                        if (ast.type === ":=") {
+                            const defname = ast.nodes[0].name;
+                            const defContent = ast.nodes[1];
+                            if (!filledDefinition)
+                                throw TR("类型检查未返回定义结果");
+                            const filledAst = clearBondId(Core.clone(filledDefinition));
+                            let storedDefinition;
+                            if (defContent.type === ":") {
+                                storedDefinition = this.core.desugar(Core.clone(filledAst.nodes[0]), true);
+                            }
+                            else {
+                                storedDefinition = this.core.desugar(Core.clone(filledAst), true);
+                            }
+                            if (definitionCache)
+                                this.core.restoreDefinitionCache(defname, definitionCache);
+                            const storedCache = definitionCache
+                                ?? (workerCommitted ? undefined : this.core.serializeDefinitionCache(defname));
+                            this.userDefinedConsts[currentIdx] = [defname, storedDefinition, storedCache];
+                            this.refreshUserConstNames();
+                            if (this.puzzleDefs.has(defname) && !this.queryDefPuzzle(defname)) {
+                                delete this.userDefinedConsts[currentIdx];
+                                this.refreshUserConstNames();
+                                delete this.core.state.defTypes[defname];
+                                this.invalidateWorkerDefinitions(currentIdx);
+                                throw TR("该名称的常量需满足游戏中某个题目的要求");
+                            }
+                            if (!workerCommitted) {
+                                this.syncCoreWorkerDefinition(currentIdx, [defname, storedDefinition, storedCache]);
+                            }
+                            this.syncAssistWorkerDefinition(currentIdx, [defname, storedDefinition, storedCache]);
+                            macro.add(defname);
                         }
+                        checkInfer(ast);
+                        if (ast.type === ":=" && ast.nodes[1].type === ":")
+                            checkInfer(ast.nodes[1].nodes[1]);
+                    }
+                    catch (e) {
+                        error += e;
+                        wrapper.classList.add("error");
+                    }
+                }
+                wrapper.classList.toggle("error", !!error || !!parseError);
+                if (ast && !error && !parseError && !wrapper.classList.contains("infering")) {
+                    this.setTheoremTypeTag(input, ast);
+                }
+                const newDom = parseError ? this.addSpan(div, input.value + " - " + parseError) : this.ast2HTML("", ast, [], [], currentIdx);
+                div.appendChild(newDom);
+                if (ast && error)
+                    this.addSpan(div, " - " + error);
+                if (ast && !error && ast.type[0] != ":") {
+                    this.addSpan(div, " &nbsp; : &nbsp; ", true);
+                    div.appendChild(this.ast2HTML("", ast.checked, [], [], currentIdx));
+                }
+                continueValidation(!!nextInput && (ast?.type === ":=" || !!ev["updateDefs"]));
+            };
+            const validateSynchronously = () => {
+                try {
+                    let filledDefinition;
+                    if (ast.type === ":=") {
+                        if (ast.nodes[0].type !== "var")
+                            throw TR(":=符号左侧仅允许出现自定义常量");
                         const defname = ast.nodes[0].name;
                         if (this.core.checkConst(defname, []))
                             throw defname + TR("的定义重复");
                         if (reservedConsts.has(defname))
                             throw defname + TR("由系统保留");
                         this.core.checkType(ast, [], false);
-                        const defContent = ast.nodes[1];
-                        let filledAst = this.core.registConstType(defname, defContent);
-                        const clearBondId = (ast) => {
-                            ast.bondVarId = null;
-                            if (ast.nodes) {
-                                for (const n of ast.nodes)
-                                    clearBondId(n);
-                            }
-                            return ast;
-                        };
-                        filledAst = clearBondId(Core.clone(filledAst));
-                        if (defContent.type === ":") {
-                            this.userDefinedConsts[currentIdx] = [defname, this.core.desugar(Core.clone(filledAst.nodes[0]), true)];
-                        }
-                        else {
-                            this.userDefinedConsts[currentIdx] = [defname, this.core.desugar(Core.clone(filledAst), true)];
-                        }
-                        if (this.puzzleDefs.has(defname)) {
-                            if (!this.queryDefPuzzle(defname)) {
-                                delete this.userDefinedConsts[currentIdx];
-                                throw TR("该名称的常量需满足游戏中某个题目的要求");
-                            }
-                        }
-                        macro.add(defname);
+                        filledDefinition = this.core.registConstType(defname, ast.nodes[1]);
                     }
                     else {
                         this.core.checkType(ast, [], false);
                     }
-                    checkInfer(ast);
-                    if (ast.type === ":=" && ast.nodes[1].type === ":") {
-                        checkInfer(ast.nodes[1].nodes[1]);
-                        const check = (ast) => {
-                            if (ast.type === "var" && ast.name[0] === "?" || ast.name === "_") {
-                                return (ast.checked && ast.checked.type === ":" && check(ast.checked.nodes[0]));
-                            }
-                            if (!ast.nodes?.length)
-                                return true;
-                            for (const n of ast.nodes) {
-                                if (!check(n))
-                                    return false;
-                            }
-                            return true;
-                        };
-                        if (!check(ast.nodes[1].nodes[0]))
-                            wrapper.classList.add("infering");
-                    }
-                    ;
+                    finish(ast, "", filledDefinition);
                 }
                 catch (e) {
-                    error += e;
-                    wrapper.classList.add("error");
+                    finish(ast, String(e));
+                }
+            };
+            if (!ast) {
+                finish(ast, parseError);
+                return;
+            }
+            if (ast.type === ":=") {
+                try {
+                    if (ast.nodes[0].type !== "var")
+                        throw TR(":=符号左侧仅允许出现自定义常量");
+                    const defname = ast.nodes[0].name;
+                    if (this.core.checkConst(defname, []))
+                        throw defname + TR("的定义重复");
+                    if (reservedConsts.has(defname))
+                        throw defname + TR("由系统保留");
+                }
+                catch (e) {
+                    finish(ast, String(e));
+                    return;
                 }
             }
-            const newDom = parseError ? this.addSpan(div, input.value + " - " + parseError) : this.ast2HTML("", ast, [], [], currentIdx);
-            div.appendChild(newDom);
-            if (ast && error) {
-                this.addSpan(div, " - " + error);
+            if (!this.coreWorker || ev["forceSync"]) {
+                validateSynchronously();
+                return;
             }
-            if (ast && !error) {
-                if (ast.type[0] != ":") {
-                    this.addSpan(div, " &nbsp; : &nbsp; ", true);
-                    div.appendChild(this.ast2HTML("", ast.checked, [], [], currentIdx));
+            const inputValue = input.value;
+            wrapper.classList.add("checking");
+            this.prepareCoreWorker(currentIdx).then(() => this.coreWorker.validate(currentIdx, Core.clone(ast, true), [], Core.timeout)).then(result => {
+                if (input["workerRequestId"] !== requestId || input.value !== inputValue || !input.isConnected) {
+                    if (validationRunId !== null)
+                        this.completeTheoremValidation(validationRunId);
+                    return;
                 }
-            }
-            if (nextInput && (ast?.type === ":=" || ev["updateDefs"])) {
-                nextInput.onblur({ updateDefs: true });
-            }
+                if (result.timeout)
+                    document.getElementById("timeout").classList.remove("hide");
+                if (result.ok)
+                    finish(result.ast, "", result.filledDefinition, result.definitionCache, true);
+                else
+                    finish(ast, result.error);
+            }).catch(() => {
+                if (input["workerRequestId"] !== requestId || input.value !== inputValue || !input.isConnected) {
+                    if (validationRunId !== null)
+                        this.completeTheoremValidation(validationRunId);
+                    return;
+                }
+                validateSynchronously();
+            });
         };
         div.addEventListener("click", ev => {
-            if (this.mode === "tactic-begin") {
+            if (this.mode === "tactic-begin" && !this.isTheoremInputDisabled(input)) {
                 this.executeTactic(input.value);
             }
             else {
+                input["editingCanReuseRenderedResult"] = true;
+                this.suspendTheoremTypeTag(input);
                 input.classList.remove("hide");
-                input["needUpdate"] = input.value.includes(":=");
                 input.focus();
                 div.classList.add("hide");
             }
@@ -881,63 +1869,82 @@ export class TTGui {
         button.innerText = "+";
         const wrapper = document.createElement("div");
         wrapper.classList.add("wrapper");
-        this.inhabitList.insertBefore(wrapper, insertPos ?? document.getElementById("add-btn"));
+        const id = this.createTheoremItemId("theorem");
+        const previousInputs = this.getInhabitatArray();
+        const previousDefinitions = this.userDefinedConsts.slice();
+        this.createTheoremDragHandle(wrapper, id);
         wrapper.appendChild(button);
         wrapper.appendChild(input);
         wrapper.appendChild(div);
+        this.insertTheoremItem({ kind: "theorem", id, wrapper, input }, insertPos);
+        this.syncTheoremDomOrder();
+        this.realignUserDefinitions(previousInputs, previousDefinitions);
+        this.renderTheoremStructure();
         button.addEventListener("click", () => {
             this.updateInhabitList(wrapper);
         });
-        input.focus();
+        if (!this.restoringTheoremItems)
+            input.focus();
+    }
+    settlePendingTheorems() {
+        const inputs = this.getInhabitatArray();
+        if (!inputs.some(input => input.parentElement?.classList.contains("checking")))
+            return;
+        const first = inputs.find(input => !this.isTheoremInputDisabled(input));
+        if (first)
+            first.onblur({ forceSync: true, updateDefs: true });
     }
     // find whether user has inhabitat of given type
     queryType(typeStr) {
-        this.getHottDefCtxt(this.getInhabitatArray().length);
-        const ref = parser.parse(typeStr);
-        for (const e of this.getInhabitatArray()) {
-            if (!e.classList.contains("hide")) {
-                e.onblur({});
-            }
-            if (e.parentElement.classList.contains("error") || e.parentElement.classList.contains("infering"))
+        if (this.gateQueryCache.has(typeStr))
+            return this.gateQueryCache.get(typeStr);
+        const inputs = this.getInhabitatArray();
+        let ref;
+        try {
+            ref = parser.parse(typeStr);
+        }
+        catch (error) {
+            this.gateQueryCache.set(typeStr, false);
+            return false;
+        }
+        const refKey = parser.stringify(ref);
+        const candidates = [];
+        for (const e of inputs) {
+            if (this.isTheoremInputDisabled(e))
                 continue;
-            let ast;
+            const wrapper = e.parentElement;
+            if (!wrapper || wrapper.classList.contains("error") || wrapper.classList.contains("infering") || wrapper.classList.contains("checking"))
+                continue;
+            const checked = e["validatedType"];
+            if (!checked)
+                continue;
+            if (e.dataset.validatedTypeKey === refKey) {
+                this.gateQueryCache.set(typeStr, true);
+                return true;
+            }
+            candidates.push(checked);
+        }
+        if (candidates.length) {
+            this.getHottDefCtxt(inputs.length);
+            this.core.state.disableSimpleFn = this.disableSimpleFn;
+            this.core.state.disableSimpleEq = this.disableSimpleEq;
+        }
+        for (const checked of candidates) {
             try {
-                ast = parser.parse(e.value);
-            }
-            catch (e) {
-                continue;
-            }
-            if (!ast)
-                continue;
-            try {
-                if (ast.type === ":") {
-                    if (this.core.checkType(Core.clone({
-                        name: "", type: "===", nodes: [ast.nodes[1], ref]
-                    }), [], true) && (!Array.from(Core.getAllVars(ast.nodes[1])).find(e => e === "_" || e.startsWith("?")) || this.core.checkType(Core.clone({
-                        name: "", type: ":", nodes: [ast.nodes[0], ref]
-                    }), [], true)))
-                        return true;
-                }
-                else if (ast.type === ":=") {
-                    if (this.core.checkType(Core.clone({
-                        name: "", type: ":", nodes: [ast.nodes[0], ref]
-                    }), [], true))
-                        return true;
-                }
-                else {
-                    if (this.core.checkType(Core.clone({
-                        name: "", type: ":", nodes: [ast, ref]
-                    }), [], true))
-                        return true;
+                if (this.core.equal(Core.clone(checked, true), Core.clone(ref, true), [])) {
+                    this.gateQueryCache.set(typeStr, true);
+                    return true;
                 }
             }
             catch (e) {
                 continue;
             }
         }
+        this.gateQueryCache.set(typeStr, false);
         return false;
     }
     queryDefPuzzle(name) {
+        this.settlePendingTheorems();
         this.getHottDefCtxt(this.getInhabitatArray().length);
         const def = this.core.state.userDefs[name];
         if (!def)
@@ -1083,43 +2090,47 @@ export class TTGui {
         }
         return true;
     }
-    executeTactic(value) {
+    async executeTactic(value) {
+        if (this.tacticBusy)
+            return;
+        // A definition immediately above may still be in the Core Worker.
+        // Commit that pending validation before taking the definition snapshot
+        // used by the proof-assistant Worker.
+        this.settlePendingTheorems();
+        const target = typeof value === "string" ? value : parser.stringify(value);
+        const requestId = ++this.tacticRequestId;
+        this.mode = [target];
+        this.setTacticBusy(true);
+        document.getElementById("tactic-errmsg").innerText = "";
         try {
-            this.getHottDefCtxt(this.getInhabitatArray().length);
-            const ast = typeof value === "string" ? parser.parse(value) : value;
-            if (!ast)
-                throw TR("空表达式");
-            if (ast.type === "===")
-                throw TR("不是命题类型");
-            if (ast.type === ":=")
-                throw TR("不是命题类型");
-            if (ast.type === ":")
-                throw TR("已断言该类型有值");
-            const type = this.core.checkType(ast, [], false);
-            if (type.type !== "apply" || type.nodes[0].name !== "U")
-                throw TR("不是命题类型");
-            const assist = new Assist(this.core, value);
-            this.mode = [assist];
-            this.autofillTactics(assist);
-            document.getElementById("tactic-remove").classList.remove("hide");
-            document.getElementById("tactic-clear").classList.remove("hide");
-            document.getElementById("copygate").classList.add("hide");
-            document.getElementById("tactic-hint").innerText = "";
-            const theorem = Core.clone(assist.theorem);
-            this.core.checkType(theorem, [], false);
-            document.getElementById("tactic-hint").appendChild(this.ast2HTML("", { type: ":", name: "", nodes: [assist.elem, theorem] }, [], assist.goal.map(g => [g.ast.name, g.type, 0]), this.getInhabitatArray().length));
-            document.getElementById("tactic-input").classList.remove("hide");
-            document.getElementById("tactic-input").focus();
-            this.updateTacticStateDisplay(assist, document.getElementById("tactic-state"));
-            window.scrollTo(0, 1e5);
+            const snapshot = await this.startAssistSession(target);
+            if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
+                return;
+            this.tacticDefinitionsRevision = this.definitionRevision;
+            this.mode = [target, ...snapshot.history];
+            this.renderAssistSnapshot(snapshot);
+            const input = document.getElementById("tactic-input");
+            input.value = "";
+            input.focus();
         }
-        catch (e) {
-            document.getElementById("tactic-hint").innerText = TR("命题格式有误：") + e;
+        catch (error) {
+            if (requestId !== this.tacticRequestId)
+                return;
+            document.getElementById("tactic-hint").innerText = TR("命题格式有误：") + this.formatTacticError(error);
+            document.getElementById("tactic-remove").classList.add("hide");
+            document.getElementById("tactic-clear").classList.add("hide");
+            document.getElementById("copygate").classList.remove("hide");
+            document.getElementById("tactic-input").classList.add("hide");
             this.mode = null;
+            this.assistSnapshot = null;
+        }
+        finally {
+            if (requestId === this.tacticRequestId)
+                this.setTacticBusy(false);
         }
         document.getElementById("tactic-list").parentElement.scrollTo(0, 1e8);
     }
-    addTactic(noCheck) {
+    async addTactic(_noCheck) {
         const input = document.getElementById("tactic-input");
         const hint = document.getElementById("tactic-hint");
         if (!this.mode) {
@@ -1127,84 +2138,70 @@ export class TTGui {
             this.mode = "tactic-begin";
             document.getElementById("tactic-clear").classList.add("hide");
             document.getElementById("copygate").classList.remove("hide");
+            return;
         }
-        if (this.mode instanceof Array) {
-            const statediv = document.getElementById("tactic-state");
-            const val = input.value.trim();
-            const cmdPosPtr = val.indexOf(" ");
-            const cmd = cmdPosPtr === -1 ? val : val.slice(0, cmdPosPtr);
-            const param = cmdPosPtr === -1 ? null : val.slice(cmdPosPtr);
-            let assist = this.mode[0];
-            this.getHottDefCtxt(this.getInhabitatArray().length);
-            document.getElementById("tactic-errmsg").innerText = "";
-            while (hint.firstChild)
-                hint.removeChild(hint.firstChild);
-            try {
-                if (cmd === "qed") {
-                    assist.qed();
-                    this.updateInhabitList();
-                    const output = this.inhabitList.querySelector(".wrapper:last-of-type input");
-                    output.focus();
-                    output.value = parser.stringify(assist.elem) + ":" + parser.stringify(assist.theorem);
-                    output.blur();
-                    input.classList.add("hide");
-                    document.getElementById("tactic-remove").classList.add("hide");
-                    document.getElementById("tactic-clear").classList.add("hide");
-                    document.getElementById("copygate").classList.remove("hide");
-                    this.mode = null;
-                    hint.innerHTML = "";
-                    input.value = "";
-                    statediv.innerHTML = "";
-                    document.getElementById("tactic-autofill").innerHTML = "";
-                    return;
-                }
-                else if ((!this.unlockedTactics || this.unlockedTactics.has(cmd)) && assist[cmd])
-                    assist[cmd](param);
-                else {
-                    throw TR("未知的证明策略");
-                }
-                // assist.markTargets();
-                hint.innerText = "";
-                this.mode.push(input.value);
-                input.value = "";
-                if (noCheck)
-                    return;
-                input.focus();
-                statediv.innerHTML = "";
-                for (const m of this.mode) {
-                    if (typeof m === "string") {
-                        this.addSpan(statediv, m + " . ").className = "blocked";
+        if (!(this.mode instanceof Array) || this.tacticBusy)
+            return;
+        const value = input.value.trim();
+        const commandEnd = value.indexOf(" ");
+        const command = commandEnd === -1 ? value : value.slice(0, commandEnd);
+        const parameter = commandEnd === -1 ? null : value.slice(commandEnd);
+        const requestId = ++this.tacticRequestId;
+        this.setTacticBusy(true);
+        document.getElementById("tactic-errmsg").innerText = "";
+        try {
+            if (command === "qed") {
+                const qedName = parameter?.trim();
+                if (qedName) {
+                    const nameAst = parser.parse(qedName);
+                    if (nameAst?.type !== "var" || nameAst.name !== qedName) {
+                        throw new Error(TR("qed命名参数必须是单个常量名"));
                     }
                 }
-                this.updateTacticStateDisplay(assist, statediv);
-                this.autofillTactics(assist);
+                const result = await this.finishAssistProof();
+                if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
+                    return;
+                this.updateInhabitList();
+                const inputs = this.getInhabitatArray();
+                const output = inputs[inputs.length - 1];
+                output.focus();
+                output.value = qedName
+                    ? `${qedName}:=${result.proof}:${result.theorem}`
+                    : `${result.proof}:${result.theorem}`;
+                this.closeTacticSession();
+                output.blur();
+                return;
             }
-            catch (e) {
-                if (typeof e === "object") {
-                    e = TR("当前策略因未知表达式错误执行失败");
-                }
-                document.getElementById("tactic-errmsg").innerText = e;
+            if (this.unlockedTactics && !this.unlockedTactics.has(command)) {
+                throw new Error(TR("未知的证明策略"));
             }
-            let astShow;
-            try {
-                astShow = { type: ":", name: "", nodes: [assist.elem, Core.clone(assist.theorem, true)] };
-                this.core.checkType(astShow.nodes[1], [], false);
-                // this.core.checkType(astShow, [], false);
+            const target = this.mode[0];
+            const previousHistory = this.mode.slice(1);
+            let snapshot = await this.applyAssistCommand(value);
+            if (this.tacticDefinitionsRevision !== this.definitionRevision) {
+                snapshot = await this.startAssistSession(target, [...previousHistory, value]);
+                this.tacticDefinitionsRevision = this.definitionRevision;
             }
-            catch (e) {
-                document.getElementById("tactic-errmsg").innerText = e;
+            if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
+                return;
+            this.mode = [target, ...snapshot.history];
+            input.value = "";
+            this.renderAssistSnapshot(snapshot);
+            input.focus();
+        }
+        catch (error) {
+            if (requestId === this.tacticRequestId) {
+                document.getElementById("tactic-errmsg").innerText = this.formatTacticError(error);
+                input.focus();
             }
-            assist.markTargets();
-            hint.appendChild(this.ast2HTML("", astShow, [], assist.goal.map(g => [g.ast.name, g.type, 0]), this.getInhabitatArray().length));
-            document.getElementById("tactic-clear").classList.remove("hide");
-            document.getElementById("copygate").classList.add("hide");
-            window.scrollTo(0, document.body.clientHeight);
-            const wrapperDiv = document.getElementById("tactic-list").parentElement;
-            wrapperDiv.scrollTo(0, document.getElementById("tactic-list").clientHeight);
+        }
+        finally {
+            if (requestId === this.tacticRequestId)
+                this.setTacticBusy(false);
         }
     }
     getInhabitatArray() {
-        return Array.from(document.querySelectorAll(".inhabitat .wrapper input"));
+        return Array.from(document.querySelectorAll(".inhabitat .tt-theorem-input"));
     }
     unlock(str, update) {
         this.unlockedTypes.add(str);

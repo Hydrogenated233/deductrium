@@ -11,6 +11,10 @@ export class ListDragger {
     onExecute = () => { };
     queryAllowDrag = () => true;
     startY = 0;
+    mouseMoveListener = (event) => this.onMove(event);
+    mouseUpListener = () => this.onUp();
+    touchMoveListener = (event) => this.onTouchMove(event);
+    touchEndListener = () => this.onTouchEnd();
     attachIdxListener(dom) {
         const cb = (idx) => {
             idx.onmousedown = null;
@@ -62,10 +66,17 @@ export class ListDragger {
     update() {
         this.attachIdxListener();
     }
+    getRowElement(element) {
+        return element.closest("[data-drag-row]") ?? element;
+    }
+    getRowName(element) {
+        return element.dataset.dragId ?? element.innerText;
+    }
     startDrag(idxEl, ev) {
         this.moved = false;
         if (this.queryAllowDrag && !this.queryAllowDrag())
             return;
+        idxEl = this.getRowElement(idxEl);
         const allChildren = Array.from(this.list.children);
         const childIndex = allChildren.indexOf(idxEl);
         if (childIndex === -1)
@@ -79,11 +90,11 @@ export class ListDragger {
         }
         this.dragging = true;
         this.startY = ev.clientY;
-        this.srcName = idxEl.innerText;
-        document.addEventListener('mousemove', this.onMove.bind(this));
-        document.addEventListener('mouseup', this.onUp.bind(this));
-        document.addEventListener('touchmove', this.onTouchMove.bind(this), { passive: false });
-        document.addEventListener('touchend', this.onTouchEnd.bind(this));
+        this.srcName = this.getRowName(idxEl);
+        document.addEventListener('mousemove', this.mouseMoveListener);
+        document.addEventListener('mouseup', this.mouseUpListener);
+        document.addEventListener('touchmove', this.touchMoveListener, { passive: false });
+        document.addEventListener('touchend', this.touchEndListener);
     }
     onTouchMove(e) {
         if (!this.dragging)
@@ -99,12 +110,13 @@ export class ListDragger {
         if (!this.dragging)
             return;
         this.moved = true;
-        const children = Array.from(this.list.children);
+        const children = Array.from(this.list.children).filter(element => !element.hasAttribute("data-drag-row") || !element.classList.contains("hide"));
         const rowCount = Math.ceil(children.length / this.cols);
         let inserted = false;
-        this.list.querySelectorAll(".idx").forEach(e => {
+        this.list.querySelectorAll(".dragging-bottom, .dragging-top, .dragging-inside").forEach(e => {
             e.classList.remove("dragging-bottom");
             e.classList.remove("dragging-top");
+            e.classList.remove("dragging-inside");
         });
         for (let r = 0; r < rowCount; r++) {
             const firstIndex = r * this.cols;
@@ -114,34 +126,44 @@ export class ListDragger {
             const rect = firstChild.getBoundingClientRect();
             const midY = rect.top + rect.height / 2;
             if (e.clientY < midY) {
-                this.dstName = firstChild.innerText;
+                this.dstName = this.getRowName(firstChild);
                 firstChild.classList.add("dragging-top");
+                inserted = true;
+                break;
+            }
+            if (firstChild.dataset.dragFolder === "true"
+                && firstChild.dataset.dragFolderOpen === "true"
+                && e.clientY <= rect.bottom) {
+                this.dstName = "inside:" + this.getRowName(firstChild);
+                firstChild.classList.add("dragging-inside");
                 inserted = true;
                 break;
             }
         }
         if (!inserted) {
             this.dstName = " ";
-            children[(rowCount - 1) * this.cols].classList.add("dragging-bottom");
+            children[(rowCount - 1) * this.cols]?.classList.add("dragging-bottom");
         }
     }
     onUp() {
         if (!this.dragging)
             return;
         this.dragging = false;
-        this.list.querySelectorAll("div").forEach(e => {
+        this.list.querySelectorAll(".dragging, .dragging-bottom, .dragging-top, .dragging-inside").forEach(e => {
             e.classList.remove("dragging-bottom");
             e.classList.remove("dragging-top");
+            e.classList.remove("dragging-inside");
             e.classList.remove("dragging");
         });
         if (this.moved)
             this.onExecute(this.srcName, this.dstName);
         this.moved = false;
         this.srcName = null;
-        document.removeEventListener('mousemove', this.onMove);
-        document.removeEventListener('mouseup', this.onUp);
-        document.removeEventListener('touchmove', this.onTouchMove);
-        document.removeEventListener('touchend', this.onTouchEnd);
+        this.dstName = null;
+        document.removeEventListener('mousemove', this.mouseMoveListener);
+        document.removeEventListener('mouseup', this.mouseUpListener);
+        document.removeEventListener('touchmove', this.touchMoveListener);
+        document.removeEventListener('touchend', this.touchEndListener);
     }
 }
 //# sourceMappingURL=itemdragger.js.map

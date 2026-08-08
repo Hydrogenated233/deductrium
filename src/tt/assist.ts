@@ -79,6 +79,18 @@ export class Assist {
         } else if (type.type === "apply" && type.nodes[0].name === "List") {
             tactics.push("exact nil");
             tactics.push("apply cons");
+        } else if (type.type === "apply" && type.nodes[0].name === "Even") {
+            const index = Core.clone(type.nodes[1], true);
+            this.whnf(index, g.context);
+            const numeral = index.type === "var" && /^\d+$/.test(index.name) ? BigInt(index.name) : null;
+            const doubleSuccessor = index.type === "apply"
+                && index.nodes[0]?.name === "succ"
+                && index.nodes[1]?.type === "apply"
+                && index.nodes[1].nodes[0]?.name === "succ";
+            if (numeral === 0n) tactics.push("exact even0");
+            else if (doubleSuccessor || numeral !== null && numeral >= 2n) {
+                tactics.push("apply evenss _");
+            }
         } else if (type.type === "apply" && type.nodes[0].name === "Sus") {
             const a = parser.stringify(type.nodes[1]);
             tactics.push("exact North " + a);
@@ -96,6 +108,7 @@ export class Assist {
             if (matchEq) {
                 if (matchEq["$1"].name === "0I" && matchEq["$2"].name === "1I") tactics.push("apply segI");
                 else if (matchEq["$1"].name === "1I" && matchEq["$2"].name === "0I" && core.checkConst("inveq", [])) tactics.push("apply inveq segI");
+                if (matchEq["$1"].name === "base" && matchEq["$2"].name === "base") tactics.push("exact loop");
                 try {
                     if (core.checkType({ type: "===", name: "", nodes: [matchEq["$1"], matchEq["$2"]] }, g.context, false)) {
                         tactics.push("rfl");
@@ -179,7 +192,7 @@ export class Assist {
         }
     }
     isIndType(typ: AST) {
-        return (typ.name === "nat" || typ.name === "Bool" || typ.name === "I" || typ.name === "Z" || typ.name === "S1" || typ.name === "Ord" || typ.name === "True" || typ.name === "False" || (typ.type === "apply" && (typ.nodes[0].name === "Sus" || typ.nodes[0].name === "List" || typ.nodes[0].name === "Option" || typ.nodes[0].name === "Even" || typ.nodes[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout"))
+        return (typ.name === "nat" || typ.name === "Bool" || typ.name === "I" || typ.name === "Z" || typ.name === "S1" || typ.name === "S2" || typ.name === "Ord" || typ.name === "True" || typ.name === "False" || (typ.type === "apply" && (typ.nodes[0].name === "Sus" || typ.nodes[0].name === "List" || typ.nodes[0].name === "Option" || typ.nodes[0].name === "Even" || typ.nodes[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout"))
             || typ.type === "+" || typ.type === "[[]]" || typ.type === "X" || typ.type === "S" || typ.type === "W" || (!Assist.disableDestructEq && ((typ.type === "=") || typ.nodes?.[0]?.nodes?.[0]?.name === "eq")));
     }
     intro(s: string) {
@@ -998,7 +1011,19 @@ export class Assist {
         const goal = this.goal.shift();
         if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
         try {
-            goal.type = core.markBondVars(core.desugar(goal.type, false), goal.context);
+            // The goal AST may have been checked in an earlier assistant
+            // snapshot.  Its bond ids belong to that check's context and are
+            // stale after dependent goals are rewritten; reusing them causes
+            // false "Bound Var Leakage" diagnostics during expansion.
+            const clearBondIds = (ast: AST) => {
+                if (!ast) return;
+                delete ast.bondVarId;
+                for (const node of ast.nodes ?? []) clearBondIds(node);
+                if (ast.checked) clearBondIds(ast.checked);
+            };
+            const freshGoal = core.desugar(Core.clone(goal.type), false);
+            clearBondIds(freshGoal);
+            goal.type = core.markBondVars(freshGoal, goal.context);
             if (!core.expandDef(goal.type, goal.context, n, [pos, 1])) {
                 this.goal.unshift(goal);
                 throw TR("未找到任何指定展开的项");
@@ -1010,7 +1035,18 @@ export class Assist {
             const alphaConversionIds = new Set<number>;
             core.reduce(goal.type, goal.context, false, alphaConversionIds);
             core.doAlphaConversionByIds(goal.type, goal.context, alphaConversionIds);
-            core.checkType(goal.type, goal.context, false);
+            // Expanded definitions such as `eqv` can expose universe
+            // metavariables whose constraints are needed while checking the
+            // expanded term itself. Keep eager inference local to this proof
+            // assistant validation so ordinary Worker/type checks retain
+            // their incremental cache behavior.
+            const eagerInferRel = core.state.eagerInferRel;
+            core.state.eagerInferRel = true;
+            try {
+                core.checkType(goal.type, goal.context, false);
+            } finally {
+                core.state.eagerInferRel = eagerInferRel;
+            }
         } catch (e) {
             this.goal.unshift(goal);
             throw e;

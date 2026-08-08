@@ -12,27 +12,45 @@ export function wrapLambda(type, param, paramType, body) {
     return { type, name: param, nodes: [paramType, body] };
 }
 export function wrapApply(...terms) {
-    let ast = terms.shift();
-    let ast1;
-    while (ast1 = terms.shift()) {
-        ast = { type: "apply", name: "", nodes: [ast, ast1] };
+    let ast = terms[0];
+    for (let i = 1; i < terms.length; i++) {
+        ast = { type: "apply", name: "", nodes: [ast, terms[i]] };
     }
     return ast;
+}
+/** Clone AST metadata once while preserving sharing between contexts. */
+function cloneAstMemo(ast, cloneChecked, memo) {
+    if (!ast || typeof ast !== "object")
+        return ast;
+    const previous = memo.get(ast);
+    if (previous)
+        return previous;
+    const copy = { type: ast.type, name: ast.name, checked: null, err: ast.err, bondVarId: ast.bondVarId };
+    memo.set(ast, copy);
+    if (ast.nodes)
+        copy.nodes = ast.nodes.map(node => cloneAstMemo(node, cloneChecked, memo));
+    if (cloneChecked && ast.checked)
+        copy.checked = cloneAstMemo(ast.checked, true, memo);
+    return copy;
+}
+function cloneContextMemo(context, cloneChecked, memo) {
+    return context.map(([name, value, id]) => [name, value ? cloneAstMemo(value, cloneChecked, memo) : null, id]);
 }
 export class InferTable {
     list = new Map;
     rel = {};
     solved = new Set;
     defered = [];
+    nextName = 0;
     // find new name, and add it to list. param is just a ref value for finding
     addNewName(n = 0, ctxt) {
-        if (!n)
-            n = 0;
-        while (this.list.has(String(n++)))
-            ;
-        const name = String(n - 1);
+        n = Math.max(n || 0, this.nextName);
+        while (this.list.has(String(n)))
+            n++;
+        const name = String(n);
+        this.nextName = n + 1;
         this.list.set(name, ctxt);
-        if (name === window["dbg2"]) {
+        if (name === globalThis["dbg2"]) {
             console.log("hqho");
         }
         return name;
@@ -50,7 +68,99 @@ export class InferTable {
         }));
         n.solved = new Set(this.solved);
         n.defered = this.defered.map(e => [Core.clone(e[0], true), Core.clone(e[1], true), e[2]]);
+        n.nextName = this.nextName;
         return n;
+    }
+    snapshot(compact = false, roots = []) {
+        // Solved inference variables never need to be re-instantiated when a
+        // polymorphic definition is used again. Keeping their contexts here
+        // retains a surprisingly large amount of expanded AST state for long
+        // chains of definitions restored from a save.
+        let names = compact
+            ? Array.from(this.list.keys()).filter(name => !this.solved.has("?" + name))
+            : Array.from(this.list.keys());
+        const normalizeInferName = (name) => name.replace(/^\?([^:]+):*$/, "$1");
+        const inferNames = (ast, result = new Set()) => {
+            for (const name of InferTable.findInferVals(ast))
+                result.add(normalizeInferName(name));
+            return result;
+        };
+        if (compact && roots.length) {
+            // A check may create a large number of inference variables while
+            // reducing a recursive term. Only variables reachable from the
+            // cached type, relations, or deferred constraints are needed when
+            // that definition is instantiated later.
+            const needed = new Set();
+            for (const root of roots)
+                inferNames(root, needed);
+            for (const [a, b, context] of this.defered) {
+                inferNames(a, needed);
+                inferNames(b, needed);
+                for (const [, type] of context)
+                    inferNames(type, needed);
+            }
+            let changed = true;
+            while (changed) {
+                changed = false;
+                for (const [name, value] of Object.entries(this.rel)) {
+                    if (!needed.has(normalizeInferName(name)))
+                        continue;
+                    for (const next of inferNames(value)) {
+                        if (!needed.has(next)) {
+                            needed.add(next);
+                            changed = true;
+                        }
+                    }
+                }
+                for (const name of Array.from(needed)) {
+                    for (const [, type] of this.list.get(name) ?? []) {
+                        for (const next of inferNames(type)) {
+                            if (!needed.has(next)) {
+                                needed.add(next);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            names = names.filter(name => needed.has(name));
+        }
+        const nameSet = new Set(names);
+        const memo = new WeakMap();
+        const rel = compact
+            ? Object.fromEntries(Object.entries(this.rel)
+                .filter(([name]) => nameSet.has(normalizeInferName(name)))
+                .map(([name, value]) => [name, cloneAstMemo(value, false, memo)]))
+            : Object.fromEntries(Object.entries(this.rel).map(([name, value]) => [name, cloneAstMemo(value, true, memo)]));
+        return {
+            list: names.map(name => [name, cloneContextMemo(this.list.get(name) ?? [], false, memo)]),
+            rel,
+            solved: compact ? [] : Array.from(this.solved),
+            defered: this.defered
+                .filter(([a, b]) => !compact || !roots.length || [...inferNames(a), ...inferNames(b)].some(name => nameSet.has(name)))
+                .map(([a, b, context]) => [
+                cloneAstMemo(a, !compact, memo),
+                cloneAstMemo(b, !compact, memo),
+                cloneContextMemo(context, false, memo)
+            ]),
+            nextName: this.nextName
+        };
+    }
+    static fromSnapshot(snapshot) {
+        const table = new InferTable;
+        // A definition cache is shared with the UI and may be restored many
+        // times. Keep each Core session isolated from the serialized snapshot.
+        const memo = new WeakMap();
+        table.list = new Map(snapshot.list.map(([name, context]) => [name, cloneContextMemo(context, false, memo)]));
+        table.rel = Object.fromEntries(Object.entries(snapshot.rel).map(([name, value]) => [name, cloneAstMemo(value, false, memo)]));
+        table.solved = new Set(snapshot.solved);
+        table.defered = snapshot.defered.map(([a, b, context]) => [
+            cloneAstMemo(a, false, memo),
+            cloneAstMemo(b, false, memo),
+            cloneContextMemo(context, false, memo)
+        ]);
+        table.nextName = snapshot.nextName;
+        return table;
     }
     constructor(ast, context) {
         if (ast) {
@@ -73,9 +183,30 @@ export class InferTable {
         }
         return res;
     }
+    static hasUnsolvedInferVals(ast, solved) {
+        if (!ast)
+            return false;
+        if (ast.name?.[0] === "?") {
+            const name = ast.name.replace(/^\?([^\:]+)\:*$/, "?$1");
+            if (!solved.has(name))
+                return true;
+        }
+        if (ast.nodes) {
+            for (const node of ast.nodes) {
+                if (this.hasUnsolvedInferVals(node, solved))
+                    return true;
+            }
+        }
+        return false;
+    }
     findInferVal(ast, context = []) {
         if (ast.name?.[0] === "?") {
-            this.list.set(ast.name.replace(/^\?([^\:]+)\:*$/, "$1"), context);
+            const name = ast.name.replace(/^\?([^\:]+)\:*$/, "$1");
+            this.list.set(name, context);
+            const numericName = Number(name);
+            if (Number.isSafeInteger(numericName) && numericName >= this.nextName) {
+                this.nextName = numericName + 1;
+            }
         }
         if (ast.type === "P" || ast.type === "W" || ast.type === "S" || ast.type === "L") {
             this.findInferVal(ast.nodes[0], context);
@@ -125,6 +256,19 @@ class DisjointSet {
         n.parent = new Map(this.parent);
         n.size = new Map(this.size);
         return n;
+    }
+    snapshot() {
+        const clone = this.clone();
+        return {
+            parent: Array.from(clone.parent.entries()),
+            size: Array.from(clone.size.entries())
+        };
+    }
+    static fromSnapshot(snapshot) {
+        const set = new DisjointSet;
+        set.parent = new Map(snapshot.parent);
+        set.size = new Map(snapshot.size);
+        return set;
     }
     add(x) {
         if (!this.parent.has(x)) {
@@ -310,12 +454,21 @@ export class Core {
     }
     // mark bonvar ids for an ast
     markBondVars(ast, context) {
+        const scope = new Map;
+        // Context is stored from innermost to outermost. Populate in reverse so
+        // the nearest binding wins for duplicate names.
+        for (let i = context.length - 1; i >= 0; i--) {
+            scope.set(context[i][0], context[i]);
+        }
+        return this.markBondVarsInScope(ast, scope);
+    }
+    markBondVarsInScope(ast, scope) {
         if (!ast)
             return;
         if (ast.type === "var") {
             if (ast.bondVarId)
                 return ast;
-            ast.bondVarId = context.find(e => e[0] === ast.name)?.[2];
+            ast.bondVarId = scope.get(ast.name)?.[2];
         }
         else if (ast.type === "L" || ast.type === "P" || ast.type === "W" || ast.type === "S") {
             if (ast.bondVarId)
@@ -323,12 +476,18 @@ export class Core {
             this.getBondVarId(ast);
             if (ast.name === "_")
                 ast.name = "*" + ast.bondVarId;
-            this.markBondVars(ast.nodes[0], context);
-            this.markBondVars(ast.nodes[1], assignContext([ast.name, ast.nodes[0], ast.bondVarId], context));
+            this.markBondVarsInScope(ast.nodes[0], scope);
+            const previous = scope.get(ast.name);
+            scope.set(ast.name, [ast.name, ast.nodes[0], ast.bondVarId]);
+            this.markBondVarsInScope(ast.nodes[1], scope);
+            if (previous)
+                scope.set(ast.name, previous);
+            else
+                scope.delete(ast.name);
         }
         else if (ast.nodes?.length) {
-            this.markBondVars(ast.nodes[0], context);
-            this.markBondVars(ast.nodes[1], context);
+            for (const node of ast.nodes)
+                this.markBondVarsInScope(node, scope);
         }
         return ast;
     }
@@ -395,6 +554,27 @@ export class Core {
         errormsg: [],
         time: 0
     };
+    serializeDefinitionCache(name) {
+        const cache = this.state.defTypes[name];
+        if (!cache)
+            return null;
+        return {
+            type: Core.clone(cache[0]),
+            inferTable: cache[1].snapshot(true, [cache[0]]),
+            bondVarRel: cache[2].snapshot(),
+            bondVarId: cache[3]
+        };
+    }
+    restoreDefinitionCache(name, cache) {
+        if (!cache)
+            return;
+        this.state.defTypes[name] = [
+            Core.clone(cache.type),
+            InferTable.fromSnapshot(cache.inferTable),
+            DisjointSet.fromSnapshot(cache.bondVarRel),
+            cache.bondVarId
+        ];
+    }
     // cloneState(): State {
     //     return {
     //         sysTypes: this.state.sysTypes,
@@ -424,8 +604,9 @@ export class Core {
     }
     checkType(ast, context, allowModify) {
         let errmsg;
+        Core.timeoutOccured = false;
         this.state.errormsg = [];
-        this.state.time = new Date().getTime();
+        this.state.time = Date.now();
         this.state.bondVarId = 1;
         this.state.bondVarRel = new DisjointSet();
         this.state.root = ast;
@@ -603,18 +784,21 @@ export class Core {
         if ((!ast.origin || ast["desugared"]) && !skipEnsugar)
             this.ensugar(ast);
     }
-    static getFreeVars(ast, res = new Set, scope = []) {
-        if (ast.type === "var" && !scope.includes(ast.name)) {
+    static getFreeVars(ast, res = new Set, scope = new Set) {
+        if (ast.type === "var" && !scope.has(ast.name)) {
             res.add(ast.name);
         }
         else if (ast.type === "L" || ast.type === "P" || ast.type === "W" || ast.type === "S") {
             this.getFreeVars(ast.nodes[0], res, scope);
-            this.getFreeVars(ast.nodes[1], res, [ast.name, ...scope]);
+            const alreadyBound = scope.has(ast.name);
+            scope.add(ast.name);
+            this.getFreeVars(ast.nodes[1], res, scope);
+            if (!alreadyBound)
+                scope.delete(ast.name);
         }
         else if (ast.nodes?.length) {
-            this.getFreeVars(ast.nodes[0], res, scope);
-            if (ast.nodes[1])
-                this.getFreeVars(ast.nodes[1], res, scope);
+            for (const node of ast.nodes)
+                this.getFreeVars(node, res, scope);
         }
         return res;
     }
@@ -767,7 +951,10 @@ export class Core {
                     ap.name = "?" + n;
                 }
                 ast.checked = Core.clone(ap);
-                if (Array.from(InferTable.findInferVals(ap)).filter(e => !this.state.inferTable.solved.has(e)).length) {
+                // Settle universe metavariables while registering system
+                // definitions so their cached types are canonical. User checks
+                // keep the batched solver path to preserve incremental caches.
+                if (this.state.eagerInferRel && Array.from(InferTable.findInferVals(ap)).some(e => !this.state.inferTable.solved.has(e))) {
                     if (!(ap.type === "var" && ap.name[0] === "?" && !this.state.inferTable.rel[ap.name]))
                         this.solveInferRel();
                 }
@@ -1161,14 +1348,14 @@ export class Core {
         }
     }
     flattenApplyList(ast) {
-        const applyList = [];
+        const args = [];
         let sub = ast;
         while (sub.type === "apply") {
-            applyList.unshift(sub.nodes[1]);
+            args.push(sub.nodes[1]);
             sub = sub.nodes[0];
         }
-        applyList.unshift(sub);
-        return applyList;
+        args.reverse();
+        return [sub, ...args];
     }
     // exprs containning @max and @succ can reduced by @max(xx:m+,xx:n,xxx+++,xx); where "+" stands for @succ, :m for bondvar id
     getUmaxItems(ast) {
@@ -1296,7 +1483,7 @@ export class Core {
             }
             Core.assign(ast, nast);
         }
-        let rule = this.state.computeRules[fn];
+        const rule = this.getComputeRuleCandidates(fn, applyList.length);
         if (!rule?.length)
             return false;
         for (const rle of rule) {
@@ -1304,7 +1491,6 @@ export class Core {
             let tail = applyList.length - pattern.length;
             if (tail < 0)
                 continue;
-            const res = this.markBondVars(Core.clone(result), []);
             const matchTable = {};
             let matchFail = false;
             for (let i = 0; i < pattern.length; i++) {
@@ -1322,6 +1508,7 @@ export class Core {
             }
             if (matchFail)
                 continue;
+            const res = this.markBondVars(Core.clone(result), []);
             Core.replaceByMatch(res, matchTable, /^\?/);
             let replaceAst = ast;
             while (tail--)
@@ -1329,6 +1516,23 @@ export class Core {
             Core.assign(replaceAst, this.remarkLambdaBondIds(res, context));
             return true;
         }
+    }
+    computeRuleCandidateCache = new Map();
+    getComputeRuleCandidates(fn, applyLength) {
+        const source = this.state.computeRules[fn];
+        if (!source?.length)
+            return source;
+        let cache = this.computeRuleCandidateCache.get(fn);
+        if (!cache || cache.source !== source || cache.sourceLength !== source.length) {
+            cache = { source, sourceLength: source.length, byApplyLength: new Map };
+            this.computeRuleCandidateCache.set(fn, cache);
+        }
+        let candidates = cache.byApplyLength.get(applyLength);
+        if (!candidates) {
+            candidates = source.filter(rule => rule.pattern.length <= applyLength);
+            cache.byApplyLength.set(applyLength, candidates);
+        }
+        return candidates;
     }
     matchWithWhnf(ast, pattern, regexp, context, skipExpand, res = {}) {
         if (pattern.type === "var" && pattern.name.match(regexp)) {
@@ -1361,7 +1565,7 @@ export class Core {
     addInferRel(name, ast, context) {
         if (ast.name === "_" && ast.type === "var")
             return true;
-        if (name === window["dbgid"]) {
+        if (name === globalThis["dbgid"]) {
             console.log("fg");
         }
         const ctxt = this.state.inferTable.list.get(name.slice(1).replaceAll(":", "")) ?? [];
@@ -1460,75 +1664,97 @@ export class Core {
     solveInferRel() {
         const it = this.state.inferTable;
         const solved = it.solved;
+        const replaceBatch = (ast, replacements, resolving = new Set()) => {
+            if (!ast)
+                return false;
+            let modified = false;
+            if (ast.checked)
+                modified = replaceBatch(ast.checked, replacements, resolving) || modified;
+            if (ast.type === "var") {
+                const key = ast.name;
+                const replacement = replacements[key];
+                if (!replacement || resolving.has(key))
+                    return modified;
+                Core.assign(ast, replacement);
+                resolving.add(key);
+                replaceBatch(ast, replacements, resolving);
+                resolving.delete(key);
+                return true;
+            }
+            for (const node of ast.nodes ?? []) {
+                modified = replaceBatch(node, replacements, resolving) || modified;
+            }
+            return modified;
+        };
         while (true) {
-            let replaceKey = null;
+            const ready = [];
             for (const [k, v] of Object.entries(it.rel)) {
-                // if this is not a inferval's type, && its value is solved, we replace all other occurences
-                if (!solved.has(k) && !k.endsWith(":") && !Array.from(new InferTable(v).list.keys()).filter(e => !solved.has("?" + e)).length) {
-                    solved.add(k);
-                    replaceKey = k;
-                    const kt = k + ":";
-                    const astT = it.rel[kt];
-                    const ctxt = it.list.get(k.slice(1)) ?? [];
-                    if (astT) {
-                        for (const [k, v] of Object.entries(it.rel)) {
-                            if (!solved.has(k)) {
-                                this.replaceVar(v, kt, -1, astT);
-                            }
-                        }
-                        this.whnf(v, ctxt, true);
-                        if (!this.equal(this.check(v, ctxt, false), astT, ctxt))
-                            return false;
-                    }
-                    it.rel[kt] = this.check(v, ctxt, false);
-                    solved.add(kt);
-                    break;
+                if (!solved.has(k) && !k.endsWith(":") && !InferTable.hasUnsolvedInferVals(v, solved)) {
+                    ready.push(k);
                 }
             }
-            if (replaceKey) {
-                let changed = false;
-                let canceledLoops = new Set;
-                for (const [k, v] of Object.entries(it.rel)) {
-                    // replace all other occurences
-                    if (solved.has(k))
-                        continue;
-                    const ch = this.replaceVar(v, replaceKey, -1, it.rel[replaceKey]);
-                    changed ||= ch;
-                    if (v.name === k && v.type === "var")
-                        canceledLoops.add(k);
-                }
-                if (!changed) {
-                    solved.add(replaceKey);
-                }
-                else {
-                    for (const k of canceledLoops)
-                        delete it.rel[k];
-                }
-            }
-            else {
+            if (!ready.length)
                 break;
+            const replacements = {};
+            for (const key of ready) {
+                const value = it.rel[key];
+                if (!value || solved.has(key))
+                    continue;
+                solved.add(key);
+                const typeKey = key + ":";
+                const expectedType = it.rel[typeKey];
+                const context = it.list.get(key.slice(1)) ?? [];
+                if (expectedType) {
+                    replacements[typeKey] = expectedType;
+                    this.whnf(value, context, true);
+                    if (!this.equal(this.check(value, context, false), expectedType, context))
+                        return false;
+                }
+                it.rel[typeKey] = this.check(value, context, false);
+                solved.add(typeKey);
+                replacements[key] = value;
+            }
+            let changed = false;
+            for (const [key, value] of Object.entries(it.rel)) {
+                if (solved.has(key))
+                    continue;
+                changed = replaceBatch(value, replacements) || changed;
+            }
+            if (changed) {
+                for (const [key, value] of Object.entries(it.rel)) {
+                    if (!solved.has(key) && value.name === key && value.type === "var")
+                        delete it.rel[key];
+                }
             }
         }
     }
-    fillInfered(ast) {
-        if (this.state.time && new Date().getTime() - this.state.time > Core.timeout) {
+    fillInfered(ast, resolving = new Set(), timeoutState = { steps: 0 }) {
+        if ((timeoutState.steps++ & 255) === 0 && this.state.time && Date.now() - this.state.time > Core.timeout) {
             Core.timeoutOccured = true;
             this.error(ast, TR("类型推断超时"), true);
         }
         const it = this.state.inferTable;
         if (ast.checked) {
-            this.fillInfered(ast.checked);
+            this.fillInfered(ast.checked, resolving, timeoutState);
         }
         if (ast.nodes) {
             let modified = false;
             for (const n of ast.nodes) {
-                modified = this.fillInfered(n) || modified;
+                modified = this.fillInfered(n, resolving, timeoutState) || modified;
             }
             return modified;
         }
-        else {
-            return Core.replaceByMatch(ast, it.rel, /^\?/);
-        }
+        if (ast.type !== "var" || ast.name[0] !== "?" || resolving.has(ast.name))
+            return false;
+        const replacement = it.rel[ast.name];
+        if (!replacement)
+            return false;
+        const key = ast.name;
+        Core.assign(ast, replacement);
+        resolving.add(key);
+        this.fillInfered(ast, resolving, timeoutState);
+        resolving.delete(key);
+        return true;
     }
     equal(a, b, context) {
         if (a === b || Core.exactEqual(a, b))
@@ -1914,9 +2140,9 @@ export class Core {
         for (const [a, b, ct] of inferTable.defered) {
             const ctxt = Core.cloneContext(ct);
             const na = Core.clone(a);
-            InferTable.mapInferVal(a, map);
+            InferTable.mapInferVal(na, map);
             const nb = Core.clone(b);
-            InferTable.mapInferVal(b, map);
+            InferTable.mapInferVal(nb, map);
             this.increaseBondVarIdsBy(na, bondvarIdBase);
             this.increaseBondVarIdsBy(nb, bondvarIdBase);
             // first we remark bondvar id in the context of infer vars

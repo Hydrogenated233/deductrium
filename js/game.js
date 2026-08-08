@@ -6,7 +6,6 @@ import { TileBlockType } from "./hy/maploader.js";
 import { calcMaxReachOrd, cmp, printOrd } from "./hy/ordinal.js";
 import { langMgr, TR } from "./lang.js";
 import { GameSaveLoad } from "./saveload.js";
-import { Assist } from "./tt/assist.js";
 import { TTGui } from "./tt/gui.js";
 function parseDeductriumAmout(str) {
     let coeff;
@@ -1042,13 +1041,13 @@ export class Game {
                     this.ttGui.unlockedTactics.add("eq");
                     return;
                 case "ttelimeq":
-                    Assist.disableDestructEq = false;
+                    this.ttGui.enableAssistDestructEq();
                     return;
                 case "ttelimcond":
-                    Assist.disableDestructConds = false;
+                    this.ttGui.enableAssistDestructConds();
                     return;
                 case "ttapply2":
-                    Assist.disableMultipleApply = false;
+                    this.ttGui.enableAssistMultipleApply();
                     return;
                 case "ttrw":
                     this.ttGui.unlockedTactics.add("rw");
@@ -1172,6 +1171,12 @@ export class Game {
         const saves = localStorage.getItem(gameSaveLoad.storageKey);
         // autosave while updated within a time interval
         this.hyperGui.world.onStateChange = this.ttGui.onStateChange = this.fsGui.onStateChange = () => gameSaveLoad.stateChange(this);
+        const flushAutosave = () => gameSaveLoad.flush(this);
+        window.addEventListener("pagehide", flushAutosave);
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "hidden")
+                flushAutosave();
+        });
         if (saves)
             gameSaveLoad.load(this, saves);
         document.getElementById("loading").classList.add("hide");

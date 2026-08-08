@@ -62,10 +62,17 @@ export class GameSaveLoad {
     timeOut = 3000;
     stateChange(game: Game) {
         if (this.stateChangeTimer === false) {
-            this.stateChangeTimer = setTimeout(() => {
-                this.save(game);
-                this.stateChangeTimer = false;
-            }, this.timeOut);
+            this.stateChangeTimer = setTimeout(() => this.flush(game), this.timeOut);
+        }
+    }
+    flush(game: Game) {
+        if (this.stateChangeTimer === false) return;
+        clearTimeout(this.stateChangeTimer as number);
+        this.stateChangeTimer = false;
+        try {
+            this.save(game);
+        } catch (error) {
+            console.error(TR("自动保存失败："), error);
         }
     }
     load(game: Game, str: string, skipRollback?: boolean) {

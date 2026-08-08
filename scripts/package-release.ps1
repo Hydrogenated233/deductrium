@@ -1,0 +1,122 @@
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$packageJsonPath = Join-Path $projectRoot "package.json"
+$packageJson = Get-Content -LiteralPath $packageJsonPath -Raw | ConvertFrom-Json
+$productName = "Deductrium-HoTT-Optimization"
+
+$versionParts = ([string]$packageJson.version) -split "\."
+if ($versionParts.Count -eq 3 -and @($versionParts | Where-Object { $_ -notmatch "^\d+$" }).Count -eq 0) {
+    $releaseVersion = "{0}.{1:D2}.{2:D2}" -f [int]$versionParts[0], [int]$versionParts[1], [int]$versionParts[2]
+} else {
+    $releaseVersion = [string]$packageJson.version
+}
+
+$releaseRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot "release"))
+$releaseName = "$productName-$releaseVersion"
+$packageDirectory = [IO.Path]::GetFullPath((Join-Path $releaseRoot $releaseName))
+$archivePath = [IO.Path]::GetFullPath((Join-Path $releaseRoot "$releaseName.zip"))
+
+function Assert-ChildPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Parent
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $fullParent = [IO.Path]::GetFullPath($Parent).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $fullParent + [IO.Path]::DirectorySeparatorChar
+    if (-not $fullPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to modify a path outside the release directory: $fullPath"
+    }
+}
+
+Assert-ChildPath -Path $packageDirectory -Parent $releaseRoot
+Assert-ChildPath -Path $archivePath -Parent $releaseRoot
+
+$npmCommand = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
+if (-not $npmCommand) {
+    $npmCommand = Get-Command "npm" -ErrorAction Stop
+}
+
+Push-Location $projectRoot
+try {
+    Write-Host "[1/6] Running regression tests..."
+    & $npmCommand.Source test
+    if ($LASTEXITCODE -ne 0) { throw "Regression tests failed." }
+
+    Write-Host "[2/6] Type-checking..."
+    & $npmCommand.Source run typecheck
+    if ($LASTEXITCODE -ne 0) { throw "TypeScript type-check failed." }
+
+    Write-Host "[3/6] Building..."
+    & $npmCommand.Source run build
+    if ($LASTEXITCODE -ne 0) { throw "TypeScript build failed." }
+
+    Write-Host "[4/6] Preparing release directory..."
+    New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
+    foreach ($target in @($packageDirectory, $archivePath)) {
+        if (Test-Path -LiteralPath $target) {
+            Remove-Item -LiteralPath $target -Recurse -Force
+        }
+    }
+    New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
+
+    $runtimeFiles = @(
+        "index.html",
+        "gui.css",
+        "README.md",
+        "README_EN.md",
+        "server.mjs",
+        "start.cmd"
+    )
+    foreach ($relativePath in $runtimeFiles) {
+        $source = Join-Path $projectRoot $relativePath
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Required release file is missing: $relativePath"
+        }
+        Copy-Item -LiteralPath $source -Destination $packageDirectory -Force
+    }
+
+    $javascriptDirectory = Join-Path $projectRoot "js"
+    if (-not (Test-Path -LiteralPath $javascriptDirectory -PathType Container)) {
+        throw "Build output directory is missing: js"
+    }
+    Copy-Item -LiteralPath $javascriptDirectory -Destination $packageDirectory -Recurse -Force
+
+    Write-Host "[5/6] Validating and compressing..."
+    $requiredPaths = @($runtimeFiles + "js")
+    foreach ($relativePath in $requiredPaths) {
+        if (-not (Test-Path -LiteralPath (Join-Path $packageDirectory $relativePath))) {
+            throw "Packaged release is missing: $relativePath"
+        }
+    }
+    foreach ($forbiddenPath in @("src", "node_modules")) {
+        if (Test-Path -LiteralPath (Join-Path $packageDirectory $forbiddenPath)) {
+            throw "Packaged release unexpectedly contains: $forbiddenPath"
+        }
+    }
+
+    Compress-Archive -Path (Join-Path $packageDirectory "*") -DestinationPath $archivePath -CompressionLevel Optimal
+
+    Write-Host "[6/6] Release ready."
+    $archive = Get-Item -LiteralPath $archivePath
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    $archiveStream = [IO.File]::OpenRead($archivePath)
+    try {
+        $hash = [BitConverter]::ToString($sha256.ComputeHash($archiveStream)).Replace("-", "")
+    } finally {
+        $archiveStream.Dispose()
+        $sha256.Dispose()
+    }
+    Write-Host "Directory: $packageDirectory"
+    Write-Host "Archive:   $archivePath"
+    Write-Host ("Size:      {0:N0} bytes" -f $archive.Length)
+    Write-Host "SHA256:    $hash"
+} finally {
+    Pop-Location
+}
