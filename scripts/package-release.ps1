@@ -1,20 +1,21 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$ReleaseDate = $env:DEDUCTRIUM_RELEASE_DATE
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$packageJsonPath = Join-Path $projectRoot "package.json"
-$packageJson = Get-Content -LiteralPath $packageJsonPath -Raw | ConvertFrom-Json
 $productName = "Deductrium-HoTT-Optimization"
 
-$versionParts = ([string]$packageJson.version) -split "\."
-if ($versionParts.Count -eq 3 -and @($versionParts | Where-Object { $_ -notmatch "^\d+$" }).Count -eq 0) {
-    $releaseVersion = "{0}.{1:D2}.{2:D2}" -f [int]$versionParts[0], [int]$versionParts[1], [int]$versionParts[2]
-} else {
-    $releaseVersion = [string]$packageJson.version
+if (-not $ReleaseDate) {
+    $ReleaseDate = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString("yyyy.MM.dd", [Globalization.CultureInfo]::InvariantCulture)
 }
+if ($ReleaseDate -notmatch "^\d{4}\.\d{2}\.\d{2}$") {
+    throw "Release date must use YYYY.MM.DD format."
+}
+$releaseVersion = $ReleaseDate
 
 $releaseRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot "release"))
 $releaseName = "$productName-$releaseVersion"
