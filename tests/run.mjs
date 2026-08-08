@@ -8,6 +8,7 @@ const tests = [
     "./tt-save-cache-compaction.test.mjs",
     "./tt-worker-definition-caches.test.mjs",
     "./tt-bug1-cache-revalidation.test.mjs",
+    "./save-load-overwrite.test.mjs",
     "./tt-persistent-worker-session.test.mjs",
     "./tt-worker-mutation-queue.test.mjs",
     "./tt-pi1-s1.test.mjs",

@@ -1137,7 +1137,7 @@ export class Game {
                 else {
                     this.fsGui.skipRendering = true;
                     gameSaveLoad.load(this, str);
-                    window.location.href = window.location.href || "?";
+                    window.location.reload();
                 }
                 document.getElementById("gamemode").innerText = title;
             }, 20);

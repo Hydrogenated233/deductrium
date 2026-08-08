@@ -99,7 +99,7 @@ export class GameSaveLoad {
                 console.warn(str);
                 console.warn(TR("进度已回滚。"));
                 this.load(game, rollback, true);
-                window.location.href = window.location.href || "?";
+                window.location.reload();
             } else {
                 console.error(e);
             }
@@ -119,12 +119,12 @@ export class GameSaveLoad {
     reset() {
         if (confirm(TR("确定要放弃所有游戏进度吗？"))) {
             localStorage.removeItem(this.storageKey);
-            window.location.href = window.location.href || "?";
+            window.location.reload();
         }
     }
     clearState(game: Game) {
+        game.hyperGui.world.reload();
         if (!game.creative) {
-            game.hyperGui.world.reload();
             game.fsGui.reload();
             game.ttGui.disableSimpleFn = true;
         }
@@ -145,6 +145,11 @@ export class GameSaveLoad {
             rewards, deductriums, consumed, destructedGates,
             game.parcours, maxOrd, ordBase
         ] = JSON.parse(data);
+        game.rewards.length = 0;
+        for (const achievement of Array.from(document.querySelectorAll(".achievement div"))) {
+            achievement.classList.remove("achieved");
+            achievement.parentElement?.classList.add("locked");
+        }
         const skipRendering = game.fsGui.skipRendering;
         game.fsGui.skipRendering = true;
         game.ttGui.skipRendering = true;
