@@ -1,5 +1,7 @@
 # Deductrium
 
+This branch used ai coding.
+
 A game that combines mathematical formal systems and hyperbolic space in the browser using Typescript. Currently includes propositional logic, first-order logic, Peano axioms, ZFC set theory, and some type theory.
 
 Link: [wxyhly.github.io/deductrium](https://wxyhly.github.io/deductrium/)
