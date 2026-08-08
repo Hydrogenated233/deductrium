@@ -1,5 +1,7 @@
 # Deductrium
 
+本branch使用了ai编程
+
 [English version](readme_en.md)
 
 一个在浏览器中用Typescript实现的数学形式系统与双曲空间结合的游戏。目前包含命题逻辑、一阶逻辑、皮亚诺公理、ZFC集合论与一些类型论的内容。
