@@ -33,6 +33,36 @@ export class Assist {
         }
     }
     dependVarId = 0;
+    multipleApplyArity(valueName, goal) {
+        if (Assist.disableMultipleApply)
+            return 0;
+        let fn;
+        try {
+            fn = core.checkType(wrapVar(valueName), goal.context, false);
+        }
+        catch (e) {
+            return 0;
+        }
+        let tail = fn;
+        let fnWithHoles = wrapVar(valueName);
+        let arity = 0;
+        while (tail?.type === "P" || tail?.type === "->") {
+            arity++;
+            fnWithHoles = wrapApply(fnWithHoles, wrapVar("_"));
+            tail = tail.nodes[1];
+            try {
+                core.checkType({
+                    type: "===", name: "", nodes: [Core.clone(tail), Core.clone(goal.type)]
+                }, goal.context, true);
+                core.checkType({
+                    type: ":", name: "", nodes: [Core.clone(fnWithHoles), Core.clone(goal.type)]
+                }, goal.context, false);
+                return arity;
+            }
+            catch (e) { }
+        }
+        return 0;
+    }
     autofillTactics() {
         const tactics = [];
         const g = this.goal[0];
@@ -184,6 +214,9 @@ export class Assist {
                     tactics.push("apply " + val);
             }
             catch (e) { }
+            if (!tactics.includes("apply " + val) && this.multipleApplyArity(val, g) > 1) {
+                tactics.push("apply " + val);
+            }
         }
         const ntype = Core.clone(type);
         this.whnf(ntype, g.context);

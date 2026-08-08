@@ -15,7 +15,9 @@ const tests = [
     "./tt-universe-equivalence.test.mjs",
     "./tt-assist-engine.test.mjs",
     "./tt-assist-intermediate-holes.test.mjs",
-    "./tt-assist-expand-eqv.test.mjs"
+    "./tt-assist-expand-eqv.test.mjs",
+    "./tt-gate-fuzzy-matching.test.mjs",
+    "./tt-assist-multiple-apply.test.mjs"
 ];
 
 for (const test of tests) {

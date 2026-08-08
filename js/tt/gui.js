@@ -1894,6 +1894,33 @@ export class TTGui {
         if (first)
             first.onblur({ forceSync: true, updateDefs: true });
     }
+    equalGateTypes(candidate, target) {
+        // Generic gate matches must not reuse inference variables from the
+        // most recently checked theorem.
+        const state = this.core.state;
+        const inferTable = state.inferTable;
+        const bondVarId = state.bondVarId;
+        const bondVarRel = state.bondVarRel;
+        const errormsg = state.errormsg;
+        const root = state.root;
+        const time = state.time;
+        const timeoutOccured = Core.timeoutOccured;
+        this.core.clearState();
+        state.root = null;
+        state.time = Date.now();
+        try {
+            return this.core.equal(candidate, target, []);
+        }
+        finally {
+            state.inferTable = inferTable;
+            state.bondVarId = bondVarId;
+            state.bondVarRel = bondVarRel;
+            state.errormsg = errormsg;
+            state.root = root;
+            state.time = time;
+            Core.timeoutOccured = timeoutOccured;
+        }
+    }
     // find whether user has inhabitat of given type
     queryType(typeStr) {
         if (this.gateQueryCache.has(typeStr))
@@ -1931,7 +1958,7 @@ export class TTGui {
         }
         for (const checked of candidates) {
             try {
-                if (this.core.equal(Core.clone(checked, true), Core.clone(ref, true), [])) {
+                if (this.equalGateTypes(Core.clone(checked, true), Core.clone(ref, true))) {
                     this.gateQueryCache.set(typeStr, true);
                     return true;
                 }
