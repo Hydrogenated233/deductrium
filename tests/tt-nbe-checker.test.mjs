@@ -176,6 +176,35 @@ assert.deepEqual(
     checker.tryCheck(parser.parse("a"), parser.parse("B")),
     { status: "invalid", code: "type-mismatch" }
 );
+{
+    const boundedKernel = new SemanticNbeKernel();
+    const boundedChecker = new SemanticNbeTypeChecker(boundedKernel);
+    boundedChecker.replaceConstantTypes([
+        ["A", parser.parse("U")],
+        ["B", parser.parse("U")],
+        ["a", parser.parse("A")],
+        ["arrowValue", parser.parse("A->B")]
+    ]);
+    const originalTryEqualResult = boundedKernel.tryEqualResult;
+    boundedKernel.tryEqualResult = () => "budget-exhausted";
+    try {
+        assert.deepEqual(
+            boundedChecker.tryCheck(parser.parse("a"), parser.parse("B")),
+            { status: "unsupported", code: "budget-exhausted" },
+            "closed conversion must preserve a semantic equality resource limit"
+        );
+        assert.equal(
+            boundedChecker.tryCheck(
+                parser.parse("arrowValue"),
+                parser.parse("P_:A,B")
+            ).status,
+            "success",
+            "syntax-directed arrow/Pi conversion must remain available after a semantic probe exhausts its budget"
+        );
+    } finally {
+        boundedKernel.tryEqualResult = originalTryEqualResult;
+    }
+}
 assert.deepEqual(
     checker.trySynthesize(parser.parse("f b")),
     { status: "invalid", code: "argument-type-mismatch" }

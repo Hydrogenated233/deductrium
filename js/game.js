@@ -1179,9 +1179,12 @@ export class Game {
         });
         if (saves)
             gameSaveLoad.load(this, saves);
+        // Save restoration suppresses rendering while rows are reconstructed.
+        // The final updateAfterUnlock below starts the single coordinated
+        // validation pass after display options have also been restored.
+        this.ttGui.skipRendering = false;
         document.getElementById("loading").classList.add("hide");
         this.fsGui.skipRendering = false;
-        this.ttGui.skipRendering = false;
         this.fsGui.onchangeOmitNF();
         const displayPi = document.getElementById("displayPi");
         displayPi.addEventListener("change", e => {
@@ -1281,5 +1284,8 @@ export class Game {
         document.getElementById("metarule-subpanel").classList.remove("hide");
     }
 }
-new Game;
+const game = new Game;
+// Browser benchmarks and local diagnostics use this stable, read-only entry
+// point instead of reaching through DOM event closures.
+globalThis.deductriumGame = game;
 //# sourceMappingURL=game.js.map

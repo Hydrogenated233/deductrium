@@ -40,6 +40,48 @@ export function collectExplicitAtNames(source: string, result = new Set<string>(
 }
 
 /**
+ * Rename solver-private semantic metavariables before syntax reaches the UI.
+ * Preserve sharing and avoid colliding with user-written `?N` names already
+ * present in the same tree.
+ */
+export function restoreSemanticMetaNamesForDisplay(ast: AST) {
+    const occupied = new Set<number>();
+    const collectVisited = new WeakSet<object>();
+    const collect = (node: AST) => {
+        if (!node || typeof node !== "object" || collectVisited.has(node)) return;
+        collectVisited.add(node);
+        if (node.type === "var") {
+            const match = /^\?([0-9]+)$/.exec(node.name ?? "");
+            if (match) occupied.add(Number(match[1]));
+        }
+        for (const child of node.nodes ?? []) collect(child);
+        if (node.checked) collect(node.checked);
+    };
+    collect(ast);
+
+    const renames = new Map<string, string>();
+    let next = 0;
+    const visited = new WeakSet<object>();
+    const visit = (node: AST) => {
+        if (!node || typeof node !== "object" || visited.has(node)) return;
+        visited.add(node);
+        if (node.type === "var" && /^\?nbe[0-9]+$/.test(node.name ?? "")) {
+            let replacement = renames.get(node.name);
+            if (!replacement) {
+                while (occupied.has(next)) next++;
+                replacement = `?${next++}`;
+                renames.set(node.name, replacement);
+            }
+            node.name = replacement;
+        }
+        for (const child of node.nodes ?? []) visit(child);
+        if (node.checked) visit(node.checked);
+    };
+    visit(ast);
+    return ast;
+}
+
+/**
  * Fold elaboration-only implicit prefixes back to their public aliases.
  * Explicit @ occurrences typed by the user remain untouched.
  */

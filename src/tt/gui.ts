@@ -10,6 +10,7 @@ import { Assist } from "./assist.js";
 import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { TypeRule, initTypeSystem } from "./initial.js";
+import { restoreSemanticMetaNamesForDisplay } from "./presentation.js";
 import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremInputIndexBeforeItem, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator } from "./theorem-validation.js";
 const parser = new ASTParser;
 const constructors = new Set<string>();
@@ -58,6 +59,9 @@ export class TTGui {
     unlockedTactics: Set<string>;
     inhabitList = document.getElementById("inhabit-list");
     private theoremItems: TTTheoremItem[] = [];
+    /** Ordered theorem inputs derived from theoremItems, cached by structure revision. */
+    private theoremInputsCache: HTMLInputElement[] = [];
+    private theoremInputsCacheRevision = -1;
     private theoremItemSequence = 0;
     private restoringTheoremItems = false;
     private theoremDragger = new ListDragger(this.inhabitList);
@@ -92,6 +96,9 @@ export class TTGui {
     private coreWorkerGeneration = -1;
     private coreWorkerConfigKey = "";
     private coreWorkerConfigurePromise: Promise<void> = null;
+    private coreWorkerLoadedThrough = 0;
+    /** Invalidates completions from an older logical state of the same Worker/configuration. */
+    private coreWorkerStateRevision = 0;
     private readonly coreWorkerMutations = new TTWorkerMutationQueue();
     private definitionRevision = 0;
     /** Changes whenever theorem rows are inserted, removed, or reordered. */
@@ -104,6 +111,21 @@ export class TTGui {
     private gatePreviewScopeId: string | null = null;
     /** Explicit scope used while synchronously rendering a gate preview. */
     private astRenderScopeFolderId: string | null | undefined;
+    /** Cached shared tooltip node; ast2HTML is called for every AST fragment. */
+    private floatTypeDiv: HTMLDivElement | null = null;
+    private getTheoremInputsFromItems() {
+        if (this.theoremInputsCacheRevision !== this.theoremStructureRevision) {
+            this.theoremInputsCache = this.theoremItems
+                .filter((item): item is Extract<TTTheoremItem, { kind: "theorem" }> => item.kind === "theorem")
+                .map(item => item.input);
+            this.theoremInputsCacheRevision = this.theoremStructureRevision;
+        }
+        return this.theoremInputsCache;
+    }
+    /** Resolves after the current automatic theorem-validation suffix settles. */
+    waitForValidationIdle() {
+        return this.theoremValidation.waitForIdle();
+    }
     initTypeList() {
         const expand = {};
         for (const rule of allrules) {
@@ -154,7 +176,6 @@ export class TTGui {
     constructor(creative: boolean, skipRendering: boolean) {
         if (typeof Worker !== "undefined") {
             try { this.coreWorker = new TTCoreWorkerClient(); } catch (error) { console.warn("Type-theory worker unavailable", error); }
-            try { this.assistWorker = new TTAssistWorkerClient(); } catch (error) { console.warn("Proof-assistant worker unavailable", error); }
         }
         this.skipRendering = skipRendering;
         this.theoremDragger.cols = 1;
@@ -430,6 +451,7 @@ export class TTGui {
     private async startAssistSession(target: string, history: string[] = []) {
         const definitionEnd = this.getTacticDefinitionEnd();
         const scopeFolderId = this.getActiveTacticScopeId();
+        this.ensureAssistWorker();
         if (this.assistWorker) {
             try {
                 await this.prepareAssistWorker(
@@ -454,6 +476,15 @@ export class TTGui {
             }
         }
         return this.startAssistFallback(target, history);
+    }
+    private ensureAssistWorker() {
+        if (this.assistWorker || typeof Worker === "undefined") return this.assistWorker;
+        try {
+            this.assistWorker = new TTAssistWorkerClient();
+        } catch (error) {
+            console.warn("Proof-assistant worker unavailable", error);
+        }
+        return this.assistWorker;
     }
     private async startAssistFallback(target: string, history: string[], config?: TTCoreConfig) {
         const scopeFolderId = this.getActiveTacticScopeId();
@@ -740,7 +771,7 @@ export class TTGui {
         const spans = Array.from(varnode.childNodes).filter(
             node => !(node as HTMLSpanElement).getAttribute("ast-string")
         ) as HTMLSpanElement[];
-        const floatTypeDiv = document.querySelector(".float-type") as HTMLDivElement;
+        const floatTypeDiv = this.floatTypeDiv ??= document.querySelector(".float-type") as HTMLDivElement;
         const renderedInput = this.getInhabitatArray()[userLineNumber];
         const renderedItemId = renderedInput ? this.getTheoremItemForInput(renderedInput)?.id : null;
         const renderedScopeOverride = this.astRenderScopeFolderId;
@@ -874,6 +905,7 @@ export class TTGui {
             list.removeChild(list.lastChild);
         }
         const pendingDefinitions = new Map<string, AST>();
+        const deferredVariableDisplays: { container: HTMLDivElement, ast: AST }[] = [];
         const disableSimpleEq = this.disableSimpleEq;
         const disableSimpleFn = this.disableSimpleFn;
         for (const rule of allrules) {
@@ -957,9 +989,25 @@ export class TTGui {
             }
             // this.core.state.sysDefs[vname] = def;
             if (ast.type === "var") {
-                itVal.appendChild(this.ast2HTML("", { type: ":", nodes: [ast, ast.checked], name: "" }));
+                if (ast.checked) {
+                    const displayAst = restoreSemanticMetaNamesForDisplay(Core.clone(ast, true));
+                    itVal.appendChild(this.ast2HTML("", {
+                        type: ":",
+                        nodes: [displayAst, displayAst.checked],
+                        name: ""
+                    }));
+                } else {
+                    // Some public aliases depend on definitions registered
+                    // later in the rule table. Render them after the bounded
+                    // fixed-point pass below, when their inferred type caches
+                    // are available.
+                    deferredVariableDisplays.push({ container: itVal, ast });
+                }
             } else {
-                itVal.appendChild(this.ast2HTML("", ast));
+                itVal.appendChild(this.ast2HTML(
+                    "",
+                    restoreSemanticMetaNamesForDisplay(Core.clone(ast, true))
+                ));
             }
             if (ast.type === ":=") {
                 const val = rule.ast.nodes[1].type === ":" ? rule.ast.nodes[1].nodes[0] : rule.ast.nodes[1];
@@ -999,6 +1047,19 @@ export class TTGui {
         }
         this.core.elaborateSemanticSystemTypes();
         this.core.syncSemanticDefinitions?.();
+        for (const { container, ast } of deferredVariableDisplays) {
+            if (!ast.checked) {
+                try { this.core.checkType(ast, [], false); } catch { }
+            }
+            const displayType = ast.checked
+                ? restoreSemanticMetaNamesForDisplay(Core.clone(ast.checked, true))
+                : wrapVar("_");
+            container.appendChild(this.ast2HTML("", {
+                type: ":",
+                nodes: [ast, displayType],
+                name: ""
+            }));
+        }
     }
     private createTheoremItemId(prefix: "theorem" | "folder") {
         const uuid = globalThis.crypto?.randomUUID?.();
@@ -1314,10 +1375,12 @@ export class TTGui {
     }
     private resetCoreWorkerSession() {
         if (!this.coreWorker) return;
+        this.coreWorkerStateRevision++;
         this.coreWorker.reset();
         this.coreWorkerGeneration = -1;
         this.coreWorkerConfigKey = "";
         this.coreWorkerConfigurePromise = null;
+        this.coreWorkerLoadedThrough = 0;
     }
     private completeTheoremValidation(runId: number) {
         const next = this.theoremValidation.complete(runId);
@@ -1675,21 +1738,29 @@ export class TTGui {
     private prepareCoreWorker(definitionEnd: number, scopeFolderId: string | null = null) {
         if (!this.coreWorker) return Promise.reject(new Error("Type-theory worker unavailable"));
         const config = this.getWorkerSystemConfig();
-        const configKey = JSON.stringify({ config, definitionEnd, scopeFolderId });
+        // The ordered definition prefix is persistent Worker state, not part
+        // of the engine configuration. Sequential validation appends one slot
+        // at a time; only a system-option or lexical-scope transition rebuilds
+        // the already validated prefix.
+        const configKey = JSON.stringify({ config, scopeFolderId });
         const generation = this.coreWorker.generation;
         if (this.coreWorkerGeneration === generation && this.coreWorkerConfigKey === configKey) {
             return this.coreWorkerMutations.wait();
         }
+        const revision = ++this.coreWorkerStateRevision;
         this.coreWorkerGeneration = generation;
         this.coreWorkerConfigKey = configKey;
         const definitions = this.getWorkerDefinitionSlots(definitionEnd, scopeFolderId);
+        this.coreWorkerLoadedThrough = definitions.length;
         const promise = this.coreWorkerMutations.enqueue(() => this.coreWorker.configure(config, definitions));
-        this.prepareAssistWorker(definitionEnd, config, definitions, scopeFolderId).catch(() => { });
         this.coreWorkerConfigurePromise = promise.catch(error => {
-            if (this.coreWorkerGeneration === generation && this.coreWorkerConfigKey === configKey) {
+            if (this.coreWorkerGeneration === generation
+                && this.coreWorkerConfigKey === configKey
+                && this.coreWorkerStateRevision === revision) {
                 this.coreWorkerGeneration = -1;
                 this.coreWorkerConfigKey = "";
                 this.coreWorkerConfigurePromise = null;
+                this.coreWorkerLoadedThrough = 0;
             }
             throw error;
         });
@@ -1728,48 +1799,71 @@ export class TTGui {
     }
     private invalidateWorkerDefinitions(startIndex: number) {
         this.definitionRevision++;
-        if (this.coreWorker) {
+        const start = Math.max(0, Math.floor(startIndex));
+        if (this.coreWorker
+            && this.coreWorkerGeneration === this.coreWorker.generation
+            && this.coreWorkerConfigKey
+            && start < this.coreWorkerLoadedThrough) {
             const generation = this.coreWorker.generation;
-            this.coreWorkerMutations.enqueue(() => this.coreWorker.truncate(startIndex)).catch(() => {
-                if (this.coreWorker.generation !== generation) return;
+            const configKey = this.coreWorkerConfigKey;
+            const revision = ++this.coreWorkerStateRevision;
+            this.coreWorkerLoadedThrough = start;
+            this.coreWorkerMutations.enqueue(() => this.coreWorker.truncate(start)).catch(() => {
+                if (this.coreWorker.generation !== generation
+                    || this.coreWorkerConfigKey !== configKey
+                    || this.coreWorkerStateRevision !== revision) return;
                 this.coreWorkerGeneration = -1;
                 this.coreWorkerConfigKey = "";
                 this.coreWorkerConfigurePromise = null;
+                this.coreWorkerLoadedThrough = 0;
             });
         }
         if (this.assistWorker && this.assistWorkerGeneration === this.assistWorker.generation && this.assistWorkerConfigKey) {
+            // The proof assistant is cold during theorem-list loading. Once it
+            // has been used, a definition change merely marks that snapshot
+            // stale; the next proof command rebuilds its position-independent
+            // folder scope from the final validated UI caches.
             this.assistWorkerSessionReady = false;
-            const generation = this.assistWorker.generation;
-            this.assistWorkerMutations.enqueue(() => this.assistWorker.truncate(startIndex)).catch(() => {
-                if (this.assistWorker.generation !== generation) return;
-                this.assistWorkerGeneration = -1;
-                this.assistWorkerConfigKey = "";
-                this.assistWorkerConfigurePromise = null;
-            });
+            this.assistWorkerGeneration = -1;
+            this.assistWorkerConfigKey = "";
+            this.assistWorkerConfigurePromise = null;
         }
     }
     private syncCoreWorkerDefinition(index: number, definition: TTDefinitionSlot) {
         if (!this.coreWorker || this.coreWorkerGeneration !== this.coreWorker.generation || !this.coreWorkerConfigKey) return;
         const generation = this.coreWorker.generation;
-        this.coreWorkerMutations.enqueue(() => this.coreWorker.setDefinition(index, definition)).catch(() => {
-            if (this.coreWorker.generation !== generation) return;
+        const configKey = this.coreWorkerConfigKey;
+        const revision = this.coreWorkerStateRevision;
+        this.coreWorkerMutations.enqueue(() => this.coreWorker.setDefinition(index, definition)).then(() => {
+            if (this.coreWorker.generation === generation
+                && this.coreWorkerConfigKey === configKey
+                && this.coreWorkerStateRevision === revision) {
+                this.coreWorkerLoadedThrough = index + 1;
+            }
+        }).catch(() => {
+            if (this.coreWorker.generation !== generation
+                || this.coreWorkerConfigKey !== configKey
+                || this.coreWorkerStateRevision !== revision) return;
             this.coreWorkerGeneration = -1;
             this.coreWorkerConfigKey = "";
             this.coreWorkerConfigurePromise = null;
+            this.coreWorkerLoadedThrough = 0;
         });
     }
-    private syncAssistWorkerDefinition(index: number, definition: TTDefinitionSlot) {
-        if (!this.assistWorker || this.assistWorkerGeneration !== this.assistWorker.generation || !this.assistWorkerConfigKey) return;
-        this.assistWorkerSessionReady = false;
-        const generation = this.assistWorker.generation;
-        this.assistWorkerMutations.enqueue(() => this.assistWorker.setDefinition(index, definition)).catch(() => {
-            if (this.assistWorker.generation !== generation) return;
-            this.assistWorkerGeneration = -1;
-            this.assistWorkerConfigKey = "";
-            this.assistWorkerConfigurePromise = null;
+    private validateCoreWorker(index: number, ast: AST, context: Context = [], timeout?: number) {
+        if (!this.coreWorker) return Promise.reject(new Error("Type-theory worker unavailable"));
+        const generation = this.coreWorker.generation;
+        const configKey = this.coreWorkerConfigKey;
+        const revision = this.coreWorkerStateRevision;
+        return this.coreWorker.validate(index, ast, context, timeout).then(result => {
+            if (this.coreWorker.generation === generation
+                && this.coreWorkerConfigKey === configKey
+                && this.coreWorkerStateRevision === revision) {
+                this.coreWorkerLoadedThrough = index + 1;
+            }
+            return result;
         });
     }
-
     updateInhabitList(
         insertPos?: HTMLDivElement,
         destinationFolder?: Extract<TTTheoremItem, { kind: "folder" }>
@@ -2125,7 +2219,6 @@ export class TTGui {
                             if (!workerCommitted) {
                                 this.syncCoreWorkerDefinition(currentIdx, [defname, storedDefinition, storedCache]);
                             }
-                            this.syncAssistWorkerDefinition(currentIdx, [defname, storedDefinition, storedCache]);
                             macro.add(defname);
                         }
                         // The Worker returns a fully elaborated definition while
@@ -2153,12 +2246,22 @@ export class TTGui {
                 if (ast && !error && !parseError && !wrapper.classList.contains("infering")) {
                     this.setTheoremTypeTag(input, ast);
                 }
-                const newDom = parseError ? this.addSpan(div, input.value + " - " + parseError) : this.ast2HTML("", ast, [], [], currentIdx);
+                // This AST is the transient validation result owned by the
+                // theorem row. Definition values and inference caches were
+                // stored above in separate objects, so presentation renaming
+                // can happen in place without deep-cloning a potentially huge
+                // checked tree for every restored theorem.
+                const displayAst = ast
+                    ? restoreSemanticMetaNamesForDisplay(ast)
+                    : ast;
+                const newDom = parseError
+                    ? this.addSpan(div, input.value + " - " + parseError)
+                    : this.ast2HTML("", displayAst, [], [], currentIdx);
                 div.appendChild(newDom);
                 if (ast && error) this.addSpan(div, " - " + error);
                 if (ast && !error && ast.type[0] != ":") {
                     this.addSpan(div, " &nbsp; : &nbsp; ", true);
-                    div.appendChild(this.ast2HTML("", ast.checked, [], [], currentIdx));
+                    div.appendChild(this.ast2HTML("", displayAst.checked, [], [], currentIdx));
                 }
                 continueValidation(continueAfter && !!nextInput && (ast?.type === ":=" || !!ev["updateDefs"]));
             };
@@ -2218,7 +2321,7 @@ export class TTGui {
                     if (validationRunId !== null) this.completeTheoremValidation(validationRunId);
                     return null;
                 }
-                return this.coreWorker.validate(currentIdx, Core.clone(ast, true), [], Core.timeout);
+                return this.validateCoreWorker(currentIdx, Core.clone(ast, true), [], Core.timeout);
             }).then(result => {
                 if (!result) return;
                 if (input["workerRequestId"] !== requestId || input.value !== inputValue || !input.isConnected) {
@@ -2650,7 +2753,7 @@ export class TTGui {
         }
     }
     getInhabitatArray() {
-        return Array.from(document.querySelectorAll<HTMLInputElement>(".inhabitat .tt-theorem-input"));
+        return this.getTheoremInputsFromItems();
     }
     unlock(str: string, update?: boolean) {
         this.unlockedTypes.add(str);
@@ -2662,7 +2765,7 @@ export class TTGui {
     updateAfterUnlock() {
         if (this.skipRendering) return;
         this.updateTypeList(this.unlockedTypes);
-        this.getInhabitatArray()[0]?.onblur({ updateDefs: true } as any);
+        this.revalidateTheorems();
     }
     disableAxiom(...arr: string[]) {
         for (const a of arr) {

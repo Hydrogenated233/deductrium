@@ -16,7 +16,19 @@ export type NbeEqualOptions = {
 /** Options shared by the read-only weak-head evaluator. */
 export type NbeWhnfOptions = NbeEqualOptions;
 
-export type NbeEqualityResult = "equal" | "unequal" | "unsupported";
+/**
+ * Result of a closed semantic equality probe.  `budget-exhausted` is kept
+ * distinct from `unsupported`: callers may fall back to syntax-directed
+ * elaboration for the latter, while the former means the probe was unable to
+ * decide before its explicit resource boundary.
+ */
+export type NbeEqualityResult =
+    | "equal"
+    | "unequal"
+    | "unsupported"
+    | "budget-exhausted";
+
+type NbeEqualityProbeResult = boolean | null | "budget-exhausted";
 
 export type NbeComputeRule = {
     pattern: AST[];
@@ -935,10 +947,11 @@ function universeLevelValue(level: UniverseLevelNormalForm, state: KernelState):
     return result;
 }
 
-function universeLevelAstShape(ast: AST): boolean {
+function universeLevelAstShape(ast: AST, rigidMetas = false): boolean {
     if (!ast || typeof ast !== "object") return false;
     if (ast.type === "var") {
-        return !!ast.name && ast.name !== "_" && !ast.name.startsWith("?")
+        return !!ast.name && ast.name !== "_"
+            && (rigidMetas || !ast.name.startsWith("?"))
             && (validId(ast.bondVarId) || (ast.name !== "@succ" && ast.name !== "@max"));
     }
     if (ast.type !== "apply") return false;
@@ -949,9 +962,11 @@ function universeLevelAstShape(ast: AST): boolean {
         head = head.nodes?.[0];
     }
     if (head.type !== "var" || validId(head.bondVarId)) return false;
-    if (head.name === "@succ") return args.length === 1 && universeLevelAstShape(args[0]);
+    if (head.name === "@succ") {
+        return args.length === 1 && universeLevelAstShape(args[0], rigidMetas);
+    }
     return head.name === "@max" && args.length >= 2
-        && args.every(universeLevelAstShape);
+        && args.every(argument => universeLevelAstShape(argument, rigidMetas));
 }
 
 function closedNatAstShape(ast: AST): boolean {
@@ -1030,7 +1045,14 @@ function tryDirectComputeNeutral(
             if (leftLiteral === 0n || leftLiteral === 1n) return neutralConstant(String(leftLiteral));
             const remainingSteps = Math.max(1, state.maxSteps - state.steps);
             const baseBits = BigInt(leftLiteral.toString(2).length);
-            if (rightLiteral > BigInt(remainingSteps) / baseBits) return null;
+            if (rightLiteral > BigInt(remainingSteps) / baseBits) {
+                // This is an intentional semantic work bound rather than an
+                // unsupported syntax path.  Preserve the distinction for the
+                // public equality result so the checker can report a resource
+                // limit (and still retain its syntax fallback when enabled).
+                state.exhausted = true;
+                return null;
+            }
         }
         try {
             const result = name === "add"
@@ -1541,8 +1563,10 @@ function tryEqualWithDefinitions(
     definitionValues: Map<string, Value>,
     computeRules: ReadonlyMap<string, readonly CompiledComputeRule[]>,
     dependencies?: DefinitionDependencyMap
-): boolean | null {
-    if (options.deadline !== undefined && Date.now() >= options.deadline) return null;
+): NbeEqualityProbeResult {
+    if (options.deadline !== undefined && Date.now() >= options.deadline) {
+        return "budget-exhausted";
+    }
     if (syntaxReflectsEqual(left, right, options.rigidMetas === true)) return true;
     const state: KernelState = {
         steps: 0,
@@ -1558,7 +1582,8 @@ function tryEqualWithDefinitions(
     const bindings = contextBindings(context).bindings;
     const leftTerm = compile(left, [], bindings, state, false, options.rigidMetas === true);
     const rightTerm = compile(right, [], bindings, state, false, options.rigidMetas === true);
-    if (!leftTerm || !rightTerm || state.exhausted) return null;
+    if (!leftTerm || !rightTerm) return state.exhausted ? "budget-exhausted" : null;
+    if (state.exhausted) return "budget-exhausted";
     let remainingSteps = Math.max(0, state.maxSteps - state.steps);
     const chargeProbe = (probe: KernelState) => {
         const consumed = Math.min(remainingSteps, probe.steps);
@@ -1620,7 +1645,7 @@ function tryEqualWithDefinitions(
         if (lazyResult === true && !lazyState.exhausted) return true;
     }
     const result = equalCompiledTerms(leftTerm, rightTerm, state);
-    return state.exhausted ? null : result;
+    return state.exhausted ? "budget-exhausted" : result;
 }
 
 export class SemanticNbeKernel {
@@ -1822,7 +1847,13 @@ export class SemanticNbeKernel {
             this.computeRules,
             this.dependencies
         );
-        return result === true ? "equal" : result === false ? "unequal" : "unsupported";
+        return result === true
+            ? "equal"
+            : result === false
+                ? "unequal"
+                : result === "budget-exhausted"
+                    ? result
+                    : "unsupported";
     }
 
     /**
@@ -1848,7 +1879,7 @@ export class SemanticNbeKernel {
      * definitions stay opaque so compact inferred types cannot be expanded as
      * a side effect of solving an unrelated level metavariable. */
     tryNormalizeUniverseLevel(ast: AST, context: Context = [], options: NbeEqualOptions = {}) {
-        if (!universeLevelAstShape(ast)) return null;
+        if (!universeLevelAstShape(ast, options.rigidMetas === true)) return null;
         return tryNormalizeWithDefinitions(
             ast,
             context,
@@ -1931,7 +1962,7 @@ export class SemanticNbeKernel {
         if (head.name === "pred" || head.name === "succ") return args.length === 1;
         if (head.name === "@succ") return args.length === 1 && universeLevelAstShape(args[0]);
         if (head.name === "@max") return args.length >= 2
-            && args.every(universeLevelAstShape);
+            && args.every(argument => universeLevelAstShape(argument));
         const rules = this.computeRules.get(head.name);
         if (!rules?.length) return false;
         let hasSupportedRule = false;
@@ -2062,7 +2093,7 @@ export function tryNbeDefinitionalEqual(
     context: Context = [],
     options: NbeEqualOptions = {}
 ): boolean | null {
-    return tryEqualWithDefinitions(
+    const result = tryEqualWithDefinitions(
         left,
         right,
         context,
@@ -2072,6 +2103,7 @@ export function tryNbeDefinitionalEqual(
         new Map(),
         EMPTY_COMPUTE_RULES
     );
+    return result === true ? true : result === false ? false : null;
 }
 
 export function tryNbeNormalize(

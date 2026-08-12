@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 
+import { ASTParser } from "../js/tt/astparser.js";
 import { Core } from "../js/tt/core.js";
 import { TTCoreEngine } from "../js/tt/engine.js";
 import { initTypeSystem } from "../js/tt/initial.js";
 
+const parser = new ASTParser();
 const engine = new TTCoreEngine();
 engine.configure({
     unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))],
@@ -81,6 +83,35 @@ try {
             "an expired semantic deadline must retain the public timeout signal");
     } finally {
         Core.timeout = originalTimeout;
+    }
+
+    {
+        const originalTrySynthesize = core.semanticTypeChecker.trySynthesize;
+        let attempts = 0;
+        let capturedFailure;
+        core.semanticTypeChecker.trySynthesize = () => ++attempts === 1
+            ? { status: "unsupported", code: "budget-exhausted" }
+            : { status: "unsupported", code: "unsupported-syntax" };
+        try {
+            const result = core["trySemanticTypeSynthesis"](
+                parser.parse("true"),
+                [],
+                {
+                    elaborateMetas: true,
+                    captureFailure: failure => { capturedFailure = failure; }
+                }
+            );
+            assert.equal(result, undefined);
+            assert.equal(attempts, 2,
+                "a failed cheap synthesis probe must still run its elaborating retry");
+            assert.deepEqual(
+                capturedFailure,
+                { status: "unsupported", code: "unsupported-syntax" },
+                "a concrete retry failure must replace an earlier budget-exhausted probe"
+            );
+        } finally {
+            core.semanticTypeChecker.trySynthesize = originalTrySynthesize;
+        }
     }
 } finally {
     console.log = originalConsoleLog;

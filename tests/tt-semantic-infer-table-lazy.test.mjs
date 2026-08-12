@@ -20,9 +20,9 @@ assert.equal(
 );
 
 assert.match(
-    parser.stringify(engine.core.checkType(parser.parse("_"), [], false)),
-    /^\?nbe/,
-    "a later standalone hole must stay in the native semantic solver"
+    parser.stringify(engine.check("_").ast.checked),
+    /^\?[0-9]+$/,
+    "a later standalone hole must use the public inference-variable spelling"
 );
 
 console.log("semantic standalone-hole state regression passed");

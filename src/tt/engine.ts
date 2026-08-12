@@ -2,7 +2,7 @@ import { AST, ASTParser } from "./astparser.js";
 import { Context, Core, DefinitionTypeCacheSnapshot } from "./core.js";
 import { initTypeSystem } from "./initial.js";
 import { langMgr, TR } from "../lang.js";
-import { markExplicitAtSyntax } from "./presentation.js";
+import { markExplicitAtSyntax, restoreSemanticMetaNamesForDisplay } from "./presentation.js";
 import { theoremInferenceComplete } from "./theorem-validation.js";
 
 const parser = new ASTParser();
@@ -208,6 +208,7 @@ export class TTCoreEngine {
             if (!ast) throw new Error(TR("空表达式"));
             markExplicitAtSyntax(ast);
             const type = this.core.checkType(ast, context, false);
+            restoreSemanticMetaNamesForDisplay(ast);
             const inferenceComplete = theoremInferenceComplete(ast);
             return {
                 ok: true,

@@ -817,11 +817,12 @@ function universeLevelValue(level, state) {
     }
     return result;
 }
-function universeLevelAstShape(ast) {
+function universeLevelAstShape(ast, rigidMetas = false) {
     if (!ast || typeof ast !== "object")
         return false;
     if (ast.type === "var") {
-        return !!ast.name && ast.name !== "_" && !ast.name.startsWith("?")
+        return !!ast.name && ast.name !== "_"
+            && (rigidMetas || !ast.name.startsWith("?"))
             && (validId(ast.bondVarId) || (ast.name !== "@succ" && ast.name !== "@max"));
     }
     if (ast.type !== "apply")
@@ -834,10 +835,11 @@ function universeLevelAstShape(ast) {
     }
     if (head.type !== "var" || validId(head.bondVarId))
         return false;
-    if (head.name === "@succ")
-        return args.length === 1 && universeLevelAstShape(args[0]);
+    if (head.name === "@succ") {
+        return args.length === 1 && universeLevelAstShape(args[0], rigidMetas);
+    }
     return head.name === "@max" && args.length >= 2
-        && args.every(universeLevelAstShape);
+        && args.every(argument => universeLevelAstShape(argument, rigidMetas));
 }
 function closedNatAstShape(ast) {
     let current = ast;
@@ -920,8 +922,14 @@ function tryDirectComputeNeutral(value, state) {
                 return neutralConstant(String(leftLiteral));
             const remainingSteps = Math.max(1, state.maxSteps - state.steps);
             const baseBits = BigInt(leftLiteral.toString(2).length);
-            if (rightLiteral > BigInt(remainingSteps) / baseBits)
+            if (rightLiteral > BigInt(remainingSteps) / baseBits) {
+                // This is an intentional semantic work bound rather than an
+                // unsupported syntax path.  Preserve the distinction for the
+                // public equality result so the checker can report a resource
+                // limit (and still retain its syntax fallback when enabled).
+                state.exhausted = true;
                 return null;
+            }
         }
         try {
             const result = name === "add"
@@ -1409,8 +1417,9 @@ function equalCompiledTerms(leftTerm, rightTerm, state) {
  * result means the term needs elaboration or exhausted the evaluation budget.
  */
 function tryEqualWithDefinitions(left, right, context, options, definitions, opaqueDefinitions, definitionValues, computeRules, dependencies) {
-    if (options.deadline !== undefined && Date.now() >= options.deadline)
-        return null;
+    if (options.deadline !== undefined && Date.now() >= options.deadline) {
+        return "budget-exhausted";
+    }
     if (syntaxReflectsEqual(left, right, options.rigidMetas === true))
         return true;
     const state = {
@@ -1427,8 +1436,10 @@ function tryEqualWithDefinitions(left, right, context, options, definitions, opa
     const bindings = contextBindings(context).bindings;
     const leftTerm = compile(left, [], bindings, state, false, options.rigidMetas === true);
     const rightTerm = compile(right, [], bindings, state, false, options.rigidMetas === true);
-    if (!leftTerm || !rightTerm || state.exhausted)
-        return null;
+    if (!leftTerm || !rightTerm)
+        return state.exhausted ? "budget-exhausted" : null;
+    if (state.exhausted)
+        return "budget-exhausted";
     let remainingSteps = Math.max(0, state.maxSteps - state.steps);
     const chargeProbe = (probe) => {
         const consumed = Math.min(remainingSteps, probe.steps);
@@ -1487,7 +1498,7 @@ function tryEqualWithDefinitions(left, right, context, options, definitions, opa
             return true;
     }
     const result = equalCompiledTerms(leftTerm, rightTerm, state);
-    return state.exhausted ? null : result;
+    return state.exhausted ? "budget-exhausted" : result;
 }
 export class SemanticNbeKernel {
     definitions = new Map();
@@ -1676,7 +1687,13 @@ export class SemanticNbeKernel {
     }
     tryEqualResult(left, right, context = [], options = {}) {
         const result = tryEqualWithDefinitions(left, right, context, options, this.definitions, this.opaqueDefinitions, this.definitionValues, this.computeRules, this.dependencies);
-        return result === true ? "equal" : result === false ? "unequal" : "unsupported";
+        return result === true
+            ? "equal"
+            : result === false
+                ? "unequal"
+                : result === "budget-exhausted"
+                    ? result
+                    : "unsupported";
     }
     /**
      * Normalize a supported term without mutating its source AST. A null
@@ -1690,7 +1707,7 @@ export class SemanticNbeKernel {
      * definitions stay opaque so compact inferred types cannot be expanded as
      * a side effect of solving an unrelated level metavariable. */
     tryNormalizeUniverseLevel(ast, context = [], options = {}) {
-        if (!universeLevelAstShape(ast))
+        if (!universeLevelAstShape(ast, options.rigidMetas === true))
             return null;
         return tryNormalizeWithDefinitions(ast, context, options, new Map(), new Set(), new Map(), new Map());
     }
@@ -1752,7 +1769,7 @@ export class SemanticNbeKernel {
             return args.length === 1 && universeLevelAstShape(args[0]);
         if (head.name === "@max")
             return args.length >= 2
-                && args.every(universeLevelAstShape);
+                && args.every(argument => universeLevelAstShape(argument));
         const rules = this.computeRules.get(head.name);
         if (!rules?.length)
             return false;
@@ -1884,7 +1901,8 @@ export class SemanticNbeKernel {
     }
 }
 export function tryNbeDefinitionalEqual(left, right, context = [], options = {}) {
-    return tryEqualWithDefinitions(left, right, context, options, new Map(), EMPTY_OPAQUE_DEFINITIONS, new Map(), EMPTY_COMPUTE_RULES);
+    const result = tryEqualWithDefinitions(left, right, context, options, new Map(), EMPTY_OPAQUE_DEFINITIONS, new Map(), EMPTY_COMPUTE_RULES);
+    return result === true ? true : result === false ? false : null;
 }
 export function tryNbeNormalize(ast, context = [], options = {}) {
     return tryNormalizeWithDefinitions(ast, context, options, new Map(), EMPTY_OPAQUE_DEFINITIONS, new Map(), EMPTY_COMPUTE_RULES);

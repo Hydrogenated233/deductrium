@@ -1,0 +1,9 @@
+@ap2:=(λu:U@.(λv:U@.(λa:(Uu).(λb:(Uv).(λx:a.(λy:a.(λp:(x=y).(λq:(x=y).(λf:(a→b).(λr:(p=q).ap (ap f) r)))))))))):(Πu:U@,(Πv:U@,(Πa:(Uu),(Πb:(Uv),(Πx:a,(Πy:a,(Πp:(x=y),(Πq:(x=y),(Πf:(a→b),(Πr:(p=q),((ap f p)=(ap f q))))))))))))
+
+@trans2const:=λu:U@.λv:U@.(λa:Uu.(λb:Uv.(λx1:a.(λx2:a.(λy:b.(λm:(x1=x2).(λn:(x1=x2).(λr:(m=n).ind_eq m (λn':(x1=x2).(λr:(m=n').((transconst m y)=((trans2 (λx:a.b) r y)▪(transconst n' y))))) rfl n r))))))))
+
+@ap_apd:=λu:U@.λv:U@.(λa:Uu.(λb:Uv.(λx:a.(λy:a.(λf:(a→b).(λp:(x=y).ind_eq x (λy':a.(λp:(x=y').(((inveq (transconst p (f x)))▪(apd f p))=(ap f p)))) rfl y p))))))
+
+@apd_ap:=(λu:U@.(λv:U@.(λa:(Uu).(λb:(Uv).(λx:a.(λy:a.(λf:(a→b).(λp:(x=y).ind_eq x (λy':a.(λp:(x=y').((apd f p)=((transconst p (f x))▪(ap f p))))) rfl y p)))))))):(Πu:U@,(Πv:U@,(Πa:(Uu),(Πb:(Uv),(Πx:a,(Πy:a,(Πf:(a→b),(Πp:(x=y),((apd f p)=((transconst p (f x))▪(ap f p)))))))))))
+
+Πu:U@.Πv:U@.Πa:Uu.Πb:Uv.Πf:a→b.Πx:a.Πy:a.Πp:x=y.Πq:x=y.Πr:p=q.(((inveq(ap(λx:f x=f x.compeq x (ap f p)) (leftinveq (transconst p (f x)))))*(compeqassoc (inveq (transconst p (f x))) (transconst p (f x)) (ap f p))*(ap (compeq (inveq (transconst p (f x)))) ((inveq(@apd_ap u v a b x y f p))*(@apd2 u v a x y p q (λx:a.b) f r)))*(ap (compeq (inveq (transconst p (f x)))) (ap (compeq (trans2 (λx:a.b) r (f x))) (@apd_ap u v a b x y f q)))*(ap(compeq (inveq(transconst p(f x))))(inveq(compeqassoc (trans2(λx:a.b)r(f x)) (transconst q(f x)) (ap f q))))*(inveq(ap(compeq(inveq(transconst p(f x))))(ap(λx:trans(λx:a.b)p(f x)=f x.compeq x(ap f q))(@trans2const u v a b x y (f x) p q r)))))*(inveq(compeqassoc (inveq(transconst p(f x))) (transconst p(f x)) (ap f q))))*(ap(λx:f x=f x.compeq x(ap f q))(leftinveq(transconst p(f x))))=@ap2 u v a b x y p q f r

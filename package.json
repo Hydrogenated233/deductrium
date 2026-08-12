@@ -16,6 +16,8 @@
     "benchmark:save": "node tests/benchmarks/save-load-memory.mjs",
     "prebenchmark:k609": "npm run build",
     "benchmark:k609": "node tests/benchmarks/k609-save-load-memory.mjs",
+    "prebenchmark:k609:browser": "npm run build",
+    "benchmark:k609:browser": "node tests/benchmarks/k609-browser-load.mjs",
     "prebenchmark:k609:profile": "npm run build",
     "benchmark:k609:profile": "node tests/benchmarks/k609-profile.mjs",
     "prebenchmark:k609:semantic": "npm run build",

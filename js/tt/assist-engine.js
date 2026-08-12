@@ -3,8 +3,15 @@ import { Assist } from "./assist.js";
 import { ASTParser } from "./astparser.js";
 import { Core } from "./core.js";
 import { TTCoreEngine } from "./engine.js";
-import { compactImplicitAliasesForDisplay, markExplicitAtSyntax } from "./presentation.js";
+import { compactImplicitAliasesForDisplay, markExplicitAtSyntax, restoreSemanticMetaNamesForDisplay } from "./presentation.js";
 const parser = new ASTParser();
+function isProofTargetSort(type) {
+    return (type?.type === "apply"
+        && type.nodes?.[0]?.type === "var"
+        && type.nodes[0].name === "U") || (type?.type === "var"
+        && type.name === "U@:"
+        && !type.bondVarId);
+}
 /** DOM-free proof-assistant session shared by the Worker and fallback path. */
 export class TTAssistEngine {
     engine;
@@ -80,7 +87,11 @@ export class TTAssistEngine {
             throw new Error(TR(target.type === ":" ? "已断言该类型有值" : "不是命题类型"));
         }
         const type = this.engine.core.checkType(target, [], false);
-        if (type.type !== "apply" || type.nodes[0].name !== "U")
+        // Universe-polymorphic propositions (for example `Pi u:U@, ...`)
+        // live in the Core's external sort `U@:` rather than an ordinary
+        // `U level` application.  `U@` itself remains the type of level terms,
+        // so values such as `@0` are still rejected as proof targets.
+        if (!isProofTargetSort(type))
             throw new Error(TR("不是命题类型"));
         this.assist = new Assist(this.engine.core, target);
         this.history = [];
@@ -138,7 +149,7 @@ export class TTAssistEngine {
                     this.presentAst(value, explicitAtNames),
                     id
                 ]),
-                type: compactImplicitAliasesForDisplay(type, this.engine.core.opaque, explicitAtNames),
+                type: this.presentAst(type, explicitAtNames),
                 holeName: goal.ast.name
             };
         });
@@ -151,7 +162,7 @@ export class TTAssistEngine {
         };
     }
     presentAst(ast, explicitAtNames) {
-        return compactImplicitAliasesForDisplay(Core.clone(ast, true), this.engine.core.opaque, explicitAtNames);
+        return restoreSemanticMetaNamesForDisplay(compactImplicitAliasesForDisplay(Core.clone(ast, true), this.engine.core.opaque, explicitAtNames));
     }
     requireAssist() {
         if (!this.assist)

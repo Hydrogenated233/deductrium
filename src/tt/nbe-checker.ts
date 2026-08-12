@@ -3,6 +3,7 @@ import type { Context } from "./core.js";
 import {
     SemanticNbeKernel,
     type NbeEqualOptions,
+    type NbeEqualityResult,
     type NbeWhnfOptions
 } from "./nbe-kernel.js";
 
@@ -183,6 +184,7 @@ type ScopeBinding = {
 };
 
 type SynthesizedTypeSide = "left" | "right";
+type ConversionResult = NbeEqualityResult;
 
 type PreparedInput = {
     ast: AST;
@@ -1578,14 +1580,12 @@ export class SemanticNbeTypeChecker {
         const result = this.synthesize(prepared.value.ast, prepared.value.context, prepared.value.state);
         if (result.status !== "success") return result;
         const resolvedType = resolveMetas(result.value, prepared.value.state);
-        const type = prepared.value.state.metaSolutions.size
-            ? compactResolvedType(
-                resolvedType,
-                this.kernel,
-                prepared.value.context,
-                prepared.value.state
-            )
-            : resolvedType;
+        const type = compactResolvedType(
+            resolvedType,
+            this.kernel,
+            prepared.value.context,
+            prepared.value.state
+        );
         if (!type) return unsupported("budget-exhausted");
         const needsTerm = prepared.value.state.hadInputHoles
             || prepared.value.state.hadElaborationChanges
@@ -1723,6 +1723,7 @@ export class SemanticNbeTypeChecker {
             [],
             "left"
         );
+        if (conversion === "budget-exhausted") return unsupported("budget-exhausted");
         if (conversion === "unsupported") return unsupported("conversion-unsupported");
         if (conversion === "unequal") return invalid("type-mismatch");
         if (expectedType.status !== "success") return expectedType;
@@ -1733,14 +1734,12 @@ export class SemanticNbeTypeChecker {
         );
         if (expectedUniverse.status !== "success") return expectedUniverse;
         const resolvedType = resolveMetas(synthesized.value, prepared.value.state);
-        const normalizedType = prepared.value.state.metaSolutions.size
-            ? compactResolvedType(
-                resolvedType,
-                this.kernel,
-                prepared.value.context,
-                prepared.value.state
-            )
-            : resolvedType;
+        const normalizedType = compactResolvedType(
+            resolvedType,
+            this.kernel,
+            prepared.value.context,
+            prepared.value.state
+        );
         if (!normalizedType) return unsupported("budget-exhausted");
         const resolvedExpected = resolveMetas(preparedExpected, prepared.value.state);
         const needsTerm = prepared.value.state.hadInputHoles
@@ -1888,6 +1887,7 @@ export class SemanticNbeTypeChecker {
             preparedContext,
             state
         );
+        if (termConversion === "budget-exhausted") return unsupported("budget-exhausted");
         if (termConversion === "unsupported") return unsupported("conversion-unsupported");
         if (termConversion === "unequal") return invalid("type-mismatch");
         const typeConversion = this.convertTypes(
@@ -1896,6 +1896,7 @@ export class SemanticNbeTypeChecker {
             preparedContext,
             state
         );
+        if (typeConversion === "budget-exhausted") return unsupported("budget-exhausted");
         if (typeConversion === "unsupported") return unsupported("conversion-unsupported");
         if (typeConversion === "unequal") return invalid("type-mismatch");
 
@@ -1935,9 +1936,7 @@ export class SemanticNbeTypeChecker {
             : compactTypeSyntax;
         const type = unresolvedResultMetas.size
             ? returnedType
-            : state.metaSolutions.size
-            ? compactResolvedType(resolvedType, this.kernel, preparedContext, state)
-            : resolvedType;
+            : compactResolvedType(resolvedType, this.kernel, preparedContext, state);
         if (!type) return unsupported("budget-exhausted");
         const sourceMetaConstraints = collectSourceMetaConstraints(state);
         if (!sourceMetaConstraints) return unsupported("metavariable");
@@ -2233,6 +2232,7 @@ export class SemanticNbeTypeChecker {
             if (!localName) return unsupported("metavariable");
             const preset = prepareAst(meta.preset, [], state, true, true, metaRenames);
             const bound = this.bindMeta(localName, preset, context, state);
+            if (bound === "budget-exhausted") return unsupported("budget-exhausted");
             if (bound !== "equal") return unsupported("metavariable");
         }
         return success(body);
@@ -2439,6 +2439,7 @@ export class SemanticNbeTypeChecker {
                 context,
                 state
             );
+            if (domainConversion === "budget-exhausted") return unsupported("budget-exhausted");
             if (domainConversion === "unsupported") return unsupported("conversion-unsupported");
             if (domainConversion === "unequal") return invalid("argument-type-mismatch");
 
@@ -2511,6 +2512,7 @@ export class SemanticNbeTypeChecker {
             [],
             "left"
         );
+        if (conversion === "budget-exhausted") return unsupported("budget-exhausted");
         if (conversion === "unsupported") return unsupported("conversion-unsupported");
         if (conversion === "unequal") return invalid("argument-type-mismatch");
         return success(actual.value);
@@ -2547,6 +2549,7 @@ export class SemanticNbeTypeChecker {
             context,
             state
         );
+        if (bound === "budget-exhausted") return unsupported("budget-exhausted");
         if (bound !== "equal") return unsupported("metavariable");
         const resolvedExpected = resolveMetas(expected, state);
         if (state.annotateTerm) ast.checked = cloneSyntax(resolvedExpected);
@@ -2561,8 +2564,9 @@ export class SemanticNbeTypeChecker {
         leftScope: readonly ScopeBinding[] = [],
         rightScope: readonly ScopeBinding[] = [],
         synthesizedTypeSide?: SynthesizedTypeSide
-    ): "equal" | "unequal" | "unsupported" {
+    ): ConversionResult {
         if (exactSyntaxEqual(left, right)) return "equal";
+        let semanticBudgetExhausted = false;
         // Universe-level normalization is tiny and independent of ordinary
         // term reduction. Keep it available when the general conversion
         // budget is exhausted; otherwise a harmless `max 0 0` can strand an
@@ -2611,6 +2615,7 @@ export class SemanticNbeTypeChecker {
         if (!state.metas.size) {
             const semantic = this.kernel.tryEqualResult(left, right, context, kernelOptions(state));
             if (semantic === "equal" || !state.elaborateMetas) return semantic;
+            if (semantic === "budget-exhausted") semanticBudgetExhausted = true;
             // Elaborating conversion has additional syntax-directed rules
             // (implicit aliases, arrow/Pi equivalence and eta) that the
             // closed kernel intentionally does not model. Only a positive
@@ -2627,8 +2632,9 @@ export class SemanticNbeTypeChecker {
             // elaboration even when this particular subtree is meta-free.
             // Only a positive semantic result is authoritative here.
             if (semantic === "equal") return semantic;
+            if (semantic === "budget-exhausted") semanticBudgetExhausted = true;
         }
-        if (!takeStep(state)) return "unsupported";
+        if (!takeStep(state)) return "budget-exhausted";
         let resolvedLeft = resolveMetas(left, state);
         let resolvedRight = resolveMetas(right, state);
         const reduceBetaHead = (term: AST) => {
@@ -2688,14 +2694,19 @@ export class SemanticNbeTypeChecker {
                 ...conversionOptions,
                 maxSteps: state.maxSteps
             };
-            if (alignedResolvedRight
-                && (exactSyntaxEqual(resolvedLeft, alignedResolvedRight)
-                    || this.kernel.tryEqualResult(
-                        resolvedLeft,
-                        alignedResolvedRight,
-                        leftContext,
-                        finishingOptions
-                    ) === "equal")) return "equal";
+            if (alignedResolvedRight) {
+                if (exactSyntaxEqual(resolvedLeft, alignedResolvedRight)) return "equal";
+                const finishingEquality = this.kernel.tryEqualResult(
+                    resolvedLeft,
+                    alignedResolvedRight,
+                    leftContext,
+                    finishingOptions
+                );
+                if (finishingEquality === "equal") return "equal";
+                if (finishingEquality === "budget-exhausted") {
+                    semanticBudgetExhausted = true;
+                }
+            }
         }
         const leftPattern = this.tryBindAppliedPatternMeta(
             resolvedLeft,
@@ -2888,6 +2899,7 @@ export class SemanticNbeTypeChecker {
                 rightScope,
                 synthesizedTypeSide
             );
+            if (domain === "budget-exhausted") semanticBudgetExhausted = true;
             if (domain === "equal") {
                 const body = this.convertTypes(
                     resolvedLeft.nodes?.[1],
@@ -2907,6 +2919,7 @@ export class SemanticNbeTypeChecker {
                     synthesizedTypeSide
                 );
                 if (body === "equal") return "equal";
+                if (body === "budget-exhausted") semanticBudgetExhausted = true;
             }
         }
         const leftLambda = resolvedLeft.type === "L";
@@ -2955,7 +2968,7 @@ export class SemanticNbeTypeChecker {
                             synthesizedTypeSide
                         );
                     if (body === "equal") return "equal";
-                    if (body === "unsupported") return body;
+                    if (body === "unsupported" || body === "budget-exhausted") return body;
                 }
             }
         }
@@ -2986,6 +2999,7 @@ export class SemanticNbeTypeChecker {
                 if (blockedByUnsolvedMeta) {
                     deferredChildren.push(index);
                 } else if (child !== "equal") {
+                    if (child === "budget-exhausted") semanticBudgetExhausted = true;
                     structurallyEqual = false;
                     break;
                 }
@@ -3001,6 +3015,7 @@ export class SemanticNbeTypeChecker {
                     synthesizedTypeSide
                 );
                 if (child !== "equal") {
+                    if (child === "budget-exhausted") semanticBudgetExhausted = true;
                     structurallyEqual = false;
                     break;
                 }
@@ -3031,7 +3046,10 @@ export class SemanticNbeTypeChecker {
         }
         const hasUnsolvedMetas = containsUnsolvedLocalMeta(semanticLeft, state)
             || containsUnsolvedLocalMeta(alignedSemanticRight, state);
-        return hasUnsolvedMetas ? "unsupported" : semantic;
+        if (hasUnsolvedMetas) return "unsupported";
+        return semantic === "unsupported" && semanticBudgetExhausted
+            ? "budget-exhausted"
+            : semantic;
     }
 
     private tryLowBudgetUniverseEquality(
@@ -3076,7 +3094,7 @@ export class SemanticNbeTypeChecker {
         value: AST,
         context: Context,
         state: CheckerState
-    ): "equal" | "unequal" | "unsupported" {
+    ): ConversionResult {
         const contextualType = value.type === "var"
             ? lookupContextType(value, context)
             : null;
@@ -3103,7 +3121,7 @@ export class SemanticNbeTypeChecker {
         otherScope: readonly ScopeBinding[],
         context: Context,
         state: CheckerState
-    ): "equal" | "unequal" | "unsupported" | null {
+    ): ConversionResult | null {
         const { head, args } = flattenApplication(term);
         // Start with the unary Miller-pattern case used by dependent family
         // parameters such as the `b` in `pr0 : (Σx:a,b x) -> a`. Higher
@@ -3227,7 +3245,7 @@ export class SemanticNbeTypeChecker {
         context: Context,
         state: CheckerState,
         candidateFromSynthesizedType = false
-    ): "equal" | "unequal" | "unsupported" {
+    ): ConversionResult {
         const resolved = resolveMetas(value, state);
         if (isLocalMeta(resolved, state) && resolved.name === name) return "equal";
         if (isLocalMeta(resolved, state)) {

@@ -38,4 +38,15 @@ assert.equal(restoreWithRenderingState(true), 0,
 assert.equal(restoreWithRenderingState(false), 1,
     "an in-app save import still validates immediately");
 
+const coordinated = Object.create(TTGui.prototype);
+coordinated.skipRendering = false;
+coordinated.unlockedTypes = new Set;
+coordinated.updateTypeList = () => { };
+coordinated.getInhabitatArray = () => [{ onblur() { throw new Error("legacy direct validation"); } }];
+let coordinatedValidations = 0;
+coordinated.revalidateTheorems = () => coordinatedValidations++;
+coordinated.updateAfterUnlock();
+assert.equal(coordinatedValidations, 1,
+    "startup unlock refresh must enter the validation coordinator exactly once");
+
 console.log("save restore validation scheduling regression passed");

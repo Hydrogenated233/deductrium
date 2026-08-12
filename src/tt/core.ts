@@ -484,6 +484,7 @@ export class Core {
     static semanticTypeCheckFastPathHits = 0;
     /** Source-shaped clones used when reporting errors after elaboration mutates ASTs. */
     private displaySurfaceNodes = new WeakMap<object, AST>();
+    private silentErrors = 0;
     static assign(ast: AST, value: AST, moveSemantic?: boolean) {
         // Most substitutions assign a leaf variable/constant. Cloning a leaf
         // here is semantically unnecessary and shows up tens of millions of
@@ -929,9 +930,25 @@ export class Core {
     }
     error(ast: AST, msg: any, stop: boolean) {
         this.state.errormsg.unshift({ ast, msg });
-        console.log(parser.stringify(ast), msg);
+        if (!this.silentErrors) {
+            const source = parser.stringify(ast);
+            console.log(source ?? ast?.type ?? TR("表达式丢失"), msg);
+        }
         ast.err = msg;
         if (stop) throw msg;
+    }
+    /** Run a speculative check without printing its expected failure. */
+    withSilentErrors<T>(callback: () => T): T {
+        const previousErrors = this.state.errormsg;
+        const previousTimeout = Core.timeoutOccured;
+        this.silentErrors++;
+        try {
+            return callback();
+        } finally {
+            this.silentErrors--;
+            this.state.errormsg = previousErrors;
+            Core.timeoutOccured = previousTimeout;
+        }
     }
     checkDefinition(ast: AST, context: Context) {
         let prepared: {
@@ -1011,9 +1028,7 @@ export class Core {
                     || hasSemanticElaborationHole(semanticAssertionTarget.nodes[0])
             );
             if (isNbeTypeFailure(semanticAssertion)) {
-                if (semanticAssertion.code === "budget-exhausted") {
-                    this.reportSemanticBudgetFailure(semanticAssertionTarget);
-                }
+                this.reportSemanticFailure(semanticAssertionTarget, semanticAssertion);
             } else if (semanticAssertion === false) {
                 this.error(ast, TR("类型断言失败"), true);
             } else if (semanticAssertion) {
@@ -1037,9 +1052,7 @@ export class Core {
         if (ast.type === "===") {
             const semanticEquality = this.trySemanticDefinitionalEquality(ast, context);
             if (isNbeTypeFailure(semanticEquality)) {
-                if (semanticEquality.code === "budget-exhausted") {
-                    this.reportSemanticBudgetFailure(ast);
-                }
+                this.reportSemanticFailure(ast, semanticEquality);
             } else if (semanticEquality === false) {
                 const unresolvedDefinitions = this.semanticErrorUnresolvedDefinitions(ast);
                 const unresolvedSuffix = unresolvedDefinitions.length
@@ -1113,26 +1126,18 @@ export class Core {
                 if (this.state.errormsg.length) throw this.state.errormsg[0].msg;
                 return ast.checked;
             }
-            if (semanticFailure?.code === "budget-exhausted") {
-                this.reportSemanticBudgetFailure(semanticTarget);
-            }
-            if (semanticFailure?.status === "invalid"
+            if (semanticFailure
                 && !(semanticFailure.code === "unknown-constant"
                     && this.hasSemanticDefinitionTypeGap(semanticTarget))) {
-                this.error(
-                    semanticTarget,
-                    this.semanticTypeFailureMessage(
-                        semanticFailure.code,
-                        semanticTarget
-                    ),
-                    true
-                );
+                this.reportSemanticFailure(semanticTarget, semanticFailure);
             }
         }
 
-        // The semantic checker is the kernel. Unsupported syntax fails
-        // explicitly so every caller has the same NbE semantics.
-        throw new Error("semantic-nbe-unsupported");
+        // The semantic checker is the kernel. Keep its internal status codes
+        // behind the Core boundary so UI callers always receive a stable,
+        // translated diagnostic.
+        this.error(ast, TR("类型推断暂不支持该表达式"), true);
+        throw new Error("unreachable semantic unsupported syntax");
     }
     private finalizeSemanticResult(ast: AST, context: Context) {
         const alphaConversionIds = new Set<number>;
@@ -1759,6 +1764,47 @@ export class Core {
         ast.checked = checked;
         return true;
     }
+    /** Normalize a proof goal after an explicit expansion without asking the
+     * type synthesizer to re-prove the whole (potentially very large) goal.
+     * The replacement body is already kernel-checked in its definition cache;
+     * this pass performs only local beta/iota computation introduced by the
+     * substitution and keeps unrelated named definitions opaque. */
+    normalizeExpandedProofGoal(ast: AST, context: Context) {
+        const deadline = Date.now() + Core.timeout;
+        let nextSemanticBondVarId = Math.max(
+            this.state.bondVarId,
+            ...context.map(([, , id]) => Number.isFinite(id) ? id + 1 : 0)
+        );
+        const visit = (node: AST, nodeContext: Context) => {
+            if (!node || typeof node !== "object") return;
+            if (node.type === "apply") {
+                let head = node;
+                while (head.type === "apply") head = head.nodes?.[0];
+                if (head?.type === "L") {
+                    const normalized = this.semanticKernel.tryWhnf(node, nodeContext, {
+                        deadline,
+                        maxSteps: Core.semanticTypeAssertionMaxSteps,
+                        unfoldDefinitions: false,
+                        freshBondVarId: () => nextSemanticBondVarId++
+                    });
+                    if (normalized) Core.assign(node, normalized, true);
+                }
+            }
+            const binder = node.type === "L" || node.type === "P"
+                || node.type === "S" || node.type === "W";
+            if (node.nodes?.[0]) visit(node.nodes[0], nodeContext);
+            if (node.nodes?.[1]) visit(
+                node.nodes[1],
+                binder
+                    ? assignContext([node.name, node.nodes[0], node.bondVarId], nodeContext)
+                    : nodeContext
+            );
+        };
+        visit(ast, context);
+        this.state.bondVarId = Math.max(this.state.bondVarId, nextSemanticBondVarId);
+        this.finalizeSemanticResult(ast, context);
+        return ast;
+    }
     private trySemanticTypeSynthesis(
         ast: AST,
         context: Context,
@@ -1839,25 +1885,43 @@ export class Core {
             ...checkerOptions,
             elaborateMetas: canTryWithoutElaboration ? false : requestedElaboration
         });
+        const mayNeedElaborationDefinition = (canTryWithoutElaboration
+            && !!options.requireElaboratedTerm)
+            || (!requestedElaboration && semanticType.status !== "success");
+        const hasElaborationDefinition = mayNeedElaborationDefinition
+            && this.semanticTypeChecker.hasElaborationDefinitionReference(semanticAst);
         const needsElaboratedTerm = canTryWithoutElaboration
             && !!options.requireElaboratedTerm
-            && this.semanticTypeChecker.hasElaborationDefinitionReference(semanticAst);
-        if (canTryWithoutElaboration
-            && (semanticType.status !== "success" || needsElaboratedTerm)) {
+            && hasElaborationDefinition;
+        const needsDefinitionElaboration = !requestedElaboration
+            && semanticType.status !== "success"
+            && hasElaborationDefinition;
+        if ((canTryWithoutElaboration
+            && (semanticType.status !== "success" || needsElaboratedTerm))
+            || needsDefinitionElaboration) {
             const elaborated = this.semanticTypeChecker.trySynthesize(semanticAst, context, {
                 ...checkerOptions,
-                elaborateMetas: true
+                elaborateMetas: true,
+                // A complete user term can still depend on public definitions
+                // whose bodies contain inference-only holes.  Reaching and
+                // solving those hidden metas costs more than ordinary syntax-
+                // directed synthesis, so give this rare fallback a larger but
+                // still bounded budget under the same wall-clock deadline.
+                maxSteps: needsDefinitionElaboration
+                    ? Core.semanticTypeSynthesisMaxSteps * 4
+                    : Core.semanticTypeSynthesisMaxSteps
             });
             if (elaborated.status === "success") semanticType = elaborated;
             else if (semanticType.status !== "success" || needsElaboratedTerm) {
-                options.captureFailure?.(
-                    elaborated.status === "invalid"
-                        ? elaborated
-                        : semanticType.status !== "success"
-                            && semanticType.code === "budget-exhausted"
-                            ? semanticType
-                            : elaborated
-                );
+                let failure = elaborated;
+                if (elaborated.status !== "invalid"
+                    && elaborated.code === "budget-exhausted"
+                    && semanticType.status !== "success"
+                    && (semanticType.status === "invalid"
+                        || semanticType.code !== "budget-exhausted")) {
+                    failure = semanticType;
+                }
+                options.captureFailure?.(failure);
                 return;
             }
         }
@@ -1949,9 +2013,22 @@ export class Core {
             case "argument-type-mismatch":
             case "type-mismatch":
                 return TR("函数作用类型不匹配") + ": " + subject;
+            case "unsupported-syntax":
+                return TR("类型推断暂不支持该表达式") + ": " + subject;
+            case "metavariable":
+                return TR("类型推断中仍有未确定的占位符") + ": " + subject;
+            case "conversion-unsupported":
+                return TR("类型推断无法判定类型是否相等") + ": " + subject;
             default:
                 return TR("类型推断错误：") + code + ": " + subject;
         }
+    }
+    private reportSemanticFailure(ast: AST, failure: NbeTypeFailure): never {
+        if (failure.code === "budget-exhausted") {
+            return this.reportSemanticBudgetFailure(ast);
+        }
+        this.error(ast, this.semanticTypeFailureMessage(failure.code, ast), true);
+        throw new Error("unreachable semantic failure");
     }
     private reportSemanticBudgetFailure(ast: AST): never {
         if (this.state.time && Date.now() - this.state.time >= Core.timeout) {

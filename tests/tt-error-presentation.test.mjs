@@ -15,7 +15,8 @@ engine.configure({
 const parser = new ASTParser();
 
 const log = console.log;
-console.log = () => { };
+const capturedLogs = [];
+console.log = (...args) => capturedLogs.push(args.map(String).join(" "));
 try {
     const explicitAtError = engine.check("(@refl _ _ true) true");
     assert.equal(explicitAtError.ok, false, "the explicit @ error fixture must remain ill-typed");
@@ -46,6 +47,13 @@ try {
         roundTripError.error ?? "",
         /@refl _ _ true/,
         "Worker JSON round-trip must retain explicit @ presentation metadata"
+    );
+
+    engine.core.error({ type: "whnf", name: "" }, "probe", false);
+    assert.equal(
+        capturedLogs.at(-1),
+        "whnf probe",
+        "internal semantic nodes must not produce an undefined error-log prefix"
     );
 } finally {
     console.log = log;

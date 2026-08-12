@@ -564,6 +564,15 @@ assert.equal(
     assert.equal(kernel.tryEqual(parser.parse("@succ (@succ @2)"), parser.parse("@4")), true);
     assert.equal(kernel.tryEqual(parser.parse("@max @0 @2"), parser.parse("@2")), true);
     assert.equal(kernel.tryEqual(parser.parse("@max u u"), parser.parse("u")), true);
+    assert.equal(
+        parser.stringify(kernel.tryNormalizeUniverseLevel(
+            parser.parse("@max ?m ?m"),
+            [],
+            { rigidMetas: true }
+        )),
+        "?m",
+        "rigid inference levels must participate in idempotent max normalization"
+    );
     assert.equal(kernel.tryEqual(parser.parse("@max (@succ u) u"), parser.parse("@succ u")), true);
     assert.equal(
         kernel.tryEqual(parser.parse("@max u (@succ (@succ u))"), parser.parse("@succ (@succ u)")),
@@ -619,6 +628,16 @@ assert.equal(
         null,
         "large powers must respect the semantic evaluation budget before allocating a huge BigInt"
     );
+    assert.equal(
+        kernel.tryEqualResult(
+            parser.parse("pow 2 100000"),
+            parser.parse("0"),
+            [],
+            { maxSteps: 64 }
+        ),
+        "budget-exhausted",
+        "the detailed equality result must distinguish an evaluation limit from unsupported syntax"
+    );
     assert.equal(kernel.canReduce(parser.parse("ind_nat C z s n")), false,
         "a variable eliminand must not trigger a speculative semantic attempt");
     assert.equal(kernel.canReduce(parser.parse("ind_nat C z s (succ n)")), true);
@@ -664,6 +683,8 @@ assert.equal(
     const unresolved = parser.parse("pr0 (pair F ?m b)");
     assert.equal(kernel.tryEqualResult(unresolved, unresolved), "unsupported",
         "unification terms must stay outside semantic equality, even by reflexivity");
+    assert.equal(kernel.tryEqual(unresolved, unresolved), null,
+        "the compatibility equality API must continue collapsing unsupported probes to null");
 }
 
 console.log("independent semantic NbE kernel regression passed");

@@ -65,6 +65,9 @@ export class Assist {
         return 0;
     }
     autofillTactics() {
+        return core.withSilentErrors(() => this.collectAutofillTactics());
+    }
+    collectAutofillTactics() {
         const tactics = [];
         const g = this.goal[0];
         if (!g) {
@@ -463,6 +466,11 @@ export class Assist {
         return !!ast && (ast.type === "var" && ast.name === "_"
             || (ast.nodes ?? []).some(node => this.containsInputHole(node)));
     }
+    containsInferenceHole(ast) {
+        return !!ast && (ast.type === "var"
+            && (ast.name === "_" || ast.name?.startsWith("?"))
+            || (ast.nodes ?? []).some(node => this.containsInferenceHole(node)));
+    }
     clearBondIds(ast, seen = new WeakSet()) {
         if (!ast || typeof ast !== "object" || seen.has(ast))
             return;
@@ -817,6 +825,8 @@ export class Assist {
         // newgoal: F(b/a)
         const fn = { type: "L", name: fnparam, nodes: [core.checkType(matched[back ? "$3" : "$2"], goal.context, false), fnbody] };
         matched["$fn"] = fn;
+        const rewrittenGoal = Core.clone(fn.nodes[1]);
+        this.replaceFreeVar(rewrittenGoal, fnparam, matched[back ? "$2" : "$3"]);
         if (!isRfl) {
             matched["$type"] = matched[back ? "$3" : "$2"].checked;
             const y = Core.getNewName("y", ctxtSet);
@@ -857,21 +867,20 @@ export class Assist {
                 newAst = parser.parse(useTrans ?
                     `trans $fn ` + (back ? `$eq` : `(inveq $eq)`) : `ind_eq $2 (L${y}:$type.L${m}:${core.state.disableSimpleEq ? `eq $2 ` + y : `$2=${y}`}. P${m}:` + (back ? `$fn_2, $fn_y` : `$fn_y, $fn_2`) + `) (Lx:_.x) $3 $eq`);
                 Core.replaceByMatch(newAst, matched, /^\$/);
-                try {
-                    core.checkType(newAst, goal.context, false);
-                }
-                catch (e) {
-                    this.goal.unshift(goal);
-                    throw e;
-                }
+                // The equality proof and both endpoint types were checked
+                // above, while fnbody was obtained by capture-safe
+                // substitution from the live goal.  Re-synthesizing this
+                // mechanically constructed transport is redundant and can
+                // expand every implicit alias in a large HoTT goal, creating
+                // thousands of unrelated metas before reaching the known
+                // function type.
                 newAst = { type: "apply", name: "", nodes: [newAst, { type: "var", name: "(?#0)" }] };
                 Core.assign(goal.ast, newAst, true);
                 goal.ast.checked = goal.type;
                 goal.ast = goal.ast.nodes[1];
             }
         }
-        goal.type = Core.clone(fn.nodes[1]);
-        this.replaceFreeVar(goal.type, fnparam, matched[back ? "$2" : "$3"]);
+        goal.type = rewrittenGoal;
         goal.ast.checked = goal.type;
         this.goal.unshift(goal);
         return this;
@@ -1104,6 +1113,108 @@ export class Assist {
         }
         return names;
     }
+    /**
+     * Specialize a previously inferred eliminator type without asking the
+     * semantic checker to synthesize the whole eliminator application again.
+     * A destruct motive contains the current goal, so that application can be
+     * much larger than the individual arguments whose types constrain it.
+     */
+    specializeKnownFunctionType(typ, args, context) {
+        let result = Core.clone(typ);
+        const metas = new Map();
+        for (const arg of args) {
+            result = this.substituteSemanticMetas(result, metas);
+            result = this.reduceBetaSyntax(result);
+            if (result.type !== "P" && result.type !== "->") {
+                throw TR("归纳器参数数量不匹配");
+            }
+            const argumentType = core.checkType(Core.clone(arg), context, false);
+            this.constrainSemanticMetas(result.nodes[0], argumentType, metas);
+            result = this.substituteSemanticMetas(result, metas);
+            const body = Core.clone(result.nodes[1]);
+            if (result.type === "P")
+                this.replaceFreeVar(body, result.name, arg);
+            result = this.reduceBetaSyntax(body);
+        }
+        return this.substituteSemanticMetas(result, metas);
+    }
+    isPrivateSemanticMeta(ast) {
+        return ast?.type === "var" && !ast.bondVarId && /^\?nbe\d+$/.test(ast.name);
+    }
+    substituteSemanticMetas(ast, metas) {
+        if (this.isPrivateSemanticMeta(ast) && metas.has(ast.name)) {
+            return Core.clone(metas.get(ast.name));
+        }
+        const result = {
+            type: ast.type,
+            name: ast.name,
+            bondVarId: ast.bondVarId,
+            displayExplicitAt: ast.displayExplicitAt
+        };
+        if (ast.nodes)
+            result.nodes = ast.nodes.map(node => this.substituteSemanticMetas(node, metas));
+        return result;
+    }
+    constrainSemanticMetas(expected, actual, metas) {
+        const expectedScope = [];
+        const actualScope = [];
+        const boundDepth = (ast, scope) => {
+            for (let index = scope.length - 1; index >= 0; index--) {
+                const binding = scope[index];
+                if (ast.bondVarId && binding.id === ast.bondVarId
+                    || !ast.bondVarId && binding.name === ast.name)
+                    return scope.length - index;
+            }
+            return 0;
+        };
+        const visit = (left, right) => {
+            left = this.substituteSemanticMetas(left, metas);
+            if (this.isPrivateSemanticMeta(left)) {
+                metas.set(left.name, Core.clone(right));
+                return;
+            }
+            if (!left || !right || left.type !== right.type)
+                return;
+            if (left.type === "var") {
+                const leftDepth = boundDepth(left, expectedScope);
+                const rightDepth = boundDepth(right, actualScope);
+                if (leftDepth || rightDepth)
+                    return;
+                return;
+            }
+            if (left.type === "L" || left.type === "P" || left.type === "S" || left.type === "W") {
+                visit(left.nodes[0], right.nodes[0]);
+                expectedScope.push({ name: left.name, id: left.bondVarId });
+                actualScope.push({ name: right.name, id: right.bondVarId });
+                visit(left.nodes[1], right.nodes[1]);
+                expectedScope.pop();
+                actualScope.pop();
+                return;
+            }
+            for (let index = 0; index < (left.nodes?.length ?? 0); index++) {
+                if (right.nodes?.[index])
+                    visit(left.nodes[index], right.nodes[index]);
+            }
+        };
+        visit(expected, actual);
+    }
+    reduceBetaSyntax(ast) {
+        if (!ast.nodes?.length)
+            return Core.clone(ast);
+        const nodes = ast.nodes.map(node => this.reduceBetaSyntax(node));
+        if (ast.type === "apply" && nodes[0]?.type === "L") {
+            const body = Core.clone(nodes[0].nodes[1]);
+            this.replaceFreeVar(body, nodes[0].name, nodes[1]);
+            return this.reduceBetaSyntax(body);
+        }
+        return {
+            type: ast.type,
+            name: ast.name,
+            nodes,
+            bondVarId: ast.bondVarId,
+            displayExplicitAt: ast.displayExplicitAt
+        };
+    }
     destruct(n) {
         n = n.trim();
         const goal = this.goal.shift();
@@ -1166,7 +1277,8 @@ export class Assist {
             // annotating every child node. Read the eliminator type directly
             // instead of relying on indFn.checked being populated as a side effect.
             indFnType = core.checkType(Core.clone(indFn), goal.context, false);
-            headType = core.checkType(indFnHead, goal.context, false);
+            const indFnArgs = core.flattenApplyList(indFnHead).slice(1);
+            headType = this.specializeKnownFunctionType(indFnType, indFnArgs, goal.context);
         }
         catch (e) {
             this.goal.unshift(goal);
@@ -1368,6 +1480,7 @@ export class Assist {
         const goal = this.goal.shift();
         if (!goal)
             throw TR("无证明目标，请使用qed命令结束证明");
+        let requiresStrictSimplification = false;
         try {
             // The goal AST may have been checked in an earlier assistant
             // snapshot.  Its bond ids belong to that check's context and are
@@ -1384,14 +1497,27 @@ export class Assist {
             if (core.opaque.find(e => e[0] === n) && core.state.sysDefs["@" + n]) {
                 core.expandDef(goal.type, goal.context, "@" + n, [0, 1]);
             }
-            core.checkType(goal.type, goal.context, false, undefined, false, true, false);
+            const expandedDefinition = core.state.sysDefs[n] || core.state.userDefs[n];
+            const explicitDefinition = core.opaque.find(e => e[0] === n)
+                ? core.state.sysDefs["@" + n]
+                : undefined;
+            const expansionHasHoles = [expandedDefinition, explicitDefinition]
+                .some(definition => definition && this.containsInferenceHole(definition));
+            if (expandedDefinition && core.hasDefinitionCache(n) && !expansionHasHoles) {
+                core.normalizeExpandedProofGoal(goal.type, goal.context);
+            }
+            else {
+                core.checkType(goal.type, goal.context, false, undefined, false, true, false);
+                requiresStrictSimplification = true;
+            }
         }
         catch (e) {
             this.goal.unshift(goal);
             throw e;
         }
         this.goal.unshift(goal);
-        this.simpl();
+        if (requiresStrictSimplification)
+            this.simpl();
         return this;
     }
     replaceFreeVar(ast, src, dst, freevarInDst = Core.getFreeVars(dst)) {
