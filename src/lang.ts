@@ -502,6 +502,7 @@ class LangMgr {
         "类型推断错误：发现循环引用": "Type inference error: Circular reference detected",
         "类型推断错误：疑似发现循环引用": "Type inference error: Suspected circular reference detected",
         "类型推断超时": "Type inference timeout",
+        "类型论 Worker 验证超时，请增大单条定理判定的默认等待时间": "The type-theory Worker timed out. Increase the default checking time per theorem.",
         "类型推断错误：": "Type inference error: ",
         "本应约束的变量在类型推断时自由出现：": "Variable that should be bound occurs free during type inference: ",
         "由系统保留": " is reserved by the system",

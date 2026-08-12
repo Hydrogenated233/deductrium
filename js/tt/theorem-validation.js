@@ -1,3 +1,46 @@
+/** Determine whether every legacy inference hole has enough checked metadata. */
+export function theoremInferenceComplete(ast) {
+    const seen = new WeakSet();
+    const visit = (node) => {
+        if (!node || seen.has(node))
+            return true;
+        seen.add(node);
+        if (node.type === "var" && (node.name === "_" || node.name?.startsWith("?"))) {
+            if (!node.checked)
+                return false;
+            const checkedType = node.checked.type === ":"
+                ? node.checked.nodes?.[1]
+                : node.checked;
+            if (checkedType?.name === "U@")
+                return true;
+            if (checkedType?.type === "apply"
+                && checkedType.nodes?.[0]?.name === "U")
+                return true;
+            return node.checked.type === ":"
+                ? visit(node.checked.nodes?.[0])
+                : false;
+        }
+        return (node.nodes ?? []).every(visit);
+    };
+    return visit(ast);
+}
+/** Interpret the optional Worker signal while retaining compatibility with older callers. */
+export function theoremInferenceStatus(inferenceComplete) {
+    if (inferenceComplete === true)
+        return "complete";
+    if (inferenceComplete === false)
+        return "incomplete";
+    return "legacy";
+}
+/**
+ * Keep the user's surface declaration for rendering, but inspect the Worker's
+ * elaborated definition when deciding whether inference is complete.
+ */
+export function theoremInferenceTarget(surfaceAst, filledDefinition) {
+    return surfaceAst.type === ":=" && filledDefinition
+        ? filledDefinition
+        : surfaceAst;
+}
 /**
  * Return whether a rendered theorem identifier is known to the current UI
  * context.  The renderer has several name sets (system constants, macros and
@@ -17,6 +60,10 @@ export function theoremInputIndexBeforeItem(items, itemIndex) {
             theoremIndex++;
     }
     return theoremIndex;
+}
+/** Return the first theorem whose pending check still matters. */
+export function findEarliestPendingTheorem(theorems, isPending, isDisabled) {
+    return theorems.find(theorem => isPending(theorem) && !isDisabled(theorem));
 }
 /**
  * An async validation result may only be committed if its input is still at
@@ -42,6 +89,11 @@ export function canReuseTheoremResultOnBlur(state) {
         && !state.validationInvalidated
         && !state.updateDefinitions;
 }
+/** A wall-clock Worker timeout must not rerun the same expensive check on the UI thread. */
+export function shouldFallbackToSynchronousTheoremValidation(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return !message.includes("Type-theory worker timed out");
+}
 /**
  * Coalesces overlapping suffix validations. A newer request invalidates the
  * active run, but waits for its in-flight worker call to settle before the
@@ -52,6 +104,7 @@ export class TheoremValidationCoordinator {
     nextId = 0;
     activeRun = null;
     pendingStartIndex = null;
+    idleWaiters = [];
     request(startIndex) {
         const start = Math.max(0, Math.floor(startIndex));
         if (this.activeRun) {
@@ -73,13 +126,24 @@ export class TheoremValidationCoordinator {
         if (!this.activeRun || this.activeRun.id !== runId)
             return null;
         this.activeRun = null;
-        if (this.pendingStartIndex === null)
+        if (this.pendingStartIndex === null) {
+            const waiters = this.idleWaiters;
+            this.idleWaiters = [];
+            for (const resolve of waiters)
+                resolve();
             return null;
+        }
         const startIndex = this.pendingStartIndex;
         this.pendingStartIndex = null;
         const run = { id: ++this.nextId, startIndex, cancelled: false };
         this.activeRun = run;
         return { id: run.id, startIndex: run.startIndex };
+    }
+    /** Wait until the active validation and every coalesced follow-up have committed. */
+    waitForIdle() {
+        if (!this.activeRun)
+            return Promise.resolve();
+        return new Promise(resolve => this.idleWaiters.push(resolve));
     }
     get hasActiveRun() {
         return this.activeRun !== null;

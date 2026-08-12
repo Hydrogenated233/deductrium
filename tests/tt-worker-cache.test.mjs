@@ -42,6 +42,8 @@ const ftrResult = worker.registerDefinition(parser.parse(
     "ftr:=ind_nat(λ_:_._)True(λ_:_.λa:_.True→a)"
 ));
 assert.equal(ftrResult.ok, true, ftrResult.error);
+assert.doesNotMatch(parser.stringify(ftrResult.filledDefinition), /@ind_nat/,
+    "Worker definitions must fold elaboration-only implicit aliases before transfer");
 const ftr = storedDefinition(worker, ftrResult);
 
 worker.configure({ ...config, userDefinitions: [["ftr", ftr]] });
@@ -54,17 +56,10 @@ const ftreq = storedDefinition(worker, ftreqResult);
 
 const main = new TTCoreEngine();
 main.configure({ ...config, userDefinitions: [["ftr", ftr], ["ftreq", ftreq]] });
-const log = console.log;
-try {
-    console.log = () => { };
-    assert.throws(
-        () => main.core.checkType(parser.parse("ftreq 0 === Lx:ftr 0,eq (x ) true"), [], false),
-        /@1.*@0/
-    );
-} finally {
-    console.log = log;
-}
-main.core.restoreDefinitionCache("ftreq", ftreqResult.definitionCache);
+assert.equal(main.core.serializeDefinitionCache("ftr")?.kind, "nbe",
+    "cacheless prerequisite definitions must rebuild a semantic cache");
+assert.equal(main.core.serializeDefinitionCache("ftreq")?.kind, "nbe",
+    "cacheless dependent definitions must rebuild a semantic cache in declaration order");
 
 let binders = "";
 let args = "";

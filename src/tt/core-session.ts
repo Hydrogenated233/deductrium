@@ -34,7 +34,7 @@ export class TTCoreSession {
             const definition = this.definitions[i];
             if (!definition) continue;
             if (retainedNames.has(definition[0])) needsRebuild = true;
-            delete this.engine.core.state.userDefs[definition[0]];
+            this.engine.core.setUserDefinition(definition[0]);
             delete this.engine.core.state.defTypes[definition[0]];
         }
         this.definitions.length = Math.min(this.definitions.length, start);
@@ -116,8 +116,14 @@ export class TTCoreSession {
         // Definition values are immutable inputs to the checker: Core clones
         // them before reduction. Reusing this owned AST avoids keeping a
         // second full copy of every restored theorem in the Worker session.
-        this.engine.core.state.userDefs[name] = value;
-        if (cache) this.engine.core.restoreDefinitionCache(name, cache);
+        this.engine.core.setUserDefinition(name, value);
+        if (cache) {
+            this.engine.core.restoreDefinitionCache(name, cache);
+        } else {
+            try {
+                definition[2] = this.engine.recoverUserDefinitionCache(name, value);
+            } catch { }
+        }
     }
 
     private definitionFromResult(ast: AST, result: TTCoreCheckResult): Exclude<TTDefinitionSlot, null> {
@@ -127,7 +133,10 @@ export class TTCoreSession {
         // The checked subtree belongs to the transient validation result and
         // is not needed when the definition is expanded later. Omitting it is
         // important for large restored theorem chains.
-        const filled = clearBondIds(Core.clone(result.filledDefinition));
+        const filled = makePortableDefinition(
+            Core.clone(result.filledDefinition),
+            this.engine.core
+        );
         const value = ast.nodes[1].type === ":" ? filled.nodes[0] : filled;
         return [
             ast.nodes[0].name,
@@ -146,9 +155,60 @@ function cloneDefinitionSlot(definition: TTDefinitionSlot): TTDefinitionSlot {
     ];
 }
 
-function clearBondIds(ast: AST) {
-    ast.bondVarId = null;
-    for (const node of ast.nodes ?? []) clearBondIds(node);
-    if (ast.checked) clearBondIds(ast.checked);
+type PortableBinding = Readonly<{ id: number, name: string }>;
+
+function makePortableDefinition(ast: AST, core: Core) {
+    const freeNames = new Set<string>;
+    collectFreeNames(ast, freeNames);
+
+    const uniqueBinderName = (source: string, scope: readonly PortableBinding[]) => {
+        let name = source || "*";
+        while (freeNames.has(name) || scope.some(binding => binding.name === name)) name += "'";
+        return name;
+    };
+
+    const visit = (node: AST, scope: readonly PortableBinding[]) => {
+        if (node.type === "var") {
+            if (validBondVarId(node.bondVarId)) {
+                const binding = scope.find(candidate =>
+                    candidate.id === node.bondVarId
+                    || core.isBondVarIdEqual(candidate.id, node.bondVarId)
+                );
+                if (binding) node.name = binding.name;
+            }
+            node.bondVarId = null;
+            return;
+        }
+
+        if (isBinder(node) && validBondVarId(node.bondVarId)) {
+            visit(node.nodes?.[0], scope);
+            const id = node.bondVarId;
+            const name = uniqueBinderName(node.name, scope);
+            node.name = name;
+            node.bondVarId = null;
+            visit(node.nodes?.[1], [{ id, name }, ...scope]);
+            return;
+        }
+
+        node.bondVarId = null;
+        for (const child of node.nodes ?? []) visit(child, scope);
+    };
+
+    visit(ast, []);
     return ast;
+}
+
+function collectFreeNames(ast: AST, names: Set<string>) {
+    if (ast.type === "var" && !validBondVarId(ast.bondVarId) && ast.name) {
+        names.add(ast.name);
+    }
+    for (const child of ast.nodes ?? []) collectFreeNames(child, names);
+}
+
+function isBinder(ast: AST) {
+    return ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W";
+}
+
+function validBondVarId(id: number | undefined): id is number {
+    return Number.isFinite(id) && id > 0;
 }

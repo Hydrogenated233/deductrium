@@ -3,6 +3,7 @@ import { Assist } from "./assist.js";
 import { ASTParser } from "./astparser.js";
 import { Core } from "./core.js";
 import { TTCoreEngine } from "./engine.js";
+import { compactImplicitAliasesForDisplay, markExplicitAtSyntax } from "./presentation.js";
 const parser = new ASTParser();
 /** DOM-free proof-assistant session shared by the Worker and fallback path. */
 export class TTAssistEngine {
@@ -19,6 +20,8 @@ export class TTAssistEngine {
         this.clear();
     }
     start(target, options, history = []) {
+        if (typeof target !== "string")
+            markExplicitAtSyntax(target);
         const source = typeof target === "string" ? target : parser.stringify(target);
         this.options = { ...options };
         this.targetSource = source;
@@ -53,9 +56,10 @@ export class TTAssistEngine {
     qed() {
         const assist = this.requireAssist();
         assist.qed();
+        const explicitAtNames = new Set();
         return {
-            proof: parser.stringify(assist.elem),
-            theorem: parser.stringify(assist.theorem)
+            proof: parser.stringify(this.presentAst(assist.elem, explicitAtNames)),
+            theorem: parser.stringify(this.presentAst(assist.theorem, explicitAtNames))
         };
     }
     clear() {
@@ -69,7 +73,7 @@ export class TTAssistEngine {
         Assist.disableMultipleApply = this.options?.disableMultipleApply ?? true;
         Assist.disableDestructConds = this.options?.disableDestructConds ?? true;
         Assist.disableDestructEq = this.options?.disableDestructEq ?? true;
-        const target = parser.parse(this.targetSource);
+        const target = markExplicitAtSyntax(parser.parse(this.targetSource));
         if (!target)
             throw new Error(TR("空表达式"));
         if (target.type === "===" || target.type === ":=" || target.type === ":") {
@@ -78,7 +82,7 @@ export class TTAssistEngine {
         const type = this.engine.core.checkType(target, [], false);
         if (type.type !== "apply" || type.nodes[0].name !== "U")
             throw new Error(TR("不是命题类型"));
-        this.assist = new Assist(this.engine.core, this.targetSource);
+        this.assist = new Assist(this.engine.core, target);
         this.history = [];
     }
     executeCommand(command, record) {
@@ -101,14 +105,15 @@ export class TTAssistEngine {
         const assist = this.requireAssist();
         const tactics = assist.autofillTactics();
         assist.markTargets();
-        const theorem = Core.clone(assist.theorem, true);
+        const explicitAtNames = new Set();
+        const theorem = this.presentAst(assist.theorem, explicitAtNames);
         // Intermediate proof terms intentionally contain dependent holes such as
         // (%0).  Checking the outer term before those holes are solved treats the
         // placeholders as user constants and emits misleading unknown-variable
         // / bound-variable diagnostics.  The completed term is checked by qed().
         if (!assist.goal.length) {
             try {
-                this.engine.core.checkType(theorem, [], false);
+                this.engine.core.checkType(theorem, [], false, undefined, false, true);
             }
             catch { }
         }
@@ -123,23 +128,30 @@ export class TTAssistEngine {
             const hasUnresolvedHole = Array.from(freeVars).some(name => name.startsWith("(%") || name.startsWith("(?#"));
             if (!hasUnresolvedHole) {
                 try {
-                    this.engine.core.checkType(type, goal.context, false);
+                    this.engine.core.checkType(type, goal.context, false, undefined, false, true);
                 }
                 catch { }
             }
             return {
-                context: goal.context.map(([name, value, id]) => [name, Core.clone(value, true), id]),
-                type,
+                context: goal.context.map(([name, value, id]) => [
+                    name,
+                    this.presentAst(value, explicitAtNames),
+                    id
+                ]),
+                type: compactImplicitAliasesForDisplay(type, this.engine.core.opaque, explicitAtNames),
                 holeName: goal.ast.name
             };
         });
         return {
             theorem,
-            elem: Core.clone(assist.elem, true),
+            elem: this.presentAst(assist.elem, explicitAtNames),
             goals,
             tactics,
             history: this.history.slice()
         };
+    }
+    presentAst(ast, explicitAtNames) {
+        return compactImplicitAliasesForDisplay(Core.clone(ast, true), this.engine.core.opaque, explicitAtNames);
     }
     requireAssist() {
         if (!this.assist)

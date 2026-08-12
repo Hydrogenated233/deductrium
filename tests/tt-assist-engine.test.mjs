@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 
 import { TTAssistEngine } from "../js/tt/assist-engine.js";
+import { ASTParser } from "../js/tt/astparser.js";
 import { initTypeSystem } from "../js/tt/initial.js";
 
+const parser = new ASTParser();
 const config = {
     unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))],
     inferDisplayMode: "_",
@@ -40,6 +42,16 @@ try {
     const qed = engine.qed();
     assert.equal(qed.theorem, "(Even 0)");
     assert.match(qed.proof, /even0/);
+
+    snapshot = engine.start("True", options);
+    snapshot = engine.apply("exact true");
+    assert.equal(snapshot.goals.length, 0);
+    engine.assist.elem = parser.parse("0");
+    assert.throws(
+        () => engine.qed(),
+        /类型断言失败/,
+        "qed must ask the NbE kernel to validate the completed proof term"
+    );
 
     const equalityCancellation = "Πa:U,Πx:a,Πy:a,Πz:a,Πp:x = y,Πm:y = z,Πn:y = z,(p * m = p * n)→m = n";
     snapshot = engine.start(equalityCancellation, { ...options, disableDestructEq: true });

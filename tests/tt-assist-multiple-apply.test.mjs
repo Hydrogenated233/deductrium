@@ -46,6 +46,15 @@ try {
     snapshot = engine.apply("intro f");
     assert.ok(!snapshot.tactics.includes("apply f"),
         "multi-argument apply should remain unavailable until ttapply2 is unlocked");
+
+    const pureEngine = new TTAssistEngine();
+    pureEngine.configure(config);
+    snapshot = pureEngine.start("Πf:True→True→False,False", options);
+    snapshot = pureEngine.apply("intro f");
+    assert.ok(snapshot.tactics.includes("apply f"),
+        "pure NbE should recommend the multi-argument function");
+    snapshot = pureEngine.apply("apply f");
+    assert.deepEqual(snapshot.goals.map(goal => goal.type.name), ["True", "True"]);
 } finally {
     console.log = originalLog;
 }

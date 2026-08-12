@@ -318,14 +318,14 @@ export function initTypeSystem() {
     addRule("@类型", "@Sum : Pu:U@,Pv:U@,Uu->Uv->(U(@max u v))");
     addRule("@类型", "?A + ?B := @Sum _ _ ?A ?B");
     addRule("_类型", "?A + ?B : U(@max ?u ?v)");
-    addRule("@构造", "@inl : Pu:U@,Pv:U@,Pa:Uu,Pb:Uv,Pxa:a,a + b");
+    addRule("@构造", "@inl : Pu:U@,Pv:U@,Pa:Uu,Pb:Uv,Pxa:a,@Sum u v a b");
     addRule("@构造", "inl := @inl _ _ _ _");
     addRule("_构造", "inl");
-    addRule("@构造", "@inr : Pu:U@,Pv:U@,Pa:Uu,Pb:Uv,Pxb:b,a + b");
+    addRule("@构造", "@inr : Pu:U@,Pv:U@,Pa:Uu,Pb:Uv,Pxb:b,@Sum u v a b");
     addRule("@构造", "inr := @inr _ _ _ _");
     addRule("_构造", "inr");
     typeName = "Sum.ind";
-    addRule("@解构", "@ind_Sum : Pu:U@,Pv:U@,Pw:U@,Pa:Uu,Pb:Uv,PC:(a + b)->Uw,(Pxl:a,(C (inl xl)))->(Pxr:b,(C (inr xr)))->(Px:a + b,C x)");
+    addRule("@解构", "@ind_Sum : Pu:U@,Pv:U@,Pw:U@,Pa:Uu,Pb:Uv,PC:(@Sum u v a b)->Uw,(Pxl:a,C (@inl u v a b xl))->(Pxr:b,C (@inr u v a b xr))->(Px:@Sum u v a b,C x)");
     addRule("@解构", "ind_Sum := @ind_Sum _ _ _ _ _");
     addRule("_解构", "ind_Sum");
     addRule("计算", "ind_Sum ?C ?cinl ?cinr (inl ?xa) === ?cinl ?xa");
@@ -576,7 +576,7 @@ export function initTypeSystem() {
     addRule("_计算", "ap_loop");
 
     typeName = "S1.loop_pow";
-    addRule("定义", "loop_pow:=ind_Z (λh:Z.base=base) (refl base) (ind_nat (λh:nat.base=base) loop (λh:nat.compeq loop)) (ind_nat (λh:nat.base=base) (inveq loop) (λh:nat.compeq (inveq loop)))");
+    addRule("定义", "loop_pow:=(ind_Z (λh:Z.base=base) (refl base) (ind_nat (λh:nat.base=base) loop (λh:nat.compeq loop)) (ind_nat (λh:nat.base=base) (inveq loop) (λh:nat.compeq (inveq loop)))):(Z->(base=base))");
     addRule("@计算", "loop_pow 0Z === refl base");
     addRule("@计算", "loop_pow (pos 0) === loop");
     addRule("@计算", "loop_pow (pos (succ ?x)) === loop * loop_pow (pos ?x)");

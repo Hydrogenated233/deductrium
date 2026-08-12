@@ -36,4 +36,11 @@ for (const [target, nextGoal] of [["Even 2", "(Even 0)"], ["Even 3", "(Even 1)"]
     assert.equal(parser.stringify(assist.goal[0].type), nextGoal);
 }
 
+{
+    const assist = new Assist(engine.core, "Even 2");
+    assist.apply("evenss _");
+    assert.equal(parser.stringify(assist.goal[0].type), "(Even 0)",
+        "apply must solve the explicit underscore from the target before creating premise goals");
+}
+
 console.log("Even tactic recommendations regression passed");

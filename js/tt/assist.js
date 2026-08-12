@@ -1,6 +1,7 @@
 import { TR } from "../lang.js";
 import { ASTParser } from "./astparser.js";
 import { Core, wrapApply, wrapLambda, wrapVar } from "./core.js";
+import { markExplicitAtSyntax } from "./presentation.js";
 let core = new Core;
 let parser = new ASTParser;
 export class Assist {
@@ -15,9 +16,9 @@ export class Assist {
     static disableDestructEq = true;
     constructor(h, target) {
         core = h;
-        core.clearState();
+        core.clearSemanticState();
         if (typeof target === "string") {
-            target = parser.parse(target);
+            target = markExplicitAtSyntax(parser.parse(target));
         }
         this.theorem = Core.clone(target);
         // this.theorem = Core.clone(core.markBondVars(target, []),false);
@@ -38,7 +39,7 @@ export class Assist {
             return 0;
         let fn;
         try {
-            fn = core.checkType(wrapVar(valueName), goal.context, false);
+            fn = core.checkType(wrapVar(valueName), goal.context, false, undefined, false, true);
         }
         catch (e) {
             return 0;
@@ -53,10 +54,10 @@ export class Assist {
             try {
                 core.checkType({
                     type: "===", name: "", nodes: [Core.clone(tail), Core.clone(goal.type)]
-                }, goal.context, true);
+                }, goal.context, true, undefined, false, true);
                 core.checkType({
                     type: ":", name: "", nodes: [Core.clone(fnWithHoles), Core.clone(goal.type)]
-                }, goal.context, false);
+                }, goal.context, false, undefined, true, true);
                 return arity;
             }
             catch (e) { }
@@ -160,22 +161,23 @@ export class Assist {
             if (matchEq) {
                 if (matchEq["$1"].name === "0I" && matchEq["$2"].name === "1I")
                     tactics.push("apply segI");
-                else if (matchEq["$1"].name === "1I" && matchEq["$2"].name === "0I" && core.checkConst("inveq", []))
+                else if (matchEq["$1"].name === "1I" && matchEq["$2"].name === "0I" && core.hasConst("inveq"))
                     tactics.push("apply inveq segI");
                 if (matchEq["$1"].name === "base" && matchEq["$2"].name === "base")
                     tactics.push("exact loop");
                 try {
-                    if (core.checkType({ type: "===", name: "", nodes: [matchEq["$1"], matchEq["$2"]] }, g.context, false)) {
+                    if (core.checkType({
+                        type: "===",
+                        name: "",
+                        nodes: [Core.clone(matchEq["$1"]), Core.clone(matchEq["$2"])]
+                    }, g.context, false, undefined, false, true)) {
                         tactics.push("rfl");
                     }
                 }
                 catch (e) { }
-                try {
-                    if (core.checkType({ type: ":", name: "", nodes: [matchEq["$1"], wrapLambda("->", "", wrapVar("_"), wrapVar("_"))] }, g.context, false)) {
-                        tactics.push("fnext");
-                    }
+                if (this.semanticFunctionType(matchEq["$1"], g.context)) {
+                    tactics.push("fnext");
                 }
-                catch (e) { }
             }
         }
         const s = new Set;
@@ -199,7 +201,7 @@ export class Assist {
                     type: "===", name: "", nodes: [
                         k, Core.clone(g.type)
                     ]
-                }, g.context, true)) {
+                }, g.context, true, undefined, false, true)) {
                     tactics.push("apply " + val);
                 }
             }
@@ -210,7 +212,7 @@ export class Assist {
                         Core.clone(typ), wrapLambda("P", "_", wrapVar("_"), Core.clone(g.type))
                     ]
                 };
-                if (core.checkType(k2, g.context, false))
+                if (core.checkType(k2, g.context, false, undefined, false, true))
                     tactics.push("apply " + val);
             }
             catch (e) { }
@@ -218,9 +220,8 @@ export class Assist {
                 tactics.push("apply " + val);
             }
         }
-        const ntype = Core.clone(type);
-        this.whnf(ntype, g.context);
-        if (!Core.exactEqual(type, ntype)) {
+        const simplified = this.semanticSimplification(type, g.context);
+        if (simplified && !Core.exactEqual(simplified.source, simplified.normalized)) {
             tactics.push("simpl");
         }
         const vars = Core.getFreeVars(type);
@@ -346,7 +347,7 @@ export class Assist {
         for (let [pattern, eq, evidences] of Assist.eq_matches) {
             let unlock_yet = false;
             for (let e of evidences) {
-                if (!core.checkConst(e, []))
+                if (!core.hasConst(e))
                     unlock_yet = true;
                 break;
             }
@@ -365,7 +366,7 @@ export class Assist {
                 if (tfn?.type === "L") {
                     const paramType = tfn.nodes[0];
                     const fnbody = tfn.nodes[1];
-                    if (!Core.getFreeVars(fnbody).has(tfn.name) && core.checkConst("transconst", [])) {
+                    if (!Core.getFreeVars(fnbody).has(tfn.name) && core.hasConst("transconst")) {
                         eq = wrapApply(wrapVar("transconst"), res["$p"], res["$x"]);
                     }
                     else if (fnbody.type === "=" || (fnbody.nodes?.[0]?.nodes?.[0]?.name === "eq")) {
@@ -377,20 +378,20 @@ export class Assist {
                             r = fnbody.nodes[1];
                         }
                         if (l.type == "var" && l.name === tfn.name) {
-                            if (r.type == "var" && r.name === tfn.name && core.checkConst("transleftright", [])) {
+                            if (r.type == "var" && r.name === tfn.name && core.hasConst("transleftright")) {
                                 eq = wrapApply(wrapVar("transleftright"), res["$p"], res["$x"]);
                             }
-                            else if (!Core.getFreeVars(r).has(tfn.name) && core.checkConst("transleft", [])) {
+                            else if (!Core.getFreeVars(r).has(tfn.name) && core.hasConst("transleft")) {
                                 eq = wrapApply(wrapVar("transleft"), res["$p"], res["$x"]);
                             }
-                            else if (core.checkConst("transeq", [])) {
+                            else if (core.hasConst("transeq")) {
                                 eq = wrapApply(wrapVar("transeq"), wrapLambda("L", tfn.name, paramType, l), wrapLambda("L", tfn.name, paramType, r), res["$p"], res["$x"]);
                             }
                         }
                         else if (r.type == "var" && r.name === tfn.name && !Core.getFreeVars(l).has(tfn.name)) {
                             eq = wrapApply(wrapVar("transright"), res["$p"], res["$x"]);
                         }
-                        else if (core.checkConst("transeq", [])) {
+                        else if (core.hasConst("transeq")) {
                             eq = wrapApply(wrapVar("transeq"), wrapLambda("L", tfn.name, paramType, l), wrapLambda("L", tfn.name, paramType, r), res["$p"], res["$x"]);
                         }
                     }
@@ -400,10 +401,10 @@ export class Assist {
                 tfn = res["$apfn"];
                 if (tfn?.type === "L") {
                     const fnbody = tfn.nodes[1];
-                    if (!Core.getFreeVars(fnbody).has(tfn.name) && core.checkConst("apconst", [])) {
+                    if (!Core.getFreeVars(fnbody).has(tfn.name) && core.hasConst("apconst")) {
                         eq = wrapApply(wrapVar("apconst"), res["$p"], fnbody);
                     }
-                    else if (fnbody.type === "var" && fnbody.name === tfn.name && core.checkConst("apid", [])) {
+                    else if (fnbody.type === "var" && fnbody.name === tfn.name && core.hasConst("apid")) {
                         eq = wrapApply(wrapVar("apid"), res["$p"]);
                     }
                     else
@@ -424,24 +425,31 @@ export class Assist {
     }
     exact(ast) {
         if (typeof ast === "string") {
-            ast = parser.parse(ast);
+            ast = markExplicitAtSyntax(parser.parse(ast));
         }
         const goal = this.goal.shift();
         if (!goal)
             throw TR("无证明目标，请使用qed命令结束证明");
         let context = goal.context;
+        const hasInputHoles = this.containsInputHole(ast);
         try {
-            const k = Core.clone(ast);
-            core.checkType({
-                type: ":", name: "", nodes: [
-                    k, Core.clone(goal.type)
-                ]
-            }, context, true);
+            const k = hasInputHoles
+                ? this.elaborateAndAutofill(ast, goal.type, context)
+                : Core.clone(ast);
+            if (!hasInputHoles) {
+                core.checkType({
+                    type: ":", name: "", nodes: [
+                        k, Core.clone(goal.type)
+                    ]
+                }, context, false);
+            }
             Core.assign(goal.ast, k, true);
             this.resolveDependGoal(goal.depend);
             return this;
         }
         catch (e) {
+            if (hasInputHoles)
+                throw e;
             try {
                 core.checkType(ast, context, false);
             }
@@ -451,41 +459,158 @@ export class Assist {
             throw TR("无法对类型") + parser.stringify(ast.checked) + TR("使用exact策略作用于类型") + parser.stringify(goal.type);
         }
     }
+    containsInputHole(ast) {
+        return !!ast && (ast.type === "var" && ast.name === "_"
+            || (ast.nodes ?? []).some(node => this.containsInputHole(node)));
+    }
+    clearBondIds(ast, seen = new WeakSet()) {
+        if (!ast || typeof ast !== "object" || seen.has(ast))
+            return;
+        seen.add(ast);
+        delete ast.bondVarId;
+        for (const node of ast.nodes ?? [])
+            this.clearBondIds(node, seen);
+        if (ast.checked)
+            this.clearBondIds(ast.checked, seen);
+    }
+    findInputHole(ast) {
+        if (!ast)
+            return null;
+        if (ast.type === "var" && ast.name === "_")
+            return ast;
+        for (const node of ast.nodes ?? []) {
+            const hole = this.findInputHole(node);
+            if (hole)
+                return hole;
+        }
+        return null;
+    }
+    runAutofillCommand(command) {
+        const commandEnd = command.indexOf(" ");
+        const name = commandEnd === -1 ? command : command.slice(0, commandEnd);
+        const parameter = commandEnd === -1 ? null : command.slice(commandEnd);
+        const tactic = this[name];
+        if (typeof tactic !== "function" || name === "constructor"
+            || name === "autofillTactics" || name === "markTargets" || name === "qed") {
+            throw TR("未知的证明策略");
+        }
+        tactic.call(this, parameter);
+    }
+    autofillTerm(type, context) {
+        const savedGoals = this.goal;
+        const root = wrapVar("(?#auto)");
+        root.checked = Core.clone(type, true);
+        this.goal = [{
+                context: Core.cloneContext(context),
+                type: Core.clone(type, true),
+                ast: root,
+                depend: null
+            }];
+        try {
+            const seenStates = new Set();
+            for (let step = 0; step < 64 && this.goal.length; step++) {
+                const command = this.autofillTactics().find(tactic => tactic !== "qed");
+                if (!command)
+                    throw TR("无法自动填入") + parser.stringify(type);
+                const stateKey = command + "\n" + this.goal
+                    .map(goal => parser.stringify(goal.type))
+                    .join("\n");
+                if (seenStates.has(stateKey)) {
+                    throw TR("无法自动填入") + parser.stringify(type);
+                }
+                seenStates.add(stateKey);
+                this.runAutofillCommand(command);
+            }
+            if (this.goal.length)
+                throw TR("自动填入步骤过多");
+            return root;
+        }
+        finally {
+            this.goal = savedGoals;
+        }
+    }
+    elaborateAndAutofill(ast, expected, context) {
+        let term = Core.clone(ast);
+        for (let step = 0; step < 64; step++) {
+            const assertion = {
+                type: ":", name: "", nodes: [term, Core.clone(expected)]
+            };
+            core.checkType(assertion, context, true, undefined, true, true);
+            term = assertion.nodes[0];
+            const hole = this.findInputHole(term);
+            if (!hole)
+                return term;
+            const holeType = hole.checked;
+            if (!holeType || this.containsInputHole(holeType)) {
+                throw TR("无法自动确定占位符类型");
+            }
+            Core.assign(hole, this.autofillTerm(holeType, context), true);
+        }
+        throw TR("自动填入步骤过多");
+    }
     apply(ast) {
         if (typeof ast === "string") {
-            ast = parser.parse(ast);
+            ast = markExplicitAtSyntax(parser.parse(ast));
         }
         const goal = this.goal.shift();
         if (!goal)
             throw TR("无证明目标，请使用qed命令结束证明");
         let context = goal.context;
-        try {
-            const k = Core.clone(ast);
-            core.checkType({
-                type: ":", name: "", nodes: [
-                    k, Core.clone(goal.type)
-                ]
-            }, context, true);
-            Core.assign(goal.ast, k, true);
-            this.resolveDependGoal(goal.depend);
-            return this;
+        const hasInputHoles = this.containsInputHole(ast);
+        const autoFillSurfaceHoles = hasInputHoles;
+        let explicitExactError;
+        if (autoFillSurfaceHoles) {
+            try {
+                const completed = this.elaborateAndAutofill(ast, goal.type, context);
+                Core.assign(goal.ast, completed, true);
+                this.resolveDependGoal(goal.depend);
+                return this;
+            }
+            catch (e) {
+                explicitExactError = e;
+            }
         }
-        catch (e) { }
+        else {
+            try {
+                const k = Core.clone(ast);
+                core.checkType({
+                    type: ":", name: "", nodes: [
+                        k, Core.clone(goal.type)
+                    ]
+                }, context, false);
+                Core.assign(goal.ast, k, true);
+                this.resolveDependGoal(goal.depend);
+                return this;
+            }
+            catch (e) { }
+        }
         let applyType = null;
+        let checkedApplyAst = null;
         try {
             const k = {
                 type: ":", name: "", nodes: [
                     Core.clone(ast), wrapLambda("P", "_", wrapVar("_"), Core.clone(goal.type))
                 ]
             };
-            core.checkType(k, context, false);
-            applyType = k.nodes[1].nodes[0];
+            if (autoFillSurfaceHoles) {
+                checkedApplyAst = this.elaborateAndAutofill(k.nodes[0], k.nodes[1], context);
+            }
+            else {
+                core.checkType(k, context, false);
+                checkedApplyAst = k.nodes[0];
+            }
+            const checkedFunctionType = checkedApplyAst.checked;
+            applyType = checkedFunctionType?.type === "P" || checkedFunctionType?.type === "->"
+                ? checkedFunctionType.nodes[0]
+                : k.nodes[1].nodes[0];
             if (applyType.checked?.type === ":") {
                 applyType = applyType.checked.nodes[0];
             }
         }
         catch (e) {
             this.goal.unshift(goal);
+            if (autoFillSurfaceHoles)
+                throw explicitExactError ?? e;
             try {
                 if (Assist.disableMultipleApply)
                     throw e;
@@ -502,12 +627,10 @@ export class Assist {
                 throw TR("无法对类型") + parser.stringify(ast.checked) + TR("使用apply策略作用于类型") + parser.stringify(goal.type);
             }
         }
-        try {
+        if (checkedApplyAst?.checked)
+            ast = checkedApplyAst;
+        else
             core.checkType(ast, context, false);
-        }
-        catch (e) {
-            throw e;
-        }
         // goal.ast is refferd at outter level hole,  we fill the hole first
         Core.assign(goal.ast, {
             type: "apply", name: "", nodes: [ast, {
@@ -544,7 +667,7 @@ export class Assist {
             }
             try {
                 core.checkType(wrapLambda("===", "", Core.clone(tail), Core.clone(goal.type)), goal.context, true);
-                core.checkType({ nodes: [fnWith_, Core.clone(goal.type)], type: ":", name: "" }, goal.context, false);
+                core.checkType({ nodes: [fnWith_, Core.clone(goal.type)], type: ":", name: "" }, goal.context, false, undefined, true);
                 break;
             }
             catch (e) { }
@@ -605,24 +728,76 @@ export class Assist {
     }
     rw(eq, back = false, forcingMatchAST) {
         if (typeof eq === "string")
-            eq = parser.parse(eq);
+            eq = markExplicitAtSyntax(parser.parse(eq));
         if (!eq)
             throw TR("请输入用于改写的相等假设");
         const goal = this.goal.shift();
         if (!goal)
             throw TR("无证明目标，请使用qed命令结束证明");
         let matched;
-        try {
-            const t = core.checkType(eq, goal.context, false);
-            matched = Core.match(t, parser.parse("$2 = $3"), /^\$/) || Core.match(t, parser.parse("eq $2 $3"), /^\$/) || Core.match(t, parser.parse("@eq $0 $1 $2 $3"), /^\$/);
+        const matchEquality = (type) => Core.match(type, parser.parse("$2 = $3"), /^\$/)
+            || Core.match(type, parser.parse("eq $2 $3"), /^\$/)
+            || Core.match(type, parser.parse("@eq $0 $1 $2 $3"), /^\$/);
+        const containsInputHole = (ast) => ast?.type === "var" && ast.name === "_"
+            || (ast?.nodes ?? []).some(containsInputHole);
+        const hadInputHoles = containsInputHole(eq);
+        if (hadInputHoles) {
+            // Explicit rewrite holes are inferred from the occurrence being
+            // rewritten. Probe larger target subterms first, constraining the
+            // theorem's source (or destination for rwb) to each candidate.
+            const candidates = [];
+            const stack = [forcingMatchAST || goal.type];
+            const seen = new WeakSet();
+            while (stack.length && candidates.length < 512) {
+                const candidate = stack.pop();
+                if (!candidate || typeof candidate !== "object" || seen.has(candidate))
+                    continue;
+                seen.add(candidate);
+                candidates.push(candidate);
+                const nodes = candidate.nodes ?? [];
+                for (let index = nodes.length - 1; index >= 0; index--) {
+                    stack.push(nodes[index]);
+                }
+            }
+            for (const candidate of candidates) {
+                const expectedEquality = back
+                    ? wrapApply(wrapVar("eq"), wrapVar("_"), Core.clone(candidate))
+                    : wrapApply(wrapVar("eq"), Core.clone(candidate), wrapVar("_"));
+                let completed;
+                try {
+                    completed = this.elaborateAndAutofill(eq, expectedEquality, goal.context);
+                }
+                catch {
+                    continue;
+                }
+                if (containsInputHole(completed))
+                    continue;
+                const inferredType = completed.checked;
+                const inferredMatch = inferredType && matchEquality(inferredType);
+                if (!inferredMatch)
+                    continue;
+                eq = completed;
+                matched = inferredMatch;
+                break;
+            }
+            if (!matched) {
+                this.goal.unshift(goal);
+                throw TR("未找到任何指定改写的项");
+            }
         }
-        catch (e) {
-            this.goal.unshift(goal);
-            throw e;
+        else {
+            try {
+                const t = core.checkType(eq, goal.context, false);
+                matched = matchEquality(t);
+            }
+            catch (e) {
+                this.goal.unshift(goal);
+                throw e;
+            }
         }
         let isRfl = false;
         try {
-            core.checkType(wrapLambda("===", "", eq, wrapVar("rfl")), goal.context, false);
+            core.checkType(wrapLambda("===", "", eq, wrapVar("rfl")), goal.context, false, undefined, false, hadInputHoles);
             isRfl = true;
         }
         catch (e) {
@@ -659,7 +834,7 @@ export class Assist {
                 Core.match(fnbody, parser.parse(fnparam + " = $2"), /^\$/, compeq = {});
             let newAst;
             const wrapInvOrNot = (ast, wrap) => wrap ? wrapApply(wrapVar("inveq"), ast) : ast;
-            if (compeq["$2"] && !Core.getFreeVars(compeq['$2']).has(fnparam) && (!back || core.checkConst("inveq", [])) && core.checkConst("compeq", [])) {
+            if (compeq["$2"] && !Core.getFreeVars(compeq['$2']).has(fnparam) && (!back || core.hasConst("inveq")) && core.hasConst("compeq")) {
                 // h:a0=a1, a0=b -> ?:a1=b =>  h * ? 
                 // h:a0=a1, a1=b -> ?:a0=b =>  inv(h) * ? 
                 const newGoalAst = { type: "var", name: "(?#0)" };
@@ -668,7 +843,7 @@ export class Assist {
                 goal.ast.checked = goal.type;
                 goal.ast = goal.ast.nodes[1];
             }
-            else if (compeq["$1"] && !Core.getFreeVars(compeq['$1']).has(fnparam) && (back || core.checkConst("inveq", [])) && core.checkConst("compeq", [])) {
+            else if (compeq["$1"] && !Core.getFreeVars(compeq['$1']).has(fnparam) && (back || core.hasConst("inveq")) && core.hasConst("compeq")) {
                 // h:b0=b1, a=b0 -> ?:a=b1 =>  ? * inv(h) 
                 // h:b0=b1, a=b1 -> ?:a=b0 =>  ? * h 
                 const newGoalAst = { type: "var", name: "(?#0)" };
@@ -678,7 +853,7 @@ export class Assist {
                 goal.ast = goal.ast.nodes[0];
             }
             else {
-                const useTrans = core.checkConst("trans", []) && (back || core.checkConst("inveq", []));
+                const useTrans = core.hasConst("trans") && (back || core.hasConst("inveq"));
                 newAst = parser.parse(useTrans ?
                     `trans $fn ` + (back ? `$eq` : `(inveq $eq)`) : `ind_eq $2 (L${y}:$type.L${m}:${core.state.disableSimpleEq ? `eq $2 ` + y : `$2=${y}`}. P${m}:` + (back ? `$fn_2, $fn_y` : `$fn_y, $fn_2`) + `) (Lx:_.x) $3 $eq`);
                 Core.replaceByMatch(newAst, matched, /^\$/);
@@ -812,7 +987,11 @@ export class Assist {
     qed() {
         if (this.goal.length)
             throw TR("证明尚未完成");
-        // core.checkType({ type: ":", name: "", nodes: [Core.clone(this.elem), Core.clone(this.theorem)] }, [], true);
+        core.checkType({
+            type: ":",
+            name: "",
+            nodes: [Core.clone(this.elem), Core.clone(this.theorem)]
+        }, [], false, undefined, false, true);
     }
     simpl(str) {
         if (str) {
@@ -846,7 +1025,7 @@ export class Assist {
             matched = Core.match(t, parser.parse("$2 = $3"), /^\$/) || Core.match(t, parser.parse("eq $2 $3"), /^\$/) || Core.match(t, parser.parse("@eq $0 $1 $2 $3"), /^\$/);
             if (!matched)
                 throw TR("无法对非相等类型使用该策略");
-            if (!core.checkType({ type: ":", name: "", nodes: [matched["$2"], wrapLambda("->", "", wrapVar("_"), wrapVar("_"))] }, goal.context, false)) {
+            if (!this.semanticFunctionType(matched["$2"], goal.context)) {
                 throw TR("无法对非函数相等类型使用fnext策略");
             }
             this.goal.unshift(goal);
@@ -873,7 +1052,7 @@ export class Assist {
         if (!goal)
             throw TR("无证明目标，请使用qed命令结束证明");
         try {
-            let ast = parser.parse(astr);
+            let ast = markExplicitAtSyntax(parser.parse(astr));
             const ctxtNames = new Set(goal.context.map(e => e[0]));
             let name = Core.getNewName("hyp", ctxtNames);
             if (ast.type === ":" && ast.nodes[0].type === "var") {
@@ -976,15 +1155,23 @@ export class Assist {
         }
         const indFn = wrapVar(indFnName);
         const indFnHead = wrapApply(indFn, ...typeParams.map(e => Core.clone(e)), Core.clone(C));
+        // Goal snapshots are checked against cloned contexts, so their bound
+        // variable ids do not belong to the live assistant context. Rebind the
+        // whole eliminator application before NbE substitutes the motive.
+        this.clearBondIds(indFnHead);
         let headType;
+        let indFnType;
         try {
+            // Semantic synthesis returns the application's type without
+            // annotating every child node. Read the eliminator type directly
+            // instead of relying on indFn.checked being populated as a side effect.
+            indFnType = core.checkType(Core.clone(indFn), goal.context, false);
             headType = core.checkType(indFnHead, goal.context, false);
         }
         catch (e) {
             this.goal.unshift(goal);
             throw e;
         }
-        const indFnType = indFn.checked;
         const indFnParams = this.flattenParams(indFnType);
         const indFnParamNames = this.flattenParamNames(indFnType);
         // holes includes ctor holes and also grpara / tail: x->C x
@@ -1075,7 +1262,7 @@ export class Assist {
         if (n?.startsWith("?") || n === "_")
             n = null;
         try {
-            let val = n ? parser.parse(n) : wrapVar("(?#0)");
+            let val = n ? markExplicitAtSyntax(parser.parse(n)) : wrapVar("(?#0)");
             Core.assign(goal.ast, wrapApply(wrapVar("pair"), dfn, val, wrapVar("(?#0)")), true);
             goal.ast.checked = goal.type;
             if (n) {
@@ -1186,17 +1373,8 @@ export class Assist {
             // snapshot.  Its bond ids belong to that check's context and are
             // stale after dependent goals are rewritten; reusing them causes
             // false "Bound Var Leakage" diagnostics during expansion.
-            const clearBondIds = (ast) => {
-                if (!ast)
-                    return;
-                delete ast.bondVarId;
-                for (const node of ast.nodes ?? [])
-                    clearBondIds(node);
-                if (ast.checked)
-                    clearBondIds(ast.checked);
-            };
             const freshGoal = core.desugar(Core.clone(goal.type), false);
-            clearBondIds(freshGoal);
+            this.clearBondIds(freshGoal);
             goal.type = core.markBondVars(freshGoal, goal.context);
             if (!core.expandDef(goal.type, goal.context, n, [pos, 1])) {
                 this.goal.unshift(goal);
@@ -1206,23 +1384,7 @@ export class Assist {
             if (core.opaque.find(e => e[0] === n) && core.state.sysDefs["@" + n]) {
                 core.expandDef(goal.type, goal.context, "@" + n, [0, 1]);
             }
-            core.markAndCheckInferedValue(goal.type, goal.context, false);
-            const alphaConversionIds = new Set;
-            core.reduce(goal.type, goal.context, false, alphaConversionIds);
-            core.doAlphaConversionByIds(goal.type, goal.context, alphaConversionIds);
-            // Expanded definitions such as `eqv` can expose universe
-            // metavariables whose constraints are needed while checking the
-            // expanded term itself. Keep eager inference local to this proof
-            // assistant validation so ordinary Worker/type checks retain
-            // their incremental cache behavior.
-            const eagerInferRel = core.state.eagerInferRel;
-            core.state.eagerInferRel = true;
-            try {
-                core.checkType(goal.type, goal.context, false);
-            }
-            finally {
-                core.state.eagerInferRel = eagerInferRel;
-            }
+            core.checkType(goal.type, goal.context, false, undefined, false, true, false);
         }
         catch (e) {
             this.goal.unshift(goal);
@@ -1262,6 +1424,33 @@ export class Assist {
     // }
     whnf(ast, context) {
         return core.checkType({ type: "whnf", nodes: [ast, wrapVar("_")], name: "" }, context, true);
+    }
+    semanticSimplification(ast, context) {
+        const source = Core.clone(ast);
+        try {
+            core.checkType(source, context, false, undefined, true, true, false);
+            const normalized = Core.clone(source);
+            core.checkType({ type: "whnf", nodes: [normalized, wrapVar("_")], name: "" }, context, true, undefined, false, true, false);
+            return { source, normalized };
+        }
+        catch {
+            return null;
+        }
+    }
+    semanticFunctionType(ast, context) {
+        const candidate = Core.clone(ast);
+        let type;
+        try {
+            type = core.checkType(candidate, context, false, undefined, true, true);
+            if (type.type !== "P" && type.type !== "->") {
+                type = Core.clone(type);
+                core.checkType({ type: "whnf", nodes: [type, wrapVar("_")], name: "" }, context, true, undefined, false, true);
+            }
+        }
+        catch {
+            return null;
+        }
+        return type.type === "P" || type.type === "->" ? type : null;
     }
 }
 //# sourceMappingURL=assist.js.map

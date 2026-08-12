@@ -1,5 +1,57 @@
 export type OrderedTheoremItem = { kind: "theorem" | "folder" };
 
+export type TheoremInferenceNode = {
+    type: string;
+    name?: string;
+    nodes?: readonly TheoremInferenceNode[];
+    checked?: TheoremInferenceNode | null;
+};
+
+/** Determine whether every legacy inference hole has enough checked metadata. */
+export function theoremInferenceComplete(ast: TheoremInferenceNode | null | undefined) {
+    const seen = new WeakSet<object>();
+    const visit = (node: TheoremInferenceNode | null | undefined): boolean => {
+        if (!node || seen.has(node)) return true;
+        seen.add(node);
+        if (node.type === "var" && (node.name === "_" || node.name?.startsWith("?"))) {
+            if (!node.checked) return false;
+            const checkedType = node.checked.type === ":"
+                ? node.checked.nodes?.[1]
+                : node.checked;
+            if (checkedType?.name === "U@") return true;
+            if (checkedType?.type === "apply"
+                && checkedType.nodes?.[0]?.name === "U") return true;
+            return node.checked.type === ":"
+                ? visit(node.checked.nodes?.[0])
+                : false;
+        }
+        return (node.nodes ?? []).every(visit);
+    };
+    return visit(ast);
+}
+
+export type TheoremInferenceStatus = "complete" | "incomplete" | "legacy";
+
+/** Interpret the optional Worker signal while retaining compatibility with older callers. */
+export function theoremInferenceStatus(inferenceComplete: boolean | undefined): TheoremInferenceStatus {
+    if (inferenceComplete === true) return "complete";
+    if (inferenceComplete === false) return "incomplete";
+    return "legacy";
+}
+
+/**
+ * Keep the user's surface declaration for rendering, but inspect the Worker's
+ * elaborated definition when deciding whether inference is complete.
+ */
+export function theoremInferenceTarget<T extends TheoremInferenceNode>(
+    surfaceAst: T,
+    filledDefinition?: T
+) {
+    return surfaceAst.type === ":=" && filledDefinition
+        ? filledDefinition
+        : surfaceAst;
+}
+
 /**
  * Return whether a rendered theorem identifier is known to the current UI
  * context.  The renderer has several name sets (system constants, macros and
@@ -19,6 +71,15 @@ export function theoremInputIndexBeforeItem(items: readonly OrderedTheoremItem[]
         if (items[i].kind === "theorem") theoremIndex++;
     }
     return theoremIndex;
+}
+
+/** Return the first theorem whose pending check still matters. */
+export function findEarliestPendingTheorem<T>(
+    theorems: readonly T[],
+    isPending: (theorem: T) => boolean,
+    isDisabled: (theorem: T) => boolean
+) {
+    return theorems.find(theorem => isPending(theorem) && !isDisabled(theorem));
 }
 
 /**
@@ -70,6 +131,12 @@ export function canReuseTheoremResultOnBlur(state: TheoremBlurState) {
         && !state.updateDefinitions;
 }
 
+/** A wall-clock Worker timeout must not rerun the same expensive check on the UI thread. */
+export function shouldFallbackToSynchronousTheoremValidation(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return !message.includes("Type-theory worker timed out");
+}
+
 export type TheoremValidationRun = {
     id: number;
     startIndex: number;
@@ -85,6 +152,7 @@ export class TheoremValidationCoordinator {
     private nextId = 0;
     private activeRun: (TheoremValidationRun & { cancelled: boolean }) | null = null;
     private pendingStartIndex: number | null = null;
+    private idleWaiters: (() => void)[] = [];
 
     request(startIndex: number): TheoremValidationRun | null {
         const start = Math.max(0, Math.floor(startIndex));
@@ -108,12 +176,23 @@ export class TheoremValidationCoordinator {
     complete(runId: number): TheoremValidationRun | null {
         if (!this.activeRun || this.activeRun.id !== runId) return null;
         this.activeRun = null;
-        if (this.pendingStartIndex === null) return null;
+        if (this.pendingStartIndex === null) {
+            const waiters = this.idleWaiters;
+            this.idleWaiters = [];
+            for (const resolve of waiters) resolve();
+            return null;
+        }
         const startIndex = this.pendingStartIndex;
         this.pendingStartIndex = null;
         const run = { id: ++this.nextId, startIndex, cancelled: false };
         this.activeRun = run;
         return { id: run.id, startIndex: run.startIndex };
+    }
+
+    /** Wait until the active validation and every coalesced follow-up have committed. */
+    waitForIdle(): Promise<void> {
+        if (!this.activeRun) return Promise.resolve();
+        return new Promise(resolve => this.idleWaiters.push(resolve));
     }
 
     get hasActiveRun() {

@@ -16,6 +16,7 @@
     min-height: 100px;
     max-height: 300px;
     overflow-y: auto;
+    min-width: 0;
     width: 100%;
     border: solid;
     margin-top: 0.5em;
@@ -467,7 +468,13 @@ div.hintbar {
 
 .inhabitat-div {
     width: calc(100% - 64px);
+    min-width: 0;
+    max-width: calc(100% - 64px);
     display: inline-block;
+    vertical-align: top;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .inhabitat-div:hover {
@@ -488,6 +495,14 @@ div.wrapper.error {
 
 .inhabitat .tt-theorem-input {
     width: calc(100% - 64px);
+    min-height: 21px;
+    box-sizing: border-box;
+    resize: none;
+    overflow: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    vertical-align: top;
 }
 
 .tt-local-const {
@@ -579,6 +594,18 @@ div.wrapper.error {
 
 #tactic-hint .highlighted {
     color: orange;
+}
+
+/* Long elaborated proof terms must wrap in both the live preview and the
+   rendered theorem row instead of forcing the page to scroll horizontally. */
+#tactic-hint,
+#tactic-state,
+#tactic-list {
+    min-width: 0;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 #tactic-list .highlighted {

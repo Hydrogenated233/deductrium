@@ -8,7 +8,7 @@ import { Assist } from "./assist.js";
 import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { initTypeSystem } from "./initial.js";
-import { canReuseTheoremResultOnBlur, isKnownTheoremIdentifier, theoremInputIndexBeforeItem, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator } from "./theorem-validation.js";
+import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremInputIndexBeforeItem, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator } from "./theorem-validation.js";
 const parser = new ASTParser;
 const constructors = new Set();
 const destructors = new Set();
@@ -127,6 +127,7 @@ export class TTGui {
                 }
             }
         }
+        this.core.syncSemanticComputeRules?.();
     }
     constructor(creative, skipRendering) {
         if (typeof Worker !== "undefined") {
@@ -421,7 +422,7 @@ export class TTGui {
         const scopeFolderId = this.getActiveTacticScopeId();
         if (this.assistWorker) {
             try {
-                await this.prepareAssistWorker(definitionEnd, this.getWorkerSystemConfig(), undefined, scopeFolderId);
+                await this.prepareAssistWorker(definitionEnd, this.getWorkerSystemConfig(), this.getTacticWorkerDefinitionSlots(scopeFolderId), scopeFolderId, "tactic");
                 await this.assistWorkerMutations.wait();
                 const snapshot = await this.assistWorker.start(target, this.assistOptions, history, Core.timeout);
                 this.assistWorkerSessionReady = true;
@@ -441,9 +442,8 @@ export class TTGui {
         return this.startAssistFallback(target, history);
     }
     async startAssistFallback(target, history, config) {
-        const definitionEnd = this.getTacticDefinitionEnd();
         const scopeFolderId = this.getActiveTacticScopeId();
-        config ??= this.getWorkerConfig(definitionEnd, scopeFolderId);
+        config ??= this.getTacticWorkerConfig(scopeFolderId);
         this.assistFallback.configure(config);
         return this.assistFallback.start(target, this.assistOptions, history);
     }
@@ -509,7 +509,7 @@ export class TTGui {
     }
     renderAssistSnapshot(snapshot) {
         this.assistSnapshot = snapshot;
-        this.getHottDefCtxt(this.getTacticDefinitionEnd(), this.getActiveTacticScopeId());
+        this.getHottTacticDefCtxt(this.getActiveTacticScopeId());
         this.renderTacticScopeOptions();
         const hint = document.getElementById("tactic-hint");
         const statediv = document.getElementById("tactic-state");
@@ -888,6 +888,7 @@ export class TTGui {
         while (list.lastChild) {
             list.removeChild(list.lastChild);
         }
+        const pendingDefinitions = new Map();
         const disableSimpleEq = this.disableSimpleEq;
         const disableSimpleFn = this.disableSimpleFn;
         for (const rule of allrules) {
@@ -902,20 +903,20 @@ export class TTGui {
             this.core.state.disableSimpleFn = false;
             if (rule.ast.type === ":" && rule.ast.nodes[0].type === "var") {
                 if (this.unlockedTypes.has("// " + vname))
-                    delete this.core.state.sysTypes[vname];
+                    this.core.setSystemType(vname);
                 else
-                    this.core.state.sysTypes[vname] = this.core.desugar(Core.clone(rule.ast.nodes[1]), true);
+                    this.core.setSystemType(vname, this.core.desugar(Core.clone(rule.ast.nodes[1]), true));
             }
             // ast.nodes[0].type==="var" -> skip a X b := @Prod _ _ ...
             if (rule.ast.type === ":=" && rule.ast.nodes[0].type === "var") {
                 const val = rule.ast.nodes[1].type === ":" ? rule.ast.nodes[1].nodes[0] : rule.ast.nodes[1];
                 if (this.unlockedTypes.has("// " + vname))
-                    delete this.core.state.sysDefs[vname];
+                    this.core.setSystemDefinition(vname);
                 else
-                    this.core.state.sysDefs[vname] = this.core.desugar(Core.clone(val), true);
+                    this.core.setSystemDefinition(vname, this.core.desugar(Core.clone(val), true));
             }
             if (this.unlockedTypes.has("// " + vname)) {
-                delete this.core.state.defTypes[vname];
+                this.core.clearDefinitionCache(vname);
                 continue;
             }
             // register in gui highlight, only ignore ====
@@ -935,15 +936,16 @@ export class TTGui {
             if ((rule.inferMode === "@" && this.inferDisplayMode === "_") || (rule.inferMode === "_" && this.inferDisplayMode === "@")) {
                 if (rule.ast.type === ":=") {
                     if (rule.ast.nodes[1].type === ":") {
-                        this.core.state.sysTypes[vname] = this.core.desugar(Core.clone(rule.ast.nodes[1].nodes[1]), true);
+                        this.core.setSystemType(vname, this.core.desugar(Core.clone(rule.ast.nodes[1].nodes[1]), true));
                     }
-                    else
+                    else {
                         try {
-                            this.core.registConstType(vname, rule.ast.nodes[1]);
+                            this.core.registerSystemDefinition(vname, rule.ast.nodes[1]);
                         }
-                        catch (e) {
-                            console.log("regist const " + vname + ":", e);
+                        catch {
+                            pendingDefinitions.set(vname, Core.clone(rule.ast.nodes[1]));
                         }
+                    }
                 }
                 continue;
             }
@@ -963,12 +965,16 @@ export class TTGui {
             let error = false;
             this.core.state.disableSimpleEq = disableSimpleEq;
             this.core.state.disableSimpleFn = disableSimpleFn;
-            try {
-                this.core.checkType(ast, [], false);
-            }
-            catch (e) {
-                console.log(e);
-                error = true;
+            // Compute equations are trusted system rewrite rules. Rechecking
+            // them on every list render can block startup on meta-heavy rules.
+            if (ast.type !== "===") {
+                try {
+                    this.core.checkType(ast, [], false);
+                }
+                catch (e) {
+                    console.log(e);
+                    error = true;
+                }
             }
             // this.core.state.sysDefs[vname] = def;
             if (ast.type === "var") {
@@ -980,10 +986,16 @@ export class TTGui {
             if (ast.type === ":=") {
                 const val = rule.ast.nodes[1].type === ":" ? rule.ast.nodes[1].nodes[0] : rule.ast.nodes[1];
                 if (rule.ast.nodes[1].type === ":") {
-                    this.core.state.sysTypes[vname] = this.core.desugar(Core.clone(rule.ast.nodes[1].nodes[1]), true);
+                    this.core.setSystemType(vname, this.core.desugar(Core.clone(rule.ast.nodes[1].nodes[1]), true));
                 }
-                else if (!error)
-                    this.core.registConstType(vname, val);
+                else if (!error) {
+                    try {
+                        this.core.registerSystemDefinition(vname, val);
+                    }
+                    catch {
+                        pendingDefinitions.set(vname, Core.clone(val));
+                    }
+                }
             }
             const infoArr = [];
             for (let i = 0; i < 6; i++) {
@@ -995,6 +1007,22 @@ export class TTGui {
                     itInfo.innerText = rule.prefix;
             }
         }
+        for (let pass = 0; pass < 4 && pendingDefinitions.size; pass++) {
+            this.core.elaborateSemanticSystemTypes();
+            let progress = false;
+            for (const [name, value] of Array.from(pendingDefinitions)) {
+                try {
+                    this.core.registerSystemDefinition(name, Core.clone(value));
+                    pendingDefinitions.delete(name);
+                    progress = true;
+                }
+                catch { }
+            }
+            if (!progress)
+                break;
+        }
+        this.core.elaborateSemanticSystemTypes();
+        this.core.syncSemanticDefinitions?.();
     }
     createTheoremItemId(prefix) {
         const uuid = globalThis.crypto?.randomUUID?.();
@@ -1128,9 +1156,7 @@ export class TTGui {
         }
         return false;
     }
-    isDefinitionVisible(index, targetIndex, selectedFolderId) {
-        if (index >= targetIndex)
-            return false;
+    isDefinitionInScope(index, selectedFolderId) {
         const inputs = this.getInhabitatArray();
         if (this.isTheoremInputDisabled(inputs[index]))
             return false;
@@ -1147,6 +1173,13 @@ export class TTGui {
             return false;
         return this.getFolderScopeForFolder(selectedFolderId).some(folder => folder.id === definitionFolderId);
     }
+    isDefinitionVisible(index, targetIndex, selectedFolderId) {
+        return index < targetIndex && this.isDefinitionInScope(index, selectedFolderId);
+    }
+    isTacticDefinitionVisible(index, selectedFolderId) {
+        const targetIndex = this.getTacticDefinitionEnd();
+        return index !== targetIndex && this.isDefinitionInScope(index, selectedFolderId);
+    }
     clearUserDefinitionContext() {
         const names = new Set(Object.keys(this.core.state.userDefs));
         for (const definition of this.userDefinedConsts) {
@@ -1155,10 +1188,16 @@ export class TTGui {
         }
         for (const name of names)
             delete this.core.state.defTypes[name];
-        this.core.state.userDefs = {};
+        if (typeof this.core.clearUserDefinitions === "function")
+            this.core.clearUserDefinitions();
+        else
+            this.core.state.userDefs = {};
     }
     addUserDefinitionToContext(name, definition) {
-        this.core.state.userDefs[name] = definition[1];
+        if (typeof this.core.setUserDefinition === "function")
+            this.core.setUserDefinition(name, definition[1]);
+        else
+            this.core.state.userDefs[name] = definition[1];
         if (definition[2])
             this.core.restoreDefinitionCache(name, definition[2]);
     }
@@ -1351,6 +1390,16 @@ export class TTGui {
     theoremInputIndexAtItem(item) {
         return theoremInputIndexBeforeItem(this.theoremItems, this.theoremItems.indexOf(item));
     }
+    getFolderTheoremRange(folder) {
+        const folderIndex = this.theoremItems.indexOf(folder);
+        if (folderIndex < 0)
+            return null;
+        const subtreeEnd = Math.min(this.theoremItems.length, folderIndex + Math.max(0, folder.length) + 1);
+        return {
+            startIndex: theoremInputIndexBeforeItem(this.theoremItems, folderIndex),
+            endIndex: theoremInputIndexBeforeItem(this.theoremItems, subtreeEnd)
+        };
+    }
     realignUserDefinitions(previousInputs, previousDefinitions) {
         const byInput = new Map();
         previousInputs.forEach((input, index) => byInput.set(input, previousDefinitions[index]));
@@ -1446,6 +1495,14 @@ export class TTGui {
         wrapper.className = "wrapper tt-folder-row";
         wrapper.dataset.dragFolder = "true";
         this.createTheoremDragHandle(wrapper, id);
+        const addTheorem = document.createElement("button");
+        addTheorem.type = "button";
+        addTheorem.className = "inhabitat-modify";
+        addTheorem.innerText = "+";
+        addTheorem.title = TR("在文件夹底部添加定理");
+        // Keep the folder action beside the drag handle, matching theorem
+        // rows while still inserting the new theorem at the folder's end.
+        wrapper.appendChild(addTheorem);
         const title = document.createElement("span");
         title.className = "tt-folder-title";
         wrapper.appendChild(title);
@@ -1456,12 +1513,6 @@ export class TTGui {
         label.appendChild(checkbox);
         label.appendChild(document.createTextNode(TR("停用子定理")));
         wrapper.appendChild(label);
-        const addTheorem = document.createElement("button");
-        addTheorem.type = "button";
-        addTheorem.className = "inhabitat-modify";
-        addTheorem.innerText = "+";
-        addTheorem.title = TR("在文件夹底部添加定理");
-        wrapper.appendChild(addTheorem);
         const rename = document.createElement("button");
         rename.type = "button";
         rename.className = "inhabitat-modify";
@@ -1491,14 +1542,19 @@ export class TTGui {
             this.onStateChange();
         });
         checkbox.addEventListener("change", () => {
-            const revalidateFrom = this.theoremInputIndexAtItem(folder);
+            const theoremRange = this.getFolderTheoremRange(folder);
             folder.disabled = checkbox.checked;
             this.definitionRevision++;
             this.theoremStructureRevision++;
             this.gatePreviewStructureRevision = -1;
             this.renderTheoremStructure();
             this.onStateChange();
-            this.revalidateTheorems(revalidateFrom);
+            // An empty folder changes no theorem visibility. In particular, a
+            // newly created folder at the top must not restart the complete
+            // validation chain merely because its checkbox changed.
+            if (theoremRange && theoremRange.endIndex > theoremRange.startIndex) {
+                this.revalidateTheorems(theoremRange.startIndex);
+            }
         });
         addTheorem.addEventListener("click", () => {
             if (!folder.open)
@@ -1594,7 +1650,8 @@ export class TTGui {
             }
         });
         this.renderTheoremStructure();
-        this.revalidateTheorems();
+        if (!this.skipRendering)
+            this.revalidateTheorems();
     }
     getHottDefCtxt(input, selectedFolderId = null) {
         macro.clear();
@@ -1615,6 +1672,19 @@ export class TTGui {
             this.addUserDefinitionToContext(def[0], def);
         }
         return currentIdx;
+    }
+    getHottTacticDefCtxt(selectedFolderId) {
+        macro.clear();
+        for (const s of sysmacro)
+            macro.add(s);
+        this.clearUserDefinitionContext();
+        for (let i = 0; i < this.getInhabitatArray().length; i++) {
+            const definition = this.userDefinedConsts[i];
+            if (!definition || !this.isTacticDefinitionVisible(i, selectedFolderId))
+                continue;
+            macro.add(definition[0]);
+            this.addUserDefinitionToContext(definition[0], definition);
+        }
     }
     getWorkerSystemConfig() {
         return {
@@ -1643,8 +1713,33 @@ export class TTGui {
         }
         return definitions;
     }
+    getTacticWorkerDefinitionSlots(scopeFolderId = null) {
+        const definitions = [];
+        const inputs = this.getInhabitatArray();
+        for (let i = 0; i < inputs.length; i++) {
+            if (!this.isTacticDefinitionVisible(i, scopeFolderId)) {
+                definitions.push(null);
+                continue;
+            }
+            const definition = this.userDefinedConsts[i];
+            if (!definition) {
+                definitions.push(null);
+                continue;
+            }
+            definitions.push([definition[0], Core.clone(definition[1]), definition[2]]);
+        }
+        return definitions;
+    }
     getWorkerConfig(definitionEnd, scopeFolderId = null) {
         const definitions = this.getWorkerDefinitionSlots(definitionEnd, scopeFolderId);
+        return {
+            ...this.getWorkerSystemConfig(),
+            userDefinitions: definitions.filter(Boolean).map(definition => [definition[0], definition[1]]),
+            userDefinitionCaches: definitions.filter(definition => definition?.[2]).map(definition => [definition[0], definition[2]])
+        };
+    }
+    getTacticWorkerConfig(scopeFolderId = null) {
+        const definitions = this.getTacticWorkerDefinitionSlots(scopeFolderId);
         return {
             ...this.getWorkerSystemConfig(),
             userDefinitions: definitions.filter(Boolean).map(definition => [definition[0], definition[1]]),
@@ -1675,10 +1770,10 @@ export class TTGui {
         });
         return this.coreWorkerConfigurePromise;
     }
-    prepareAssistWorker(definitionEnd, config = this.getWorkerSystemConfig(), definitions, scopeFolderId = null) {
+    prepareAssistWorker(definitionEnd, config = this.getWorkerSystemConfig(), definitions, scopeFolderId = null, definitionMode = "ordered") {
         if (!this.assistWorker)
             return Promise.reject(new Error("Proof-assistant worker unavailable"));
-        const configKey = JSON.stringify({ config, definitionEnd, scopeFolderId });
+        const configKey = JSON.stringify({ config, definitionEnd, scopeFolderId, definitionMode });
         const generation = this.assistWorker.generation;
         if (this.assistWorkerGeneration === generation && this.assistWorkerConfigKey === configKey) {
             return this.assistWorkerMutations.wait();
@@ -1686,7 +1781,8 @@ export class TTGui {
         this.assistWorkerGeneration = generation;
         this.assistWorkerConfigKey = configKey;
         this.assistWorkerSessionReady = false;
-        const promise = this.assistWorkerMutations.enqueue(() => this.assistWorker.configure(config, definitions ?? this.getWorkerDefinitionSlots(definitionEnd, scopeFolderId)));
+        const configuredDefinitions = definitions ?? this.getWorkerDefinitionSlots(definitionEnd, scopeFolderId);
+        const promise = this.assistWorkerMutations.enqueue(() => this.assistWorker.configure(config, configuredDefinitions));
         this.assistWorkerConfigurePromise = promise.catch(error => {
             if (this.assistWorkerGeneration === generation && this.assistWorkerConfigKey === configKey) {
                 this.assistWorkerGeneration = -1;
@@ -1769,7 +1865,11 @@ export class TTGui {
         this.definitionRevision++;
         this.theoremStructureRevision++;
         this.gatePreviewStructureRevision = -1;
-        const input = document.createElement("input");
+        // A generated proof can be thousands of characters long.  Keep the
+        // editor single-line in interaction semantics, but use a textarea so
+        // the value can wrap and grow instead of creating horizontal scroll.
+        const input = document.createElement("textarea");
+        input.rows = 1;
         input.classList.add("tt-theorem-input");
         const div = document.createElement("div");
         const button = document.createElement("button");
@@ -1783,20 +1883,38 @@ export class TTGui {
         localLabel.title = TR("局部常量仅在所在文件夹及子文件夹中可见");
         localLabel.appendChild(localCheckbox);
         let composing = false;
+        const resizeTheoremInput = () => {
+            const textarea = input;
+            textarea.style.height = "auto";
+            // Adding height can make the surrounding list gain a scrollbar,
+            // narrowing the textarea and creating additional wrapped lines.
+            // Re-measure until the layout settles so the final lines are not
+            // clipped by `overflow: hidden`.
+            for (let pass = 0; pass < 3; pass++) {
+                const nextHeight = Math.max(textarea.scrollHeight, 21);
+                const borderHeight = Math.max(0, textarea.offsetHeight - textarea.clientHeight);
+                if (textarea.clientHeight >= nextHeight)
+                    break;
+                textarea.style.height = `${nextHeight + borderHeight}px`;
+            }
+        };
         input.addEventListener("compositionstart", () => composing = true);
         input.addEventListener("compositionend", () => composing = false);
         input.addEventListener("keydown", ev => {
             if (composing || ev.isComposing || ev.keyCode === 229)
                 return;
             if (ev.key === "Enter" || ev.key === "Escape") {
+                ev.preventDefault();
                 input.blur();
             }
         });
         input.addEventListener("focus", () => {
             input["editing"] = true;
             input["editingOriginalValue"] = input.value;
+            resizeTheoremInput();
         });
         input.addEventListener("input", () => {
+            resizeTheoremInput();
             if (!input["validationInvalidated"]) {
                 const currentIdx = this.getInhabitatArray().indexOf(input);
                 if (currentIdx >= 0)
@@ -1930,13 +2048,19 @@ export class TTGui {
                 continueValidation(!!nextInput && (!!removed || ev["updateDefs"]));
                 return;
             }
-            this.userDefinedConsts[currentIdx] = null;
-            this.refreshUserConstNames();
             if (this.isTheoremInputDisabled(input)) {
+                // Keep the last verified definition/cache while the row is
+                // disabled. Visibility checks and Worker slots already omit
+                // disabled rows, so retaining it cannot make the theorem
+                // usable; it only lets re-enabling validate transactionally
+                // instead of losing the known name during an interrupted run.
+                this.refreshUserConstNames();
                 wrapper.classList.remove("error", "infering", "checking");
                 continueValidation(!!nextInput && !!ev["updateDefs"]);
                 return;
             }
+            this.userDefinedConsts[currentIdx] = null;
+            this.refreshUserConstNames();
             let ast;
             let parseError = "";
             let error = "";
@@ -1956,11 +2080,13 @@ export class TTGui {
             while (div.firstChild) {
                 div.removeChild(div.firstChild);
             }
-            const checkInfer = (ast) => {
+            const checkInfer = (ast, trustValidatedHoles = false) => {
                 const _checkInfer = (ast, context, expandConsts, checkType) => {
                     // if (checkType && ast.checked && !_checkInfer(ast.checked, context, expandConsts, false)) return false;
                     if (ast.type === "var") {
                         if (ast.name[0] === "?" || ast.name === "_") {
+                            if (trustValidatedHoles)
+                                return true;
                             if (!ast.checked)
                                 return false;
                             // ast.checked can be ttt or xxx : ttt
@@ -2019,7 +2145,7 @@ export class TTGui {
                     clearBondId(value.checked);
                 return value;
             };
-            const finish = (checkedAst, validationError = "", filledDefinition, definitionCache, workerCommitted = false) => {
+            const finish = (checkedAst, validationError = "", filledDefinition, definitionCache, workerCommitted = false, continueAfter = true, inferenceComplete) => {
                 if (validationRunId !== null && !this.theoremValidation.isCurrent(validationRunId)) {
                     this.completeTheoremValidation(validationRunId);
                     return;
@@ -2061,8 +2187,21 @@ export class TTGui {
                             }
                             if (definitionCache)
                                 this.core.restoreDefinitionCache(defname, definitionCache);
-                            const storedCache = definitionCache
-                                ?? (workerCommitted ? undefined : this.core.serializeDefinitionCache(defname));
+                            let storedCache = definitionCache
+                                ?? this.core.serializeDefinitionCache(defname);
+                            if (!storedCache) {
+                                // Compatibility with an older/stale Worker
+                                // response that validated the definition but
+                                // omitted its transferable type cache. Without
+                                // this repair the name remains visible while
+                                // every semantic use reports unknown-constant.
+                                try {
+                                    const recovered = this.core.checkDefinition(Core.clone(ast, true), []);
+                                    storedCache = recovered.definitionCache;
+                                    this.core.restoreDefinitionCache(defname, storedCache);
+                                }
+                                catch { }
+                            }
                             this.userDefinedConsts[currentIdx] = [defname, storedDefinition, storedCache];
                             // A previously rendered #t copy preview may have
                             // classified this name as a free variable.  Force
@@ -2083,9 +2222,23 @@ export class TTGui {
                             this.syncAssistWorkerDefinition(currentIdx, [defname, storedDefinition, storedCache]);
                             macro.add(defname);
                         }
-                        checkInfer(ast);
-                        if (ast.type === ":=" && ast.nodes[1].type === ":")
-                            checkInfer(ast.nodes[1].nodes[1]);
+                        // The Worker returns a fully elaborated definition while
+                        // `ast` deliberately preserves the user's `_` spelling
+                        // for display.  Re-running the legacy inference probe on
+                        // that surface AST both marks solved holes as pending and
+                        // can throw after expanding an earlier such definition.
+                        const inferenceTarget = theoremInferenceTarget(ast, filledDefinition);
+                        const inferenceStatus = theoremInferenceStatus(inferenceComplete);
+                        if (inferenceStatus === "incomplete") {
+                            wrapper.classList.add("infering");
+                        }
+                        else {
+                            const trustValidatedHoles = inferenceStatus === "complete";
+                            checkInfer(inferenceTarget, trustValidatedHoles);
+                            if (inferenceTarget.type === ":") {
+                                checkInfer(inferenceTarget.nodes[1], trustValidatedHoles);
+                            }
+                        }
                     }
                     catch (e) {
                         error += e;
@@ -2104,7 +2257,7 @@ export class TTGui {
                     this.addSpan(div, " &nbsp; : &nbsp; ", true);
                     div.appendChild(this.ast2HTML("", ast.checked, [], [], currentIdx));
                 }
-                continueValidation(!!nextInput && (ast?.type === ":=" || !!ev["updateDefs"]));
+                continueValidation(continueAfter && !!nextInput && (ast?.type === ":=" || !!ev["updateDefs"]));
             };
             const validateSynchronously = () => {
                 try {
@@ -2118,13 +2271,16 @@ export class TTGui {
                         }
                         if (reservedConsts.has(defname))
                             throw defname + TR("由系统保留");
-                        this.core.checkType(ast, [], false);
-                        filledDefinition = this.core.registConstType(defname, ast.nodes[1]);
+                        const checkedDefinition = this.core.checkDefinition(ast, []);
+                        filledDefinition = checkedDefinition.filledDefinition;
+                        this.core.restoreDefinitionCache(defname, checkedDefinition.definitionCache);
                     }
                     else {
                         this.core.checkType(ast, [], false);
                     }
-                    finish(ast, "", filledDefinition);
+                    const inferenceTarget = theoremInferenceTarget(ast, filledDefinition);
+                    const inferenceComplete = theoremInferenceComplete(inferenceTarget);
+                    finish(ast, "", filledDefinition, undefined, false, true, inferenceComplete);
                 }
                 catch (e) {
                     finish(ast, String(e));
@@ -2155,12 +2311,13 @@ export class TTGui {
                 return;
             }
             const inputValue = input.value;
+            const workerScopeId = this.getDefaultTacticScope(input);
             wrapper.classList.add("checking");
             const rowStillCurrent = () => input["workerRequestId"] === requestId
                 && input.value === inputValue
                 && input.isConnected
                 && rowPositionMatches();
-            this.prepareCoreWorker(currentIdx, this.getDefaultTacticScope(input)).then(() => {
+            this.prepareCoreWorker(currentIdx, workerScopeId).then(() => {
                 if (!rowStillCurrent()) {
                     if (validationRunId !== null)
                         this.completeTheoremValidation(validationRunId);
@@ -2182,11 +2339,12 @@ export class TTGui {
                 }
                 if (result.timeout)
                     document.getElementById("timeout").classList.remove("hide");
-                if (result.ok)
-                    finish(result.ast, "", result.filledDefinition, result.definitionCache, true);
+                if (result.ok) {
+                    finish(result.ast, "", result.filledDefinition, result.definitionCache, true, true, result.inferenceComplete);
+                }
                 else
                     finish(ast, result.error);
-            }).catch(() => {
+            }).catch(workerError => {
                 if (input["workerRequestId"] !== requestId || input.value !== inputValue || !input.isConnected) {
                     if (validationRunId !== null)
                         this.completeTheoremValidation(validationRunId);
@@ -2195,6 +2353,11 @@ export class TTGui {
                 if (!rowPositionMatches()) {
                     if (validationRunId !== null)
                         this.completeTheoremValidation(validationRunId);
+                    return;
+                }
+                if (!shouldFallbackToSynchronousTheoremValidation(workerError)) {
+                    document.getElementById("timeout").classList.remove("hide");
+                    finish(ast, TR("类型论 Worker 验证超时，请增大单条定理判定的默认等待时间"), undefined, undefined, false, false);
                     return;
                 }
                 validateSynchronously();
@@ -2278,40 +2441,21 @@ export class TTGui {
             ? -1
             : Math.min(this.theoremItems.length, folderIndex + folder.length + 1);
     }
-    settlePendingTheorems() {
+    settlePendingTheorems(coordinateValidation = false) {
         const inputs = this.getInhabitatArray();
-        if (!inputs.some(input => input.parentElement?.classList.contains("checking")))
+        const first = findEarliestPendingTheorem(inputs, input => !!input.parentElement?.classList.contains("checking"), input => this.isTheoremInputDisabled(input));
+        if (!first)
             return;
-        const first = inputs.find(input => !this.isTheoremInputDisabled(input));
-        if (first)
-            first.onblur({ forceSync: true, updateDefs: true });
+        if (coordinateValidation) {
+            const startIndex = inputs.indexOf(first);
+            if (startIndex >= 0)
+                this.revalidateTheorems(startIndex);
+            return;
+        }
+        first.onblur({ forceSync: true, updateDefs: true });
     }
     equalGateTypes(candidate, target) {
-        // Generic gate matches must not reuse inference variables from the
-        // most recently checked theorem.
-        const state = this.core.state;
-        const inferTable = state.inferTable;
-        const bondVarId = state.bondVarId;
-        const bondVarRel = state.bondVarRel;
-        const errormsg = state.errormsg;
-        const root = state.root;
-        const time = state.time;
-        const timeoutOccured = Core.timeoutOccured;
-        this.core.clearState();
-        state.root = null;
-        state.time = Date.now();
-        try {
-            return this.core.equal(candidate, target, []);
-        }
-        finally {
-            state.inferTable = inferTable;
-            state.bondVarId = bondVarId;
-            state.bondVarRel = bondVarRel;
-            state.errormsg = errormsg;
-            state.root = root;
-            state.time = time;
-            Core.timeoutOccured = timeoutOccured;
-        }
+        return this.core.semanticTypePatternMatch(candidate, target);
     }
     // find whether user has inhabitat of given type
     queryType(typeStr) {
@@ -2365,6 +2509,12 @@ export class TTGui {
     queryDefPuzzle(name) {
         this.settlePendingTheorems();
         this.getHottDefCtxt(this.getInhabitatArray().length);
+        // Puzzle probes run on the main-thread Core after Worker validation.
+        // Do not inherit a stale syntax mode from startup, type-list rebuilds,
+        // or an earlier gate query: it can make a valid restored definition
+        // fail only in the UI even though the Worker accepted it.
+        this.core.state.disableSimpleFn = this.disableSimpleFn;
+        this.core.state.disableSimpleEq = this.disableSimpleEq;
         const def = this.core.state.userDefs[name];
         if (!def)
             return false;
@@ -2515,7 +2665,7 @@ export class TTGui {
         // A definition immediately above may still be in the Core Worker.
         // Commit that pending validation before taking the definition snapshot
         // used by the proof-assistant Worker.
-        this.settlePendingTheorems();
+        this.settlePendingTheorems(true);
         const target = typeof value === "string" ? value : parser.stringify(value);
         const requestId = ++this.tacticRequestId;
         this.tacticTargetInput = targetInput;
@@ -2528,6 +2678,9 @@ export class TTGui {
         this.setTacticBusy(true);
         document.getElementById("tactic-errmsg").innerText = "";
         try {
+            await this.theoremValidation.waitForIdle();
+            if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
+                return;
             const snapshot = await this.startAssistSession(target);
             if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
                 return;
@@ -2595,6 +2748,7 @@ export class TTGui {
                 output.value = qedName
                     ? `${qedName}:=${result.proof}:${result.theorem}`
                     : `${result.proof}:${result.theorem}`;
+                output.dispatchEvent(new Event("input"));
                 this.closeTacticSession();
                 output.blur();
                 return;

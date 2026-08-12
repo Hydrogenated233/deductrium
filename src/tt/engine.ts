@@ -2,6 +2,8 @@ import { AST, ASTParser } from "./astparser.js";
 import { Context, Core, DefinitionTypeCacheSnapshot } from "./core.js";
 import { initTypeSystem } from "./initial.js";
 import { langMgr, TR } from "../lang.js";
+import { markExplicitAtSyntax } from "./presentation.js";
+import { theoremInferenceComplete } from "./theorem-validation.js";
 
 const parser = new ASTParser();
 
@@ -25,8 +27,10 @@ export type TTCoreCheckResult = {
     error?: string;
     timeout: boolean;
     durationMs: number;
-    /** Present for := declarations after Core.registConstType has filled inference holes. */
+    /** Present for := declarations after Core.checkDefinition has elaborated inference holes. */
     filledDefinition?: AST;
+    /** True when validation resolved every non-generalized inference hole. */
+    inferenceComplete?: boolean;
     /** Transferable cache needed to preserve generalized inference variables on the UI Core. */
     definitionCache?: DefinitionTypeCacheSnapshot;
 };
@@ -45,13 +49,16 @@ export class TTCoreEngine {
         Core.timeout = config.timeout ?? Core.timeout;
         Core.timeoutOccured = false;
         this.registerComputeRules();
+        // Seed built-in universe-level types before definitions are checked;
+        // subsequent rules are synchronized incrementally in declaration order.
+        this.core.syncSemanticDefinitions();
 
         const terms = new Set(config.unlockedTypes);
         const inferDisplayMode = config.inferDisplayMode ?? "_";
         const disableSimpleFn = !!config.disableSimpleFn;
         const disableSimpleEq = !!config.disableSimpleEq;
+        const pendingDefinitions = new Map<string, AST>();
 
-        this.core.state.eagerInferRel = true;
         for (const rule of this.rules) {
             const vname = rule.ast.nodes?.[0]?.name;
             if (!terms.has(rule.id)) continue;
@@ -59,16 +66,22 @@ export class TTCoreEngine {
             this.core.state.disableSimpleEq = false;
             this.core.state.disableSimpleFn = false;
             if (rule.ast.type === ":" && rule.ast.nodes[0].type === "var") {
-                if (terms.has("// " + vname)) delete this.core.state.sysTypes[vname];
-                else this.core.state.sysTypes[vname] = this.core.desugar(Core.clone(rule.ast.nodes[1]), true);
+                if (terms.has("// " + vname)) this.core.setSystemType(vname);
+                else this.core.setSystemType(
+                    vname,
+                    this.core.desugar(Core.clone(rule.ast.nodes[1]), true)
+                );
             }
             if (rule.ast.type === ":=" && rule.ast.nodes[0].type === "var") {
                 const value = rule.ast.nodes[1].type === ":" ? rule.ast.nodes[1].nodes[0] : rule.ast.nodes[1];
-                if (terms.has("// " + vname)) delete this.core.state.sysDefs[vname];
-                else this.core.state.sysDefs[vname] = this.core.desugar(Core.clone(value), true);
+                if (terms.has("// " + vname)) this.core.setSystemDefinition(vname);
+                else this.core.setSystemDefinition(
+                    vname,
+                    this.core.desugar(Core.clone(value), true)
+                );
             }
             if (terms.has("// " + vname)) {
-                delete this.core.state.defTypes[vname];
+                this.core.clearDefinitionCache(vname);
                 continue;
             }
 
@@ -77,9 +90,16 @@ export class TTCoreEngine {
             if ((rule.inferMode === "@" && inferDisplayMode === "_") || (rule.inferMode === "_" && inferDisplayMode === "@")) {
                 if (rule.ast.type === ":=") {
                     if (rule.ast.nodes[1].type === ":") {
-                        this.core.state.sysTypes[vname] = this.core.desugar(Core.clone(rule.ast.nodes[1].nodes[1]), true);
+                        this.core.setSystemType(
+                            vname,
+                            this.core.desugar(Core.clone(rule.ast.nodes[1].nodes[1]), true)
+                        );
                     } else {
-                        try { this.core.registConstType(vname, rule.ast.nodes[1]); } catch { }
+                        try {
+                            this.core.registerSystemDefinition(vname, rule.ast.nodes[1]);
+                        } catch {
+                            pendingDefinitions.set(vname, Core.clone(rule.ast.nodes[1]));
+                        }
                     }
                 }
                 continue;
@@ -88,23 +108,93 @@ export class TTCoreEngine {
             if (rule.ast.type === ":=") {
                 const value = rule.ast.nodes[1].type === ":" ? rule.ast.nodes[1].nodes[0] : rule.ast.nodes[1];
                 if (rule.ast.nodes[1].type === ":") {
-                    this.core.state.sysTypes[vname] = this.core.desugar(Core.clone(rule.ast.nodes[1].nodes[1]), true);
+                    this.core.setSystemType(
+                        vname,
+                        this.core.desugar(Core.clone(rule.ast.nodes[1].nodes[1]), true)
+                    );
                 } else {
-                    try { this.core.registConstType(vname, value); } catch { }
+                    try {
+                        this.core.registerSystemDefinition(vname, value);
+                    } catch {
+                        pendingDefinitions.set(vname, Core.clone(value));
+                    }
                 }
             }
         }
-        this.core.state.eagerInferRel = false;
+
+        // Complete implicit binder/universe elaboration for system types, then
+        // retry aliases whose dependencies were registered later in the table.
+        // A few declarations depend on one another through their public alias,
+        // so keep the pass bounded and stop once no progress is made.
+        for (let pass = 0; pass < 4 && pendingDefinitions.size; pass++) {
+            this.core.elaborateSemanticSystemTypes();
+            let progress = false;
+            for (const [name, value] of Array.from(pendingDefinitions)) {
+                try {
+                    this.core.registerSystemDefinition(name, Core.clone(value));
+                    pendingDefinitions.delete(name);
+                    progress = true;
+                } catch { }
+            }
+            if (!progress) break;
+        }
+        this.core.elaborateSemanticSystemTypes();
 
         this.core.state.disableSimpleFn = disableSimpleFn;
         this.core.state.disableSimpleEq = disableSimpleEq;
         this.core.state.userDefs = {};
-        for (const [name, definition] of config.userDefinitions ?? []) {
+        const userDefinitions = config.userDefinitions ?? [];
+        const userDefinitionCaches = config.userDefinitionCaches ?? [];
+        const definitionCounts = new Map<string, number>();
+        const cacheCounts = new Map<string, number>();
+        for (const [name] of userDefinitions) {
+            definitionCounts.set(name, (definitionCounts.get(name) ?? 0) + 1);
+        }
+        for (const [name] of userDefinitionCaches) {
+            cacheCounts.set(name, (cacheCounts.get(name) ?? 0) + 1);
+        }
+        const ambiguousCacheNames = new Set(Array.from(definitionCounts)
+            .filter(([name, count]) => (cacheCounts.get(name) ?? 0) !== count)
+            .map(([name]) => name));
+
+        for (const [name, definition] of userDefinitions) {
             this.core.state.userDefs[name] = Core.clone(definition);
         }
-        for (const [name, cache] of config.userDefinitionCaches ?? []) {
+        for (const [name, cache] of userDefinitionCaches) {
+            if (ambiguousCacheNames.has(name)) continue;
             if (this.core.state.userDefs[name]) this.core.restoreDefinitionCache(name, cache);
         }
+        this.core.syncSemanticDefinitions();
+
+        // A stale Worker or an older persisted session can provide a verified
+        // definition without its transferable type cache.  The definition is
+        // then visible to delta reduction but unusable as a theorem because
+        // the semantic checker has no constant type. Rebuild only those rare
+        // missing entries, in visible declaration order, and keep the result
+        // as a native NbE cache for subsequent proof-assistant requests.
+        const lastDefinitionIndex = new Map<string, number>();
+        userDefinitions.forEach(([name], index) => lastDefinitionIndex.set(name, index));
+        for (let index = 0; index < userDefinitions.length; index++) {
+            const [name, definition] = userDefinitions[index];
+            if (lastDefinitionIndex.get(name) !== index
+                || this.core.hasDefinitionCache(name)) continue;
+            try {
+                this.recoverUserDefinitionCache(name, definition);
+            } catch { }
+        }
+    }
+
+    recoverUserDefinitionCache(name: string, definition = this.core.state.userDefs[name]) {
+        if (!definition) return null;
+        const declaration: AST = {
+            type: ":=", name: "", nodes: [
+                { type: "var", name, nodes: [] },
+                Core.clone(definition)
+            ]
+        };
+        const { definitionCache } = this.core.checkDefinition(declaration, []);
+        this.core.restoreDefinitionCache(name, definitionCache);
+        return definitionCache;
     }
 
     check(input: string, context: Context = []): TTCoreCheckResult {
@@ -116,8 +206,17 @@ export class TTCoreEngine {
         Core.timeoutOccured = false;
         try {
             if (!ast) throw new Error(TR("空表达式"));
+            markExplicitAtSyntax(ast);
             const type = this.core.checkType(ast, context, false);
-            return { ok: true, ast, type, timeout: !!Core.timeoutOccured, durationMs: performance.now() - started };
+            const inferenceComplete = theoremInferenceComplete(ast);
+            return {
+                ok: true,
+                ast,
+                type,
+                inferenceComplete,
+                timeout: !!Core.timeoutOccured,
+                durationMs: performance.now() - started
+            };
         } catch (error) {
             return {
                 ok: false,
@@ -137,14 +236,16 @@ export class TTCoreEngine {
             if (ast?.type !== ":=" || ast.nodes?.[0]?.type !== "var") {
                 throw new Error(TR("只能注册具名定义"));
             }
-            this.core.checkType(ast, context, false);
-            const filledDefinition = this.core.registConstType(ast.nodes[0].name, ast.nodes[1]);
-            const definitionCache = this.core.serializeDefinitionCache(ast.nodes[0].name);
+            markExplicitAtSyntax(ast);
+            const { filledDefinition, definitionCache } = this.core.checkDefinition(ast, context);
+            this.core.restoreDefinitionCache(ast.nodes[0].name, definitionCache);
+            const inferenceComplete = theoremInferenceComplete(filledDefinition);
             return {
                 ok: true,
                 ast,
                 type: ast.checked,
                 filledDefinition,
+                inferenceComplete,
                 definitionCache,
                 timeout: !!Core.timeoutOccured,
                 durationMs: performance.now() - started
@@ -197,5 +298,6 @@ export class TTCoreEngine {
                 this.core.state.computeRules[expanded[0].name].push({ pattern: expandedPattern, result });
             }
         }
+        this.core.syncSemanticComputeRules();
     }
 }

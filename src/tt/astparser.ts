@@ -2,7 +2,9 @@ import { TR } from "../lang.js";
 export const debugBoundVarId = false;
 export type AST = {
     type: string, name: string, nodes?: AST[],
-    checked?: AST, err?: any, bondVarId?: number, origin?: boolean | AST
+    checked?: AST, err?: any, bondVarId?: number, origin?: boolean | AST,
+    /** True only for an @-alias occurrence explicitly typed by the user. */
+    displayExplicitAt?: boolean
 };
 export class ASTParser {
     keywords = [":=", "[[", "]]", "->", "~=", "==="];
