@@ -78,6 +78,21 @@ jobs:
 
           gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
+            # A second package on the same CST date reuses the release. Move
+            # its lightweight tag as well as replacing the ZIP so the release
+            # metadata and archive both refer to this workflow's commit.
+            gh api --method PATCH `
+              "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$env:RELEASE_TAG" `
+              -f "sha=$env:GITHUB_SHA" `
+              -F "force=true"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to retarget existing release tag." }
+
+            gh release edit $env:RELEASE_TAG `
+              --repo $env:GITHUB_REPOSITORY `
+              --target $env:GITHUB_SHA `
+              --title $env:RELEASE_TITLE
+            if ($LASTEXITCODE -ne 0) { throw "Failed to update existing release metadata." }
+
             gh release upload $env:RELEASE_TAG $archive.FullName --clobber --repo $env:GITHUB_REPOSITORY
           } else {
             gh release create $env:RELEASE_TAG $archive.FullName `

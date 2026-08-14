@@ -87,6 +87,24 @@ try {
         "(λp:(true=true).trans (λx:True.(x=x)) (inveq (@inveq _ True true true p)) (refl true))",
         "rw must preserve occurrence-specific @ and underscore spelling through QED"
     );
+
+    const sugarRewriteEngine = new TTAssistEngine();
+    sugarRewriteEngine.configure(config);
+    sugarRewriteEngine.start(
+        "Πa:U,Πx:a,Πy:a,Πp:(x=y),(refl x)=(p*inveq p)",
+        options
+    );
+    for (const command of ["intro a", "intro x", "intro y", "intro p"]) {
+        sugarRewriteEngine.apply(command);
+    }
+    const sugarRewrite = sugarRewriteEngine.apply("rw p");
+    const rewrittenGoal = parser.stringify(sugarRewrite.goals[0].type);
+    assert.match(rewrittenGoal, /=/,
+        "rw must keep equality notation in the displayed goal");
+    assert.match(rewrittenGoal, /▪/,
+        "rw must keep path-composition notation in the displayed goal");
+    assert.doesNotMatch(rewrittenGoal, /\beq\b|\bcompeq\b/,
+        "rw must not expose internal equality or composition constants");
 } finally {
     console.log = originalLog;
 }

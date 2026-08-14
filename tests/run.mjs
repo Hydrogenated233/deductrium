@@ -73,6 +73,7 @@ const tests = [
     "./tt-universe-equivalence.test.mjs",
     "./tt-assist-engine.test.mjs",
     "./tt-assist-qed-stale-bond-ids.test.mjs",
+    "./tt-assist-self-loop-destruct.test.mjs",
     "./tt-assist-surface-presentation.test.mjs",
     "./tt-assist-display-elaboration.test.mjs",
     "./tt-error-presentation.test.mjs",

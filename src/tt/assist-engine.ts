@@ -170,6 +170,11 @@ export class TTAssistEngine {
         }
 
         const goals = assist.goal.map(goal => {
+            // Keep a surface-shaped copy for the UI. The validation copy may
+            // be desugared by Core.checkType (for example `=` to `eq` and `*`
+            // to `compeq`), but that internal normalization must not leak into
+            // the proof assistant display after a rewrite.
+            const surfaceType = Core.clone(goal.type, true);
             const type = Core.clone(goal.type, true);
             // A dependent constructor goal may refer to a proof hole from an
             // earlier goal (for example (%0) after `ex`).  That placeholder is
@@ -198,7 +203,7 @@ export class TTAssistEngine {
                     this.presentAst(value, explicitAtNames),
                     id
                 ]),
-                type: this.presentAst(type, explicitAtNames),
+                type: this.presentAst(surfaceType, explicitAtNames),
                 holeName: goal.ast.name
             } as TTAssistGoalSnapshot;
         });

@@ -1129,13 +1129,18 @@ export class Assist {
         Core.getFreeVars(goal.type, excludedSet);
 
 
-        const indFnName = "ind_" + ((nType.nodes?.[0]?.name === "Sus" || nType.nodes?.[0]?.name === "List" || nType.nodes?.[0]?.name === "Option" || nType.nodes?.[0]?.name === "Even") ? nType.nodes[0].name : (nType.nodes?.[0]?.nodes?.[0]?.name === "eq" || nType.type === "=") ? "eq" : nType.type === "+" ? "Sum" : nType.type === "X" ? "Prod" : nType.type === "[[]]" ? "Trunc" : nType.type === "S" ? "Prod" : nType.type === "W" ? "W" : nType.nodes?.[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout" ? "Pushout" : nType.name);
+        const isEqType = nType.nodes?.[0]?.nodes?.[0]?.name === "eq" || nType.type === "=";
+        const indFnName = "ind_" + ((nType.nodes?.[0]?.name === "Sus" || nType.nodes?.[0]?.name === "List" || nType.nodes?.[0]?.name === "Option" || nType.nodes?.[0]?.name === "Even") ? nType.nodes[0].name : isEqType ? "eq" : nType.type === "+" ? "Sum" : nType.type === "X" ? "Prod" : nType.type === "[[]]" ? "Trunc" : nType.type === "S" ? "Prod" : nType.type === "W" ? "W" : nType.nodes?.[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout" ? "Pushout" : nType.name);
         // x in x=y, just parameter for types 
 
         // nType.nodes?.[0]?.name === "Sus" ? [nType.nodes[1]] :
-        const typeParams = nType.nodes?.[0]?.nodes?.[0]?.name === "eq" ? [nType.nodes[0].nodes[1]] : nType.type === "=" ? [nType.nodes[0]] : nType.type === "X" ? [wrapLambda("L", Core.getNewName("x", excludedSet), nType.nodes[0], nType.nodes[1])] : nType.type === "S" || nType.type === "W" ? [wrapLambda("L", nType.name, nType.nodes[0], nType.nodes[1])] : [];
+        const fixedEqEndpoint = nType.nodes?.[0]?.nodes?.[0]?.name === "eq"
+            ? nType.nodes[0].nodes[1]
+            : nType.type === "=" ? nType.nodes[0] : null;
+        const typeParams = isEqType ? [fixedEqEndpoint] : nType.type === "X" ? [wrapLambda("L", Core.getNewName("x", excludedSet), nType.nodes[0], nType.nodes[1])] : nType.type === "S" || nType.type === "W" ? [wrapLambda("L", nType.name, nType.nodes[0], nType.nodes[1])] : [];
         // y in x=y: induction on this group of types
-        const groupParam = (nType.nodes?.[0]?.nodes?.[0]?.name === "eq" || nType.type === "=" || nType.nodes?.[0]?.name === "Even") ? nType.nodes[1] : null;
+        const groupParam = (isEqType || nType.nodes?.[0]?.name === "Even") ? nType.nodes[1] : null;
+        const selfLoopEq = isEqType && this.exactEqualByAlphaConversion(fixedEqEndpoint, groupParam);
 
         // destruct with other variables in context as condition added in target C
         const conds = [];
@@ -1160,7 +1165,14 @@ export class Assist {
             const eqType = core.checkType(groupParam, goal.context, false);
             const newY = Core.getNewName(groupParam.type === "var" ? groupParam.name : indFnName === "ind_Even" ? "n" : "y", excludedSet);
             C = wrapLambda("L", newY, eqType, Core.clone(C, true));
-            C.nodes[1] = this.genReplaceFn(C.nodes[1], groupParam, newY, excludedSet);
+            if (selfLoopEq) {
+                // For p : x=x, path induction keeps the left endpoint fixed and
+                // varies only the right endpoint. Replacing every occurrence of
+                // x would incorrectly produce p : y=y and an invalid motive.
+                C.nodes[1].nodes[0].nodes[1] = wrapVar(newY);
+            } else {
+                C.nodes[1] = this.genReplaceFn(C.nodes[1], groupParam, newY, excludedSet);
+            }
         }
         const indFn = wrapVar(indFnName);
         const indFnHead = wrapApply(indFn, ...typeParams.map(e => Core.clone(e)), Core.clone(C));
@@ -1171,6 +1183,15 @@ export class Assist {
         let headType: AST;
         let indFnType: AST;
         try {
+            if (selfLoopEq) {
+                try {
+                    core.withSilentErrors(() =>
+                        core.checkType(Core.clone(indFnHead), goal.context, false)
+                    );
+                } catch {
+                    throw TR("无法构造合法的等式归纳目标");
+                }
+            }
             // Semantic synthesis returns the application's type without
             // annotating every child node. Read the eliminator type directly
             // instead of relying on indFn.checked being populated as a side effect.
