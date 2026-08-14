@@ -896,11 +896,20 @@ export class Assist {
     }
     qed() {
         if (this.goal.length) throw TR("证明尚未完成");
+        const term = Core.clone(this.elem);
+        const theorem = Core.clone(this.theorem);
+        // Tactics are checked one goal at a time. A substitution copied from
+        // one of those temporary contexts can therefore retain binder ids
+        // which do not belong to the completed proof's lexical tree. The
+        // serialized proof has no ids, so validate that same representation:
+        // discard assistant-internal ids and let Core bind it afresh by scope.
+        this.clearBondIds(term);
+        this.clearBondIds(theorem);
         core.checkType(
             {
                 type: ":",
                 name: "",
-                nodes: [Core.clone(this.elem), Core.clone(this.theorem)]
+                nodes: [term, theorem]
             },
             [],
             false,
