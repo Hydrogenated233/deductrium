@@ -1245,13 +1245,55 @@ export class Assist {
         const excludedSet = new Set(goal.context.map(e => e[0]));
         Core.getFreeVars(goal.type, excludedSet);
         const isEqType = nType.nodes?.[0]?.nodes?.[0]?.name === "eq" || nType.type === "=";
-        const indFnName = "ind_" + ((nType.nodes?.[0]?.name === "Sus" || nType.nodes?.[0]?.name === "List" || nType.nodes?.[0]?.name === "Option" || nType.nodes?.[0]?.name === "Even") ? nType.nodes[0].name : isEqType ? "eq" : nType.type === "+" ? "Sum" : nType.type === "X" ? "Prod" : nType.type === "[[]]" ? "Trunc" : nType.type === "S" ? "Prod" : nType.type === "W" ? "W" : nType.nodes?.[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout" ? "Pushout" : nType.name);
+        const isPushoutType = nType.type === "apply"
+            && nType.nodes?.[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout";
+        let indFnName = "ind_" + ((nType.nodes?.[0]?.name === "Sus" || nType.nodes?.[0]?.name === "List" || nType.nodes?.[0]?.name === "Option" || nType.nodes?.[0]?.name === "Even") ? nType.nodes[0].name : isEqType ? "eq" : nType.type === "+" ? "Sum" : nType.type === "X" ? "Prod" : nType.type === "[[]]" ? "Trunc" : nType.type === "S" ? "Prod" : nType.type === "W" ? "W" : isPushoutType ? "Pushout" : nType.name);
         // x in x=y, just parameter for types 
         // nType.nodes?.[0]?.name === "Sus" ? [nType.nodes[1]] :
         const fixedEqEndpoint = nType.nodes?.[0]?.nodes?.[0]?.name === "eq"
             ? nType.nodes[0].nodes[1]
             : nType.type === "=" ? nType.nodes[0] : null;
-        const typeParams = isEqType ? [fixedEqEndpoint] : nType.type === "X" ? [wrapLambda("L", Core.getNewName("x", excludedSet), nType.nodes[0], nType.nodes[1])] : nType.type === "S" || nType.type === "W" ? [wrapLambda("L", nType.name, nType.nodes[0], nType.nodes[1])] : [];
+        let typeParams = isEqType ? [fixedEqEndpoint] : nType.type === "X" ? [wrapLambda("L", Core.getNewName("x", excludedSet), nType.nodes[0], nType.nodes[1])] : nType.type === "S" || nType.type === "W" ? [wrapLambda("L", nType.name, nType.nodes[0], nType.nodes[1])] : [];
+        if (isPushoutType) {
+            const pushoutArgs = core.flattenApplyList(nType).slice(1);
+            const [pushoutC, pushoutF, pushoutG] = pushoutArgs;
+            let pushoutA = pushoutC?.type === "X" ? pushoutC.nodes[0] : null;
+            let pushoutB = pushoutC?.type === "X" ? pushoutC.nodes[1] : null;
+            if (!pushoutA || !pushoutB) {
+                try {
+                    const fType = core.checkType(Core.clone(pushoutF), goal.context, false);
+                    const gType = core.checkType(Core.clone(pushoutG), goal.context, false);
+                    pushoutA = fType.nodes?.[1];
+                    pushoutB = gType.nodes?.[1];
+                }
+                catch { }
+            }
+            if (pushoutA && pushoutB && pushoutC && pushoutF && pushoutG) {
+                const universeLevel = (term) => {
+                    try {
+                        const termType = core.checkType(Core.clone(term), goal.context, false);
+                        if (termType.type === "apply" && termType.nodes?.[0]?.name === "U") {
+                            return Core.clone(termType.nodes[1]);
+                        }
+                    }
+                    catch { }
+                    return wrapVar("@0");
+                };
+                // The public ind_Pushout alias leaves c/f/g and their endpoint
+                // types as semantic metas. Supply the full eliminator prefix
+                // so branch types do not retain ?nbe variables.
+                indFnName = "@ind_Pushout";
+                typeParams = [
+                    universeLevel(pushoutA),
+                    universeLevel(goal.type),
+                    Core.clone(pushoutA),
+                    Core.clone(pushoutB),
+                    Core.clone(pushoutC),
+                    Core.clone(pushoutF),
+                    Core.clone(pushoutG)
+                ];
+            }
+        }
         // y in x=y: induction on this group of types
         const groupParam = (isEqType || nType.nodes?.[0]?.name === "Even") ? nType.nodes[1] : null;
         const selfLoopEq = isEqType && this.exactEqualByAlphaConversion(fixedEqEndpoint, groupParam);

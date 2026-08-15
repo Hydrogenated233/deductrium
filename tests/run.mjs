@@ -51,6 +51,7 @@ const tests = [
     "./tt-issue-1-assist-expand.test.mjs",
     "./tt-issue-1-assist-destruct.test.mjs",
     "./tt-issue-1-assist-errors.test.mjs",
+    "./tt-issue-4-pushout-destruct.test.mjs",
     "./tt-nbe-definitional-equality.test.mjs",
     "./tt-nbe-assist-normalize.test.mjs",
     "./tt-nbe-assist-fnext.test.mjs",
