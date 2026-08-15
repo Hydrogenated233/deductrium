@@ -1,4 +1,7 @@
 const tests = [
+    "./tt-nbe-review-audit.test.mjs",
+    "./review-round2.test.mjs",
+    "./fs-hy-bugs.test.mjs",
     "./tt-validation-scheduling.test.mjs",
     "./tt-worker-inference-target.test.mjs",
     "./tt-theorem-identifier-rendering.test.mjs",
@@ -86,6 +89,7 @@ const tests = [
     "./tt-assist-cacheless-user-definition.test.mjs",
     "./tt-assist-survival-save-rw.test.mjs",
     "./tt-assist-validation-race.test.mjs",
+    "./tt-bugs-18-23.test.mjs",
     "./tt-assist-explicit-hole-arguments.test.mjs",
     "./tt-proof-term-wrapping.test.mjs",
     "./tt-gate-fuzzy-matching.test.mjs",

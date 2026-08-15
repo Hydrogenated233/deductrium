@@ -43,7 +43,7 @@ export class HyperGui {
             ev.preventDefault();
             ev.stopPropagation();
 
-            this.outside = this.world.localDraw.hitTestPoincareDisk(ev.offsetX, ev.offsetY);
+            this.outside = !this.world.localDraw.hitTestPoincareDisk(ev.offsetX, ev.offsetY);
 
             this.needUpdate = true;
         });
@@ -52,7 +52,7 @@ export class HyperGui {
             ev.stopPropagation();
             this.touchStartX = ev.targetTouches[0].clientX;
             this.touchStartY = ev.targetTouches[0].clientY;
-            this.outside = this.world.localDraw.hitTestPoincareDisk(
+            this.outside = !this.world.localDraw.hitTestPoincareDisk(
                 ev.targetTouches[0].clientX - this.canvas.getBoundingClientRect().left,
                 ev.targetTouches[0].clientY - this.canvas.getBoundingClientRect().top
             );

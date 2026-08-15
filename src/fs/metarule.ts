@@ -157,7 +157,7 @@ export class ConstrainSolver {
         }
     }
     matchEq(a: AST, b: AST, isItem: boolean, matchTable: ReplvarMatchTable, constrains: [AST, AST, boolean][], assertions: [AST, boolean][]): boolean {
-        if (a.type === "replvar" && a.name.startsWith("$") && b.type === "replvar" && a.name.startsWith("$")) {
+        if (a.type === "replvar" && a.name.startsWith("$") && b.type === "replvar" && b.name.startsWith("$")) {
             // // 把右边的变量全部换成该变量，换约束
             // for (let i = 0; i < constrains.length; i++) {
             //     astmgr.replace(constrains[i][0], b, a);
@@ -227,9 +227,15 @@ export class ConstrainSolver {
 */
     solveConstrain(constrains: [AST, AST, boolean][], assertions: [AST, boolean][]) {
         const matchTable: ReplvarMatchTable = {};
-        let depth = 0;
+        // A queue can contain many independent constraints, and matching one
+        // expression may replace it with several smaller constraints. The old
+        // fixed limit of eight iterations rejected valid large rules. Keep a
+        // bounded work budget proportional to the input while still stopping
+        // genuinely recursive substitutions.
+        const maxIterations = Math.max(128, constrains.length * 64 + 64);
+        let iterations = 0;
         while (constrains.length > 0) {
-            if (depth++ > 8) throw TR("无法解算变量约束，可能存在循环替换");
+            if (++iterations > maxIterations) throw TR("无法解算变量约束，可能存在循环替换");
             let [left, right, isItem] = constrains.shift();
             if (astmgr.equal(left, right)) {
                 // 丢弃

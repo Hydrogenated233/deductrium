@@ -316,7 +316,10 @@ export class Assist {
         for (let [pattern, eq, evidences] of Assist.eq_matches) {
             let unlock_yet = false;
             for (let e of evidences) {
-                if (!core.hasConst(e)) unlock_yet = true; break;
+                if (!core.hasConst(e)) {
+                    unlock_yet = true;
+                    break;
+                }
             }
             if (unlock_yet) continue;
             const resarr = recurse(goal.type, pattern);
@@ -835,6 +838,11 @@ export class Assist {
             nast.nodes[0] = this.genReplaceFn(nast.nodes[0], search, varname, excludedNames, freevarsinSearch, scope);
             return nast;
         }
+        // Keep malformed or future leaf-shaped nodes intact. All parser
+        // leaves are currently `var`, but semantic helpers may construct
+        // other zero-arity nodes; returning undefined here corrupts the
+        // generated rewrite function.
+        return ast;
     }
     boundId = 0;
     exactEqualByAlphaConversion(ast1: AST, ast2: AST) {
@@ -864,9 +872,11 @@ export class Assist {
         if (this.exactEqualByAlphaConversion(ast, search)) {
             return true;
         }
-        if (ast.nodes?.length === 2) {
+        if (ast.nodes?.length) {
             const nast = Core.clone(ast);
-            return this.search(nast.nodes[1], search) || this.search(nast.nodes[0], search);
+            for (let i = nast.nodes.length - 1; i >= 0; i--) {
+                if (this.search(nast.nodes[i], search)) return true;
+            }
         }
         return false;
     }
@@ -977,7 +987,12 @@ export class Assist {
                 name = ast.nodes[0].name;
                 ast = ast.nodes[1];
             }
-            const newast = wrapApply({ type: "L", name, nodes: [ast, wrapVar("(?#0)")] }, wrapVar("(?#0)"));
+            const targetType = Core.clone(goal.type.nodes?.[1] ?? goal.type);
+            const newast = wrapApply({
+                type: "L",
+                name,
+                nodes: [ast, wrapVar("(?#0)")]
+            }, wrapVar("(?#0)"));
             Core.assign(goal.ast, newast, true);
             goal.ast.checked = goal.type;
             goal.ast.nodes[0].checked = { type: "->", name: "", nodes: [ast, goal.type] };
@@ -990,6 +1005,7 @@ export class Assist {
             };
             anotherGoal.ast.checked = anotherGoal.type;
             goal.ast = goal.ast.nodes[0].nodes[1];
+            goal.type = targetType;
             goal.ast.checked = goal.type;
             goal.context = goal.context.slice(0);
             goal.context.unshift([name, ast, 0]);
@@ -1380,7 +1396,7 @@ export class Assist {
             this.goal.unshift(goal);
             return this.apply(wrapApply(wrapVar("por"), goal.type.nodes[0].nodes[0].nodes[1], goal.type.nodes[0].nodes[1], goal.type.nodes[1]));
         }
-        if (goal.type.type !== "+") throw TR("left策略只能作用于和类型");
+        if (goal.type.type !== "+") throw TR("right策略只能作用于和类型");
         Core.assign(goal.ast, wrapApply(wrapVar("inr"), wrapVar("(?#0)")), true);
         goal.ast.checked = goal.type;
         goal.ast.nodes[0].checked = wrapLambda("->", "", goal.type.nodes[1], goal.type);
@@ -1481,8 +1497,9 @@ export class Assist {
                 this.replaceFreeVar(ast.nodes[1], src, dst, freevarInDst);
             }
         } else if (ast.nodes?.length) {
-            this.replaceFreeVar(ast.nodes[0], src, dst, freevarInDst);
-            if (ast.nodes[1]) this.replaceFreeVar(ast.nodes[1], src, dst, freevarInDst);
+            for (const child of ast.nodes) {
+                this.replaceFreeVar(child, src, dst, freevarInDst);
+            }
         }
     }
     // private replaceVar(ast: AST, varname: string, dst: AST, context: Context = []) {

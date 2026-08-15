@@ -105,7 +105,7 @@ export class Proof {
             type: "sym", name: "~", nodes: [{ type: "replvar", name: v }]
         });
         const gen = (l: number) => {
-            if (l < 3) throw "cannot reached";
+            if (l < 3) throw new Error("cannot reached: proof rule arity is smaller than 3");
             if(l===3) return ":ca1,.cs";
             return ":c"+gen(l-1)+",.cs";
             // if (this.fs.deductions[name]) return name;

@@ -53,7 +53,7 @@ export class FormalSystem {
             replaceNames: Array.from(allReplvars).filter(e => !matchingReplvars.has(e)),
             replaceTypes: varLists,
             from: "",
-            tempvars: null
+            tempvars: new Set()
         };
     }
     ast2metaRule(ast) {
@@ -284,8 +284,11 @@ export class FormalSystem {
         for (const step of steps) {
             for (const val of step.replaceValues) {
                 this.findLocalNamesInAst(val, this.localReplacedNameRule, res);
-                for (const subval of this.generateDeduction(step.deductionIdx).tempvars) {
-                    res.add(subval);
+                const subDeduction = this.generateDeduction(step.deductionIdx);
+                if (subDeduction?.tempvars) {
+                    for (const subval of subDeduction.tempvars) {
+                        res.add(subval);
+                    }
                 }
             }
         }
@@ -340,8 +343,11 @@ export class FormalSystem {
         const macro = [];
         const subTempvars = new Set;
         for (let i = hypothesisAmount; i <= propositionIdx; i++) {
-            for (const v of this.generateDeduction(this.propositions[i].from.deductionIdx).tempvars) {
-                subTempvars.add(v);
+            const subDeduction = this.generateDeduction(this.propositions[i].from.deductionIdx);
+            if (subDeduction?.tempvars) {
+                for (const v of subDeduction.tempvars) {
+                    subTempvars.add(v);
+                }
             }
         }
         for (let i = hypothesisAmount; i <= propositionIdx; i++) {
@@ -912,9 +918,9 @@ export class FormalSystem {
             catch (e) {
                 // if one substep is wrong, remove newly added substeps from proplist
                 const substepErrMsg = errorMsg + TR(`子步骤`) + `${substepIdx + 1}(${substep.deductionIdx}` + TR(`)中 `) + e;
-                // while (this.propositions.length > startPropositions) {
-                //     this.propositions.pop();
-                // }
+                while (this.propositions.length > startPropositions) {
+                    this.propositions.pop();
+                }
                 throw substepErrMsg;
             }
             propsOffset.unshift(lastPos - firstPos - 1);

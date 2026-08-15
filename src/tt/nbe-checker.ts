@@ -1017,14 +1017,11 @@ function collectFreeBondVarIds(
         return result;
     }
     const binder = ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W";
-    if (ast.nodes?.[0]) collectFreeBondVarIds(ast.nodes[0], result, scope);
-    if (ast.nodes?.[1]) {
-        if (binder && validId(ast.bondVarId)) {
-            const bodyScope = new Set(scope).add(ast.bondVarId);
-            collectFreeBondVarIds(ast.nodes[1], result, bodyScope);
-        } else {
-            collectFreeBondVarIds(ast.nodes[1], result, scope);
-        }
+    for (const [index, child] of (ast.nodes ?? []).entries()) {
+        const childScope = binder && index === 1 && validId(ast.bondVarId)
+            ? new Set(scope).add(ast.bondVarId)
+            : scope;
+        collectFreeBondVarIds(child, result, childScope);
     }
     return result;
 }

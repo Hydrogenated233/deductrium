@@ -107,6 +107,7 @@ export class HWorld {
         if (b.type === TileBlockType.Gate || b.type === TileBlockType.Ordinal) {
             return this.onPassGate(b.name ?? t.join(','), b, t.join(','));
         }
+        return false;
     }
     hitReward(b, hash, isLoading) {
         if (!b)
@@ -136,13 +137,22 @@ export class HWorld {
         this.localDraw.rotorL.mulsl(R[0]).norms();
         this.localDraw.rotorR.mulsr(R[1]).norms();
     }
+    setCameraMatrix(candidate) {
+        const metricSq = candidate.r * candidate.r + candidate.z * candidate.z - candidate.x * candidate.x - candidate.y * candidate.y;
+        if (!Number.isFinite(metricSq) || metricSq <= 1e-12)
+            return false;
+        candidate.normalize();
+        if (![candidate.r, candidate.x, candidate.y, candidate.z].every(Number.isFinite))
+            return false;
+        this.localCamMat = candidate;
+        return true;
+    }
     rotate(z) {
-        this.localCamMat = Rotor.rotate(z).mul(this.localCamMat).normalize();
+        this.setCameraMatrix(Rotor.rotate(z).mul(this.localCamMat));
     }
     moveCam(x, y) {
-        this.localCamMat = Rotor.move(x, y).mul(this.localCamMat).normalize();
-        if (isNaN(this.localCamMat.r + this.localCamMat.x + this.localCamMat.y + this.localCamMat.z))
-            this.localCamMat = new Rotor();
+        if (!this.setCameraMatrix(Rotor.move(x, y).mul(this.localCamMat)))
+            return;
         this.updateCharactor(x, y);
         const pos = this.localCamMat.conj().apply(new Hvec);
         this.onStateChange();

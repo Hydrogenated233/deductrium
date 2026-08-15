@@ -19,11 +19,11 @@ export class LocalDraw {
         this.ctxt.fill();
     }
     hitTestPoincareDisk(x, y) {
-        //跟drawOutBorder配合使用，判断点击是否在盘内
+        // 与 drawOutBorder 配合使用，返回 true 表示点击在盘内。
         const dx = x * window.devicePixelRatio - this.canvas.width / 2;
         const dy = y * window.devicePixelRatio - this.canvas.height / 2;
         const distance = Math.hypot(dx, dy);
-        return distance > this.scale * Math.min(this.canvas.width, this.canvas.height) / 2;
+        return distance <= this.scale * Math.min(this.canvas.width, this.canvas.height) / 2;
     }
     // drawPlayer() {
     //     this.ctxt.beginPath();

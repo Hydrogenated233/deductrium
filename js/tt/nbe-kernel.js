@@ -909,10 +909,11 @@ function tryDirectComputeNeutral(value, state) {
         if (rightLiteral === 1n) {
             if (name === "add")
                 return applyConstant("succ", [value.spine[0]], state);
-            return applyConstant(name === "mul" ? "add" : "mul", [
-                known(neutralConstant(name === "mul" ? "0" : "1")),
-                value.spine[0]
-            ], state);
+            // The right unit is definitionally neutral for multiplication and
+            // exponentiation even when the left operand is still open. Do not
+            // introduce a stuck `add 0 x` / `mul 1 x` wrapper: return the
+            // already-forced left value directly.
+            return left;
         }
         const leftLiteral = naturalLiteral(left);
         if (leftLiteral === null || rightLiteral === null)

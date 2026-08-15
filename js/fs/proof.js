@@ -107,7 +107,7 @@ export class Proof {
         });
         const gen = (l) => {
             if (l < 3)
-                throw "cannot reached";
+                throw new Error("cannot reached: proof rule arity is smaller than 3");
             if (l === 3)
                 return ":ca1,.cs";
             return ":c" + gen(l - 1) + ",.cs";

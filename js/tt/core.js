@@ -686,6 +686,8 @@ export class Core {
                 const [, type, id] = preparedContext[index];
                 if (!id)
                     preparedContext[index][2] = this.state.bondVarId++;
+                else if (Number.isFinite(id) && id >= this.state.bondVarId)
+                    this.state.bondVarId = id + 1;
                 preparedContext[index][1] = this.markBondVars(this.desugar(type, false), preparedContext.slice(index));
             }
             const filled = this.markBondVars(this.desugar(Core.clone(definition), false), preparedContext);
@@ -928,6 +930,8 @@ export class Core {
             const [e, t, id] = context[i];
             if (!id)
                 context[i][2] = this.state.bondVarId++;
+            else if (Number.isFinite(id) && id >= this.state.bondVarId)
+                this.state.bondVarId = id + 1;
             context[i][1] = this.markBondVars(this.desugar(t, false), context.slice(i));
         }
         ast = this.markBondVars(this.desugar(ast, allowModify), context);

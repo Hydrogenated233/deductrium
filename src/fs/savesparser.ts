@@ -4,9 +4,11 @@ import { Deduction, DeductionStep, FormalSystem, Proposition } from "./formalsys
 import { FSGui } from "./gui.js";
 import { initFormalSystem } from "./initial.js";
 import { RuleParser } from "./metarule.js";
+import { TR } from "../lang.js";
 type SerilizedDeductionStep = [string, number[], string[]];
 type SerilizedDeduction = [string, string, SerilizedDeductionStep[]] | [string, string, SerilizedDeductionStep[], string[]];
 type SerilizedProposition = [string, SerilizedDeductionStep];
+const FS_SAVE_FORMAT_VERSION = 1;
 
 
 const astparser = new ASTParser;
@@ -49,7 +51,9 @@ export class SavesParser {
         return num === 3 ? ":ca1,.cs" : (":c" + this.fixbug260330_(num - 1) + ",.cs");
     }
     private fixbug260330(s: string) {
-        const num = Number(s.match(/>\.a1\_([1-9][0-9]*)$/)[1]);
+        const match = s.match(/>\.a1\_([1-9][0-9]*)$/);
+        if (!match) return s;
+        const num = Number(match[1]);
         return s.replace(/>\.a1\_([1-9][0-9]*)$/, this.fixbug260330_(num));
     }
     // rule :.=t is invalid but can be generated   ==convert it to==>   :.=t,.=t
@@ -92,9 +96,14 @@ export class SavesParser {
             userD[n] = this.serializeDeduction(d);
         }
         const props = gui.getProps();
-        return JSON.stringify([
-            Array.from(fs.consts), Array.from(fs.fns), Array.from(fs.verbs), [[/* todo metamacro */], ...gui.metarules], userD, dlist, props.map(s => this.serializeProposition(s))
-        ]);
+        return JSON.stringify({
+            version: FS_SAVE_FORMAT_VERSION,
+            data: [
+                Array.from(fs.consts), Array.from(fs.fns), Array.from(fs.verbs),
+                [[/* todo metamacro */], ...gui.metarules], userD, dlist,
+                props.map(s => this.serializeProposition(s))
+            ]
+        });
     }
     deserializeArr(fs: FormalSystem, arr: any[]) {
         // 
@@ -125,15 +134,24 @@ export class SavesParser {
     deserialize(gui: FSGui, str: string) {
         const skipRendering = gui.skipRendering;
         gui.skipRendering = true;
+        const parsed = JSON.parse(str);
+        const formatVersion = Array.isArray(parsed) ? 0 : Number(parsed?.version) || 0;
+        const data = Array.isArray(parsed) ? parsed : parsed?.data;
+        if (!Array.isArray(data)) throw TR("推理系统存档格式无效");
         const fsArrD = initFormalSystem(this.creative);
-        const fsdata = this.deserializeArr(fsArrD.fs, JSON.parse(str));
+        const fsdata = this.deserializeArr(fsArrD.fs, data);
         const savedMetarules = gui.formalSystem.fastmetarules;
         gui.formalSystem = fsdata.fs;
         gui.formalSystem.fastmetarules = savedMetarules;
         gui.deductions = fsdata.arrD;
 
-        // 25-11-25: bug fix player's progress
-        if (gui.deductions.includes("apn3") && !gui.deductions.includes("apn4") && !gui.deductions.includes("apn5")) {
+        // Legacy array saves from before the format envelope may have missed
+        // the two follow-up Peano unlocks. New saves carry a version marker,
+        // so a legitimate current save with only apn3 is left untouched.
+        if (formatVersion < FS_SAVE_FORMAT_VERSION
+            && gui.deductions.includes("apn3")
+            && !gui.deductions.includes("apn4")
+            && !gui.deductions.includes("apn5")) {
             gui.deductions.push("apn4", "apn5");
         }
 

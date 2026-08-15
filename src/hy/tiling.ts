@@ -270,7 +270,7 @@ export class HoroRect {
                 const lastId = wordsIndex.pop();
                 wordsIndex.pop(); wordsIndex.pop(); wordsIndex.push(lastId); return;
             }
-            if (n === 1 && prev2 === 0 && prev === TileRight && wordsIndex[l - 2] === this.p) {
+            if (n === this.p && prev2 === 0 && prev === TileLeft && wordsIndex[l - 2] === 1) {
                 words.pop(); words.pop(); words.push(TileLeft);
                 const lastId = wordsIndex.pop();
                 wordsIndex.pop(); wordsIndex.pop(); wordsIndex.push(lastId); return;

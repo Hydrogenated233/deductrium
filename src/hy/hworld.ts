@@ -89,7 +89,7 @@ export class HWorld {
         ctxt.fillStyle = "rgba(0,0,0,0.2)";
         this.localDraw.drawPlayer();
     }
-    hitTest(t: TileHash) {
+    hitTest(t: TileHash): boolean {
         // return true;
         const b = this.getBlock(t.join(','));
         if (!b || b.type === TileBlockType.Wall) return false;
@@ -101,6 +101,7 @@ export class HWorld {
         if (b.type === TileBlockType.Gate || b.type === TileBlockType.Ordinal) {
             return this.onPassGate(b.name ?? t.join(','), b, t.join(','));
         }
+        return false;
     }
     hitReward(b: TileBlock, hash: string, isLoading?: boolean) {
         if (!b) return;
@@ -126,12 +127,19 @@ export class HWorld {
         this.localDraw.rotorL.mulsl(R[0]).norms();
         this.localDraw.rotorR.mulsr(R[1]).norms();
     }
-    rotate(z:number){
-        this.localCamMat = Rotor.rotate(z).mul(this.localCamMat).normalize();
+    private setCameraMatrix(candidate: Rotor) {
+        const metricSq = candidate.r * candidate.r + candidate.z * candidate.z - candidate.x * candidate.x - candidate.y * candidate.y;
+        if (!Number.isFinite(metricSq) || metricSq <= 1e-12) return false;
+        candidate.normalize();
+        if (![candidate.r, candidate.x, candidate.y, candidate.z].every(Number.isFinite)) return false;
+        this.localCamMat = candidate;
+        return true;
+    }
+    rotate(z: number) {
+        this.setCameraMatrix(Rotor.rotate(z).mul(this.localCamMat));
     }
     moveCam(x: number, y: number) {
-        this.localCamMat = Rotor.move(x, y).mul(this.localCamMat).normalize();
-        if (isNaN(this.localCamMat.r + this.localCamMat.x + this.localCamMat.y + this.localCamMat.z)) this.localCamMat = new Rotor();
+        if (!this.setCameraMatrix(Rotor.move(x, y).mul(this.localCamMat))) return;
         this.updateCharactor(x, y);
         const pos = this.localCamMat.conj().apply(new Hvec);
         this.onStateChange();

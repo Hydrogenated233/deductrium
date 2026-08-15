@@ -154,7 +154,7 @@ export class AssertionSystem {
     // remove all #fns, return the first child node
     removeFn(ast) {
         if (ast.type !== "fn" && !ast.name.startsWith("#"))
-            throw "can't remove function from non #fn ast";
+            throw TR("无法对非 #fn 节点调用 removeFn");
         astmgr.assign(ast, ast.nodes[0]);
     }
     // wrap ast with #v*nf fn, without simplify
@@ -333,7 +333,7 @@ export class AssertionSystem {
         if (ast.type === "fn" && !ast.name.startsWith("#")) {
             resfn[ast.name] ??= isItem;
             if (resfn[ast.name] !== isItem)
-                throw `Token ` + ast.name + TR('不能同时为函数和谓词');
+                throw TR("符号 ") + ast.name + TR('不能同时为函数和谓词');
             // return res;
         }
         for (const [idx, n] of ast.nodes.entries()) {
@@ -1029,7 +1029,7 @@ export class AssertionSystem {
             result[pattern.name] ??= astmgr.clone(ast);
             this.getReplVarsType(ast, varTable, isItem);
             if (!this.equalWithAssertion(result[pattern.name], ast, astAssertions)) {
-                if ((!!this.getRpParams(ast)) !== (!!this.getRpParams(ast))) {
+                if ((!!this.getRpParams(pattern)) !== (!!this.getRpParams(ast))) {
                     throw TR(`替换函数#rp导致模式匹配`) + pattern.name + TR(`时无法顺利进行`) + `: \n` + (parser.stringify(result[pattern.name])) + " <=?=> " + (parser.stringify(ast));
                 }
                 throw TR(`模式匹配失败：匹配多个替代变量`) + pattern.name + TR(`时值不相同`) + `: \n` + (parser.stringify(result[pattern.name])) + " <=X=> " + (parser.stringify(ast));
@@ -1173,7 +1173,7 @@ export class AssertionSystem {
             }
             else if (quantSyms.includes(ast.name)) {
                 if (type !== "p")
-                    return TR("意外出现了量词") + ast.name;
+                    throw TR("意外出现了量词") + ast.name;
                 const varName = this.getVarName(ast.nodes[0]);
                 if (!varName)
                     throw TR(`非变量表达式出现在了量词`) + ast.name + TR(`的约束变量中`);

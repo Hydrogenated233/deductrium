@@ -100,13 +100,11 @@ export class ASTParser {
         this.cursor = cursor;
         this.token = this.tokens[this.cursor - 1];
     }
-    private acceptVar() {
-        if (!this.symChar.includes(this.token) || this.token.length > 1) {
-            if (!this.token) return false; //eof
-            this.nextSym();
-            return true;
-        }
-        return false;
+    private acceptVar(): boolean {
+        if (!this.token) return false; // eof
+        if (this.symChar.includes(this.token) && this.token.length === 1) return false;
+        this.nextSym();
+        return true;
     }
     private expectVar() {
         if (this.acceptVar()) return true;

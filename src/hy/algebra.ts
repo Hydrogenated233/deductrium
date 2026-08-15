@@ -14,7 +14,17 @@ export class Hvec {
         this.x = x; this.z = z; this.y = y;
     }
     normalize() {
-        const l = Math.sqrt(this.z * this.z - this.x * this.x - this.y * this.y);
+        const metricSq = this.z * this.z - this.x * this.x - this.y * this.y;
+        if (!Number.isFinite(metricSq) || metricSq <= 1e-12) {
+            // A hyperbolic point must be time-like. Keep callers on the
+            // identity point instead of propagating NaN/Infinity through the
+            // renderer when numerical drift or malformed input is encountered.
+            this.x = 0;
+            this.y = 0;
+            this.z = 1;
+            return this;
+        }
+        const l = Math.sqrt(metricSq);
         this.x /= l;
         this.y /= l;
         this.z /= l;
@@ -29,13 +39,14 @@ export class Hvec {
     }
     static precalcLerp(a: Hvec, b: Hvec) {
         const cosf = a.dot(b);
-        if (Math.abs(cosf) > 1.0001) {
-            let f = Math.acosh(cosf);
-            let _1s = 1 / Math.sinh(f);
+        if (Number.isFinite(cosf) && cosf > 1.0001) {
+            const f = Math.acosh(cosf);
+            const _1s = 1 / Math.sinh(f);
             return [f, _1s];
         }
+        return null;
     }
-    static fastLerp(a: Hvec, b: Hvec, t: number, precalc: number[]) {
+    static fastLerp(a: Hvec, b: Hvec, t: number, precalc: number[] | null) {
         if (!precalc) {
             return new Hvec(a.z + (b.z - a.z) * t, a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
         } else {
@@ -71,8 +82,12 @@ export class Rotor {
         return new Rotor(k2, x * k1, y * k1, 0);
     }
     static moveTo(target: Hvec) {
+        if (!Number.isFinite(target.z) || !Number.isFinite(target.x) || !Number.isFinite(target.y) || target.z < 1 - 1e-12) {
+            return new Rotor;
+        }
         const lxy = Math.hypot(target.x, target.y);
-        const l = Math.acosh(target.z) / 2;
+        if (lxy < 1e-12) return new Rotor;
+        const l = Math.acosh(Math.max(1, target.z)) / 2;
         const k1 = l > 0.0001 ? Math.sinh(l) / lxy : (1 - lxy * lxy / 8) / 2; // sh(ash(x)/2)/x
         const k2 = Math.cosh(l);
         return new Rotor(k2, target.x * k1, target.y * k1, 0);
@@ -95,7 +110,15 @@ export class Rotor {
         return new Rotor(1, x, y, -Math.hypot(x, y));
     }
     normalize() {
-        const l = Math.sqrt(this.r * this.r + this.z * this.z - this.x * this.x - this.y * this.y);
+        const metricSq = this.r * this.r + this.z * this.z - this.x * this.x - this.y * this.y;
+        if (!Number.isFinite(metricSq) || metricSq <= 1e-12) {
+            this.r = 1;
+            this.x = 0;
+            this.y = 0;
+            this.z = 0;
+            return this;
+        }
+        const l = Math.sqrt(metricSq);
         this.x /= l;
         this.y /= l;
         this.z /= l;

@@ -168,7 +168,7 @@ function makePortableDefinition(ast, core) {
                 if (binding)
                     node.name = binding.name;
             }
-            node.bondVarId = null;
+            node.bondVarId = undefined;
             return;
         }
         if (isBinder(node) && validBondVarId(node.bondVarId)) {
@@ -176,11 +176,11 @@ function makePortableDefinition(ast, core) {
             const id = node.bondVarId;
             const name = uniqueBinderName(node.name, scope);
             node.name = name;
-            node.bondVarId = null;
+            node.bondVarId = undefined;
             visit(node.nodes?.[1], [{ id, name }, ...scope]);
             return;
         }
-        node.bondVarId = null;
+        node.bondVarId = undefined;
         for (const child of node.nodes ?? [])
             visit(child, scope);
     };

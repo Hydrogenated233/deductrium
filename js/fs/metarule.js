@@ -165,7 +165,7 @@ export class ConstrainSolver {
         }
     }
     matchEq(a, b, isItem, matchTable, constrains, assertions) {
-        if (a.type === "replvar" && a.name.startsWith("$") && b.type === "replvar" && a.name.startsWith("$")) {
+        if (a.type === "replvar" && a.name.startsWith("$") && b.type === "replvar" && b.name.startsWith("$")) {
             // // 把右边的变量全部换成该变量，换约束
             // for (let i = 0; i < constrains.length; i++) {
             //     astmgr.replace(constrains[i][0], b, a);
@@ -240,9 +240,15 @@ export class ConstrainSolver {
 */
     solveConstrain(constrains, assertions) {
         const matchTable = {};
-        let depth = 0;
+        // A queue can contain many independent constraints, and matching one
+        // expression may replace it with several smaller constraints. The old
+        // fixed limit of eight iterations rejected valid large rules. Keep a
+        // bounded work budget proportional to the input while still stopping
+        // genuinely recursive substitutions.
+        const maxIterations = Math.max(128, constrains.length * 64 + 64);
+        let iterations = 0;
         while (constrains.length > 0) {
-            if (depth++ > 8)
+            if (++iterations > maxIterations)
                 throw TR("无法解算变量约束，可能存在循环替换");
             let [left, right, isItem] = constrains.shift();
             if (astmgr.equal(left, right)) {
@@ -317,5 +323,5 @@ export class ConstrainSolver {
 [.ni]:.ne,<a3
 [.a30]>:::.ne,.t:.ni,.t,<a3
 [.mn]:::::c.i:a1,ccmp,c<.a30,<a2:.i,mp,<a3
-*/ 
+*/
 //# sourceMappingURL=metarule.js.map
