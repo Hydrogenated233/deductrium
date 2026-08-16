@@ -6,28 +6,28 @@ import {
 } from "./assist-engine.js";
 import { TTCoreConfig } from "./engine.js";
 import { TTDefinitionSlot } from "./core-session.js";
+import { getTTProcessTransport, isTTProcessUnavailableError } from "./process-transport.js";
 
 type WorkerResponse =
     | { id: number, ok: true, result?: TTAssistSnapshot | TTAssistQedResult }
     | { id: number, ok: false, error: string, operationError?: boolean };
 
 export class TTAssistWorkerClient {
-    private worker: Worker;
+    private worker: Worker | null = null;
     private nextId = 1;
     private disposed = false;
-    private workerGeneration = 0;
+    private workerGeneration = 1;
+    private readonly processTransport = getTTProcessTransport();
     private readonly pending = new Map<number, {
         resolve: (value: any) => void,
         reject: (reason: Error) => void,
         timer?: number
     }>();
 
-    constructor() {
-        this.createWorker();
-    }
-
     get generation() {
-        return this.workerGeneration;
+        return this.processTransport.workerFallbackSelected
+            ? this.workerGeneration
+            : this.processTransport.generation;
     }
 
     configure(config: TTCoreConfig, definitions: TTDefinitionSlot[] = []) {
@@ -64,14 +64,50 @@ export class TTAssistWorkerClient {
 
     terminate() {
         this.disposed = true;
-        this.worker.terminate();
+        this.worker?.terminate();
+        this.worker = null;
         this.rejectAll(new Error("Proof-assistant worker terminated"));
     }
 
-    private createWorker() {
+    private async request<T>(message: object, timeout?: number): Promise<T> {
+        if (this.disposed) throw new Error("Proof-assistant worker terminated");
+        try {
+            return await this.processTransport.request<T>("assist", message, timeout);
+        } catch (error) {
+            if (!isTTProcessUnavailableError(error)) throw error;
+            return this.requestWorker<T>(message, timeout);
+        }
+    }
+
+    private requestWorker<T>(message: object, timeout?: number): Promise<T> {
+        const worker = this.ensureWorker();
+        const id = this.nextId++;
+        return new Promise<T>((resolve, reject) => {
+            const pending = { resolve, reject, timer: undefined as number };
+            if (Number.isFinite(timeout)) {
+                const wallTimeout = Math.min(Math.max(Number(timeout) + 250, 250), 2_147_000_000);
+                pending.timer = window.setTimeout(() => {
+                    if (!this.pending.has(id)) return;
+                    this.restartWorker(new Error("Proof-assistant worker timed out"));
+                }, wallTimeout);
+            }
+            this.pending.set(id, pending);
+            try {
+                worker.postMessage({ id, ...message });
+            } catch (error) {
+                this.pending.delete(id);
+                if (pending.timer) clearTimeout(pending.timer);
+                reject(error);
+            }
+        });
+    }
+
+    private ensureWorker() {
+        if (this.worker) return this.worker;
+        if (typeof Worker === "undefined") throw new Error("Proof-assistant worker unavailable");
         const worker = new Worker(new URL("./assist-worker.js", import.meta.url), { type: "module" });
         this.worker = worker;
-        this.workerGeneration++;
+        this.workerGeneration = Math.max(this.workerGeneration, this.processTransport.generation);
         worker.addEventListener("message", (event: MessageEvent<WorkerResponse>) => {
             const response = event.data;
             const pending = this.pending.get(response.id);
@@ -87,36 +123,17 @@ export class TTAssistWorkerClient {
         });
         worker.addEventListener("error", event => {
             if (worker !== this.worker) return;
-            this.restart(new Error(event.message || "Proof-assistant worker failed"));
+            this.restartWorker(new Error(event.message || "Proof-assistant worker failed"));
         });
+        return worker;
     }
 
-    private request<T>(message: object, timeout?: number): Promise<T> {
-        const id = this.nextId++;
-        return new Promise<T>((resolve, reject) => {
-            const pending = { resolve, reject, timer: undefined as number };
-            if (Number.isFinite(timeout)) {
-                const wallTimeout = Math.min(Math.max(timeout + 250, 250), 2_147_000_000);
-                pending.timer = window.setTimeout(() => {
-                    if (!this.pending.has(id)) return;
-                    this.restart(new Error("Proof-assistant worker timed out"));
-                }, wallTimeout);
-            }
-            this.pending.set(id, pending);
-            try {
-                this.worker.postMessage({ id, ...message });
-            } catch (error) {
-                this.pending.delete(id);
-                if (pending.timer) clearTimeout(pending.timer);
-                reject(error);
-            }
-        });
-    }
-
-    private restart(error: Error) {
+    private restartWorker(error: Error) {
         this.worker?.terminate();
+        this.worker = null;
+        this.workerGeneration++;
         this.rejectAll(error);
-        if (!this.disposed) this.createWorker();
+        if (!this.disposed && this.processTransport.workerFallbackSelected) this.ensureWorker();
     }
 
     private rejectAll(error: Error) {

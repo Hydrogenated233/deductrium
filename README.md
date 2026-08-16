@@ -10,7 +10,7 @@
 
 ## 本地启动
 
-本版本的类型论检查器使用了模块化 Web Worker，因此**不能直接双击 `index.html`**。请通过本地 HTTP 服务启动。
+本版本的类型论引擎由本地服务器启动的独立 Node.js 子进程执行，因此**不能直接双击 `index.html`**。请通过随包提供的本地 HTTP 服务启动。
 
 ### 运行发布包（Windows）
 
@@ -19,6 +19,8 @@
 3. 双击 `start.cmd`。
 4. 默认浏览器会自动打开 `http://127.0.0.1:4174/`。
 5. 关闭命令行窗口或按 `Ctrl+C` 即可停止游戏服务。
+
+发布包不需要执行 `npm install`；`package.json` 只用于保留浏览器脚本所需的 ES Module 配置。
 
 也可以在发布目录中手动运行：
 
@@ -34,6 +36,19 @@ node server.mjs
 ```
 
 然后打开 `http://127.0.0.1:4180/`。
+
+每个打开的游戏页面会按需创建一个隔离的类型论 Node.js 子进程；进程内部由两条独立的 `worker thread` 分别运行核心检查和证明助手，因此长时间类型检查不会阻塞证明助手。关闭页面时会释放会话，关闭本地服务器会终止所有剩余子进程。仅当服务器确实没有提供进程 API 时，浏览器才回退到 Web Worker；发布包正常启动时始终使用独立进程。
+
+独立进程默认最多使用 2048 MB 堆内存。大型存档可在启动前调整此上限，例如：
+
+```powershell
+$env:DEDUCTRIUM_TT_HEAP_MB=4096
+node server.mjs
+```
+
+这个进程内存上限与游戏设置中的“推断资源上限”倍率不同：前者控制 Node.js 可用内存，后者控制单次语义推断允许执行的工作量。
+
+服务器还会限制单条 RPC 的最长等待时间，默认 30 分钟；可用 `DEDUCTRIUM_TT_MAX_RPC_TIMEOUT_MS` 调小这个上限。`DEDUCTRIUM_TT_MAX_PENDING`、`DEDUCTRIUM_TT_MAX_SESSIONS` 可分别限制单会话排队数与同时打开的页面数。
 
 ### 从源码启动
 
@@ -68,18 +83,18 @@ npm run benchmark
 npm run package
 ```
 
-脚本会依次执行回归测试、类型检查和构建，然后在 `release/` 中生成可直接解压运行的目录与 ZIP 压缩包，并输出压缩包的 SHA256。
+脚本会依次执行回归测试、类型检查和构建，然后从发布目录实际启动独立进程，完成健康检查和一个最小类型检查。通过后会在 `release/` 中生成可直接解压运行的目录与 ZIP 压缩包，并输出压缩包的 SHA256。
 
 ### GitHub Release 自动打包
 
 `.github/workflows/release.yml` 会在推送 `hott-v*` 标签时自动运行测试、构建发布包并创建 GitHub Release：
 
 ```powershell
-git tag hott-v2026.8.8
-git push origin hott-v2026.8.8
+git tag hott-v2026.08.16
+git push origin hott-v2026.08.16
 ```
 
-也可以在 GitHub Actions 页面手动运行 `Package Release`。手动运行时不填写标签会使用 `hott-v<package.json 版本>`；若同名 Release 已存在，会覆盖其中的 ZIP 文件。发布新版本前应先更新 `package.json` 中的版本号。
+也可以在 GitHub Actions 页面手动运行 `Package Release`。不填写标签时，workflow 会按中国标准时间自动使用 `hott-vYYYY.MM.DD`；同一天再次发布会把该 Release 的标签和 ZIP 更新到最新提交。
 
 ### 存档说明
 
@@ -89,9 +104,9 @@ git push origin hott-v2026.8.8
 
 ## 本版本改进
 
-- 类型论检查移入独立 Worker，复杂证明不会长时间阻塞游戏界面。
-- 类型论 Worker 持久保存定义与推断缓存，编辑、移动或停用时只增量重验受影响后缀。
-- 证明助手使用独立 Worker，策略推荐、归纳试探和撤销不会阻塞主界面。
+- 类型论检查移入独立 Node.js 进程，并将核心检查与证明助手分到独立 worker thread，复杂证明不会长时间阻塞游戏界面，内存故障也与浏览器页面隔离。
+- 类型论进程持久保存定义与推断缓存，编辑、移动或停用时只增量重验受影响后缀。
+- 证明助手通过隔离进程中的独立 worker thread 运行，策略推荐、归纳试探和撤销不会被核心检查阻塞。
 - 优化推断关系求解；大型 `fLR` 与二阶环路交换证明可在秒内完成。
 - 类型论定理支持拖动排序、文件夹、递归停用和验证标签缓存。
 - 证明助手支持带名称的 `qed`，可生成 `名称:=证明项:命题`。

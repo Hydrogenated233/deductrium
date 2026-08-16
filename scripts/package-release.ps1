@@ -43,22 +43,26 @@ $npmCommand = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
 if (-not $npmCommand) {
     $npmCommand = Get-Command "npm" -ErrorAction Stop
 }
+$nodeCommand = Get-Command "node.exe" -ErrorAction SilentlyContinue
+if (-not $nodeCommand) {
+    $nodeCommand = Get-Command "node" -ErrorAction Stop
+}
 
 Push-Location $projectRoot
 try {
-    Write-Host "[1/6] Running regression tests..."
+    Write-Host "[1/7] Running regression tests..."
     & $npmCommand.Source test
     if ($LASTEXITCODE -ne 0) { throw "Regression tests failed." }
 
-    Write-Host "[2/6] Type-checking..."
+    Write-Host "[2/7] Type-checking..."
     & $npmCommand.Source run typecheck
     if ($LASTEXITCODE -ne 0) { throw "TypeScript type-check failed." }
 
-    Write-Host "[3/6] Building..."
+    Write-Host "[3/7] Building..."
     & $npmCommand.Source run build
     if ($LASTEXITCODE -ne 0) { throw "TypeScript build failed." }
 
-    Write-Host "[4/6] Preparing release directory..."
+    Write-Host "[4/7] Preparing release directory..."
     New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
     foreach ($target in @($packageDirectory, $archivePath)) {
         if (Test-Path -LiteralPath $target) {
@@ -72,7 +76,9 @@ try {
         "gui.css",
         "README.md",
         "README_EN.md",
+        "package.json",
         "server.mjs",
+        "tt-process.mjs",
         "start.cmd"
     )
     foreach ($relativePath in $runtimeFiles) {
@@ -89,7 +95,7 @@ try {
     }
     Copy-Item -LiteralPath $javascriptDirectory -Destination $packageDirectory -Recurse -Force
 
-    Write-Host "[5/6] Validating and compressing..."
+    Write-Host "[5/7] Validating release contents..."
     $requiredPaths = @($runtimeFiles + "js")
     foreach ($relativePath in $requiredPaths) {
         if (-not (Test-Path -LiteralPath (Join-Path $packageDirectory $relativePath))) {
@@ -102,9 +108,14 @@ try {
         }
     }
 
+    Write-Host "[6/7] Starting packaged process smoke test..."
+    & $nodeCommand.Source (Join-Path $projectRoot "tests/tt-process-package-smoke.mjs") $packageDirectory
+    if ($LASTEXITCODE -ne 0) { throw "Packaged type-theory process smoke test failed." }
+
+    Write-Host "[7/7] Compressing release..."
     Compress-Archive -Path (Join-Path $packageDirectory "*") -DestinationPath $archivePath -CompressionLevel Optimal
 
-    Write-Host "[6/6] Release ready."
+    Write-Host "Release ready."
     $archive = Get-Item -LiteralPath $archivePath
     $sha256 = [Security.Cryptography.SHA256]::Create()
     $archiveStream = [IO.File]::OpenRead($archivePath)

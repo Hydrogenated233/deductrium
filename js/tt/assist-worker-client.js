@@ -1,14 +1,15 @@
+import { getTTProcessTransport, isTTProcessUnavailableError } from "./process-transport.js";
 export class TTAssistWorkerClient {
-    worker;
+    worker = null;
     nextId = 1;
     disposed = false;
-    workerGeneration = 0;
+    workerGeneration = 1;
+    processTransport = getTTProcessTransport();
     pending = new Map();
-    constructor() {
-        this.createWorker();
-    }
     get generation() {
-        return this.workerGeneration;
+        return this.processTransport.workerFallbackSelected
+            ? this.workerGeneration
+            : this.processTransport.generation;
     }
     configure(config, definitions = []) {
         return this.request({ kind: "configure", config, definitions });
@@ -36,13 +37,55 @@ export class TTAssistWorkerClient {
     }
     terminate() {
         this.disposed = true;
-        this.worker.terminate();
+        this.worker?.terminate();
+        this.worker = null;
         this.rejectAll(new Error("Proof-assistant worker terminated"));
     }
-    createWorker() {
+    async request(message, timeout) {
+        if (this.disposed)
+            throw new Error("Proof-assistant worker terminated");
+        try {
+            return await this.processTransport.request("assist", message, timeout);
+        }
+        catch (error) {
+            if (!isTTProcessUnavailableError(error))
+                throw error;
+            return this.requestWorker(message, timeout);
+        }
+    }
+    requestWorker(message, timeout) {
+        const worker = this.ensureWorker();
+        const id = this.nextId++;
+        return new Promise((resolve, reject) => {
+            const pending = { resolve, reject, timer: undefined };
+            if (Number.isFinite(timeout)) {
+                const wallTimeout = Math.min(Math.max(Number(timeout) + 250, 250), 2_147_000_000);
+                pending.timer = window.setTimeout(() => {
+                    if (!this.pending.has(id))
+                        return;
+                    this.restartWorker(new Error("Proof-assistant worker timed out"));
+                }, wallTimeout);
+            }
+            this.pending.set(id, pending);
+            try {
+                worker.postMessage({ id, ...message });
+            }
+            catch (error) {
+                this.pending.delete(id);
+                if (pending.timer)
+                    clearTimeout(pending.timer);
+                reject(error);
+            }
+        });
+    }
+    ensureWorker() {
+        if (this.worker)
+            return this.worker;
+        if (typeof Worker === "undefined")
+            throw new Error("Proof-assistant worker unavailable");
         const worker = new Worker(new URL("./assist-worker.js", import.meta.url), { type: "module" });
         this.worker = worker;
-        this.workerGeneration++;
+        this.workerGeneration = Math.max(this.workerGeneration, this.processTransport.generation);
         worker.addEventListener("message", (event) => {
             const response = event.data;
             const pending = this.pending.get(response.id);
@@ -63,38 +106,17 @@ export class TTAssistWorkerClient {
         worker.addEventListener("error", event => {
             if (worker !== this.worker)
                 return;
-            this.restart(new Error(event.message || "Proof-assistant worker failed"));
+            this.restartWorker(new Error(event.message || "Proof-assistant worker failed"));
         });
+        return worker;
     }
-    request(message, timeout) {
-        const id = this.nextId++;
-        return new Promise((resolve, reject) => {
-            const pending = { resolve, reject, timer: undefined };
-            if (Number.isFinite(timeout)) {
-                const wallTimeout = Math.min(Math.max(timeout + 250, 250), 2_147_000_000);
-                pending.timer = window.setTimeout(() => {
-                    if (!this.pending.has(id))
-                        return;
-                    this.restart(new Error("Proof-assistant worker timed out"));
-                }, wallTimeout);
-            }
-            this.pending.set(id, pending);
-            try {
-                this.worker.postMessage({ id, ...message });
-            }
-            catch (error) {
-                this.pending.delete(id);
-                if (pending.timer)
-                    clearTimeout(pending.timer);
-                reject(error);
-            }
-        });
-    }
-    restart(error) {
+    restartWorker(error) {
         this.worker?.terminate();
+        this.worker = null;
+        this.workerGeneration++;
         this.rejectAll(error);
-        if (!this.disposed)
-            this.createWorker();
+        if (!this.disposed && this.processTransport.workerFallbackSelected)
+            this.ensureWorker();
     }
     rejectAll(error) {
         for (const pending of this.pending.values()) {

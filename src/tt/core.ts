@@ -17,6 +17,22 @@ import {
 } from "./presentation.js";
 const parser = new ASTParser;
 
+const semanticResourceBaseLimits: Readonly<{
+    nbeMaxNodes: number;
+    elaborationMaxNodes: number;
+    synthesisMaxSteps: number;
+    assertionMaxSteps: number;
+    assertionMaxNodes: number;
+    outputMaxNodes: number;
+}> = Object.freeze({
+    nbeMaxNodes: 512,
+    elaborationMaxNodes: 1_024,
+    synthesisMaxSteps: 8_192,
+    assertionMaxSteps: 131_072,
+    assertionMaxNodes: 2_048,
+    outputMaxNodes: 256
+});
+
 function fitsSemanticNbeBudget(
     ast: AST,
     maxNodes: number,
@@ -466,22 +482,43 @@ export class Core {
     static semanticTypeCheckRecursive = false;
     /** Automatically use recursive synthesis once a large theorem library is loaded. */
     static semanticTypeCheckRecursiveMinDefinitions = 48;
-    static semanticNbEMaxNodes = 512;
+    static semanticResourceScale = 1;
+    static readonly semanticResourceScaleMin = 1;
+    static readonly semanticResourceScaleMax = 64;
+    static semanticNbEMaxNodes = semanticResourceBaseLimits.nbeMaxNodes;
     /** Hard input cap for local-meta elaboration; equality/WHNF retain their smaller budget. */
-    static semanticTypeElaborationMaxNodes = 1_024;
+    static semanticTypeElaborationMaxNodes = semanticResourceBaseLimits.elaborationMaxNodes;
     /** Bound semantic synthesis work. */
-    static semanticTypeSynthesisMaxSteps = 8_192;
+    static semanticTypeSynthesisMaxSteps = semanticResourceBaseLimits.synthesisMaxSteps;
     /** Explicit assertions can justify a larger bounded conversion search. */
-    static semanticTypeAssertionMaxSteps = 131_072;
+    static semanticTypeAssertionMaxSteps = semanticResourceBaseLimits.assertionMaxSteps;
     /** Explicit annotations bound elaboration, so larger proof terms can use the semantic checker safely. */
-    static semanticTypeAssertionMaxNodes = 2_048;
+    static semanticTypeAssertionMaxNodes = semanticResourceBaseLimits.assertionMaxNodes;
     /** Reject expanded semantic result types before they enter definition caches. */
-    static semanticTypeCheckMaxOutputNodes = 256;
+    static semanticTypeCheckMaxOutputNodes = semanticResourceBaseLimits.outputMaxNodes;
     static semanticWhnfAttempts = 0;
     static semanticWhnfHits = 0;
     static semanticTypeCheckAttempts = 0;
     static semanticTypeCheckHits = 0;
     static semanticTypeCheckFastPathHits = 0;
+
+    static setSemanticResourceScale(value: unknown) {
+        const numeric = Number(value);
+        const scale = Number.isFinite(numeric)
+            ? Math.min(
+                Core.semanticResourceScaleMax,
+                Math.max(Core.semanticResourceScaleMin, Math.floor(numeric))
+            )
+            : 1;
+        Core.semanticResourceScale = scale;
+        Core.semanticNbEMaxNodes = semanticResourceBaseLimits.nbeMaxNodes * scale;
+        Core.semanticTypeElaborationMaxNodes = semanticResourceBaseLimits.elaborationMaxNodes * scale;
+        Core.semanticTypeSynthesisMaxSteps = semanticResourceBaseLimits.synthesisMaxSteps * scale;
+        Core.semanticTypeAssertionMaxSteps = semanticResourceBaseLimits.assertionMaxSteps * scale;
+        Core.semanticTypeAssertionMaxNodes = semanticResourceBaseLimits.assertionMaxNodes * scale;
+        Core.semanticTypeCheckMaxOutputNodes = semanticResourceBaseLimits.outputMaxNodes * scale;
+        return scale;
+    }
     /** Source-shaped clones used when reporting errors after elaboration mutates ASTs. */
     private displaySurfaceNodes = new WeakMap<object, AST>();
     private silentErrors = 0;

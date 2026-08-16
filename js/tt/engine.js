@@ -16,6 +16,9 @@ export class TTCoreEngine {
         langMgr.lang = config.language ?? langMgr.lang;
         this.core = new Core();
         Core.timeout = config.timeout ?? Core.timeout;
+        if (config.semanticResourceScale !== undefined) {
+            Core.setSemanticResourceScale(config.semanticResourceScale);
+        }
         Core.timeoutOccured = false;
         this.registerComputeRules();
         // Seed built-in universe-level types before definitions are checked;

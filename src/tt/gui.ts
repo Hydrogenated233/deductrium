@@ -11,13 +11,14 @@ import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { TypeRule, initTypeSystem } from "./initial.js";
 import { restoreSemanticMetaNamesForDisplay } from "./presentation.js";
-import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremInputIndexBeforeItem, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator } from "./theorem-validation.js";
+import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremInputIndexBeforeItem, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator, typeTheoryValidationTimedOut } from "./theorem-validation.js";
 const parser = new ASTParser;
 const constructors = new Set<string>();
 const destructors = new Set<string>();
 const computeEqs = new Set<string>();
 const macro = new Set<string>();
 const sysmacro = new Set<string>();
+const semanticResourceScaleStorageKey = "deductrium-tt-semantic-resource-scale";
 
 let consts = new Set<string>;
 type definedConst = [string, AST, DefinitionTypeCacheSnapshot?];
@@ -101,6 +102,7 @@ export class TTGui {
     private coreWorkerStateRevision = 0;
     private readonly coreWorkerMutations = new TTWorkerMutationQueue();
     private definitionRevision = 0;
+    private semanticResourceScale = 1;
     /** Changes whenever theorem rows are inserted, removed, or reordered. */
     private theoremStructureRevision = 0;
     private workerRequestId = 0;
@@ -113,6 +115,42 @@ export class TTGui {
     private astRenderScopeFolderId: string | null | undefined;
     /** Cached shared tooltip node; ast2HTML is called for every AST fragment. */
     private floatTypeDiv: HTMLDivElement | null = null;
+
+    private initializeSemanticResourceScale() {
+        let stored: string | null = null;
+        try {
+            stored = localStorage.getItem(semanticResourceScaleStorageKey);
+        } catch { }
+        this.semanticResourceScale = Core.setSemanticResourceScale(stored ?? 1);
+        const input = document.getElementById("semanticResourceScale") as HTMLInputElement;
+        if (!input) return;
+        input.value = String(this.semanticResourceScale);
+        input.addEventListener("change", () => this.setSemanticResourceScale(input.value));
+    }
+
+    private setSemanticResourceScale(value: unknown) {
+        const previous = this.semanticResourceScale;
+        this.semanticResourceScale = Core.setSemanticResourceScale(value);
+        const input = document.getElementById("semanticResourceScale") as HTMLInputElement;
+        if (input) input.value = String(this.semanticResourceScale);
+        try {
+            localStorage.setItem(semanticResourceScaleStorageKey, String(this.semanticResourceScale));
+        } catch { }
+        if (this.semanticResourceScale === previous) return;
+
+        // The active proof session owns a separately configured engine. Keep
+        // its visible history, but replay it with the new finite budget before
+        // accepting another command.
+        this.tacticDefinitionsRevision = -1;
+        this.assistWorkerSessionReady = false;
+        this.tacticRequestId++;
+        this.setTacticBusy(false);
+        if (!this.skipRendering) {
+            this.revalidateTheorems();
+            this.warmCoreWorkerWhenEmpty();
+        }
+    }
+
     private getTheoremInputsFromItems() {
         if (this.theoremInputsCacheRevision !== this.theoremStructureRevision) {
             this.theoremInputsCache = this.theoremItems
@@ -174,9 +212,8 @@ export class TTGui {
         this.core.syncSemanticComputeRules?.();
     }
     constructor(creative: boolean, skipRendering: boolean) {
-        if (typeof Worker !== "undefined") {
-            try { this.coreWorker = new TTCoreWorkerClient(); } catch (error) { console.warn("Type-theory worker unavailable", error); }
-        }
+        this.initializeSemanticResourceScale();
+        try { this.coreWorker = new TTCoreWorkerClient(); } catch (error) { console.warn("Type-theory worker unavailable", error); }
         this.skipRendering = skipRendering;
         this.theoremDragger.cols = 1;
         this.theoremDragger.onExecute = (src, dst) => this.moveTheoremItem(src, dst === "+" ? " " : dst);
@@ -429,7 +466,8 @@ export class TTGui {
                 try {
                     snapshot = await this.assistWorker.undo(Core.timeout);
                     this.assistWorkerSessionReady = true;
-                } catch {
+                } catch (workerError) {
+                    if (!shouldFallbackToSynchronousTheoremValidation(workerError)) throw workerError;
                     snapshot = await this.startAssistFallback(this.mode[0], this.mode.slice(1));
                     this.assistWorkerSessionReady = false;
                 }
@@ -466,6 +504,7 @@ export class TTGui {
                 this.assistWorkerSessionReady = true;
                 return snapshot;
             } catch (workerError) {
+                if (!shouldFallbackToSynchronousTheoremValidation(workerError)) throw workerError;
                 try {
                     const snapshot = await this.startAssistFallback(target, history);
                     this.assistWorkerSessionReady = false;
@@ -478,7 +517,7 @@ export class TTGui {
         return this.startAssistFallback(target, history);
     }
     private ensureAssistWorker() {
-        if (this.assistWorker || typeof Worker === "undefined") return this.assistWorker;
+        if (this.assistWorker) return this.assistWorker;
         try {
             this.assistWorker = new TTAssistWorkerClient();
         } catch (error) {
@@ -513,6 +552,7 @@ export class TTGui {
                 return snapshot;
             } catch (workerError) {
                 if ((workerError as any)?.operationError) throw workerError;
+                if (!shouldFallbackToSynchronousTheoremValidation(workerError)) throw workerError;
                 try {
                     await this.startAssistFallback(this.mode[0], this.mode.slice(1));
                     const snapshot = this.assistFallback.apply(command);
@@ -533,6 +573,7 @@ export class TTGui {
                 return await this.assistWorker.qed(Core.timeout);
             } catch (workerError) {
                 if ((workerError as any)?.operationError) throw workerError;
+                if (!shouldFallbackToSynchronousTheoremValidation(workerError)) throw workerError;
                 try {
                     await this.startAssistFallback(this.mode[0], this.mode.slice(1));
                     return this.assistFallback.qed();
@@ -1682,6 +1723,7 @@ export class TTGui {
             disableSimpleEq: this.disableSimpleEq,
             inferDisplayMode: this.inferDisplayMode,
             timeout: Core.timeout,
+            semanticResourceScale: this.semanticResourceScale,
             language: langMgr.lang,
         };
     }
@@ -2202,7 +2244,12 @@ export class TTGui {
                                     this.core.restoreDefinitionCache(defname, storedCache);
                                 } catch { }
                             }
-                            this.userDefinedConsts[currentIdx] = [defname, storedDefinition, storedCache];
+                            const storedSlot: Exclude<TTDefinitionSlot, null> = [
+                                defname,
+                                storedDefinition,
+                                storedCache
+                            ];
+                            this.userDefinedConsts[currentIdx] = storedSlot;
                             // A previously rendered #t copy preview may have
                             // classified this name as a free variable.  Force
                             // its cached presentation to be rebuilt after the
@@ -2216,9 +2263,8 @@ export class TTGui {
                                 this.invalidateWorkerDefinitions(currentIdx);
                                 throw TR("该名称的常量需满足游戏中某个题目的要求");
                             }
-                            if (!workerCommitted) {
-                                this.syncCoreWorkerDefinition(currentIdx, [defname, storedDefinition, storedCache]);
-                            }
+                            if (workerCommitted) this.coreWorker?.rememberDefinition(currentIdx, storedSlot);
+                            else this.syncCoreWorkerDefinition(currentIdx, storedSlot);
                             macro.add(defname);
                         }
                         // The Worker returns a fully elaborated definition while
@@ -2333,6 +2379,10 @@ export class TTGui {
                     return;
                 }
                 if (result.timeout) document.getElementById("timeout").classList.remove("hide");
+                // `validate` mutates the remote ordered slot even when the
+                // theorem is not a definition or fails. Record the null first;
+                // a successful definition replaces it inside `finish` below.
+                this.coreWorker?.rememberDefinition(currentIdx, null);
                 if (result.ok) {
                     finish(
                         result.ast,
@@ -2355,10 +2405,13 @@ export class TTGui {
                     return;
                 }
                 if (!shouldFallbackToSynchronousTheoremValidation(workerError)) {
-                    document.getElementById("timeout").classList.remove("hide");
+                    const timedOut = typeTheoryValidationTimedOut(workerError);
+                    if (timedOut) document.getElementById("timeout").classList.remove("hide");
                     finish(
                         ast,
-                        TR("类型论 Worker 验证超时，请增大单条定理判定的默认等待时间"),
+                        timedOut
+                            ? TR("类型论 Worker 验证超时，请增大单条定理判定的默认等待时间")
+                            : String(workerError),
                         undefined,
                         undefined,
                         false,
@@ -2765,7 +2818,19 @@ export class TTGui {
     updateAfterUnlock() {
         if (this.skipRendering) return;
         this.updateTypeList(this.unlockedTypes);
+        this.warmCoreWorkerWhenEmpty();
         this.revalidateTheorems();
+    }
+    private warmCoreWorkerWhenEmpty() {
+        if (!this.coreWorker) return;
+        const hasTheorems = this.theoremItems
+            ? this.theoremItems.some(item => item.kind === "theorem" && item.input.value.trim())
+            : !!this.userDefinedConsts?.length;
+        if (hasTheorems) return;
+        // Configuration is expensive but runs off the UI thread. Starting it
+        // while the empty editor is idle means the first short expression can
+        // reuse the ready session instead of paying the fixed bootstrap cost.
+        void this.prepareCoreWorker(0, null).catch(() => { });
     }
     disableAxiom(...arr: string[]) {
         for (const a of arr) {

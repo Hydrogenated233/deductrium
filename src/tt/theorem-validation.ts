@@ -133,8 +133,17 @@ export function canReuseTheoremResultOnBlur(state: TheoremBlurState) {
 
 /** A wall-clock Worker timeout must not rerun the same expensive check on the UI thread. */
 export function shouldFallbackToSynchronousTheoremValidation(error: unknown) {
+    if (error && typeof error === "object" && (error as any).preventSynchronousFallback) return false;
     const message = error instanceof Error ? error.message : String(error);
-    return !message.includes("Type-theory worker timed out");
+    return !message.includes("Type-theory worker timed out")
+        && !message.includes("Type-theory process timed out");
+}
+
+export function typeTheoryValidationTimedOut(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return (error && typeof error === "object" && (error as any).code === "TT_PROCESS_TIMEOUT")
+        || message.includes("timed out")
+        || message.includes("验证超时");
 }
 
 export type TheoremValidationRun = {

@@ -8,7 +8,7 @@ This optimization branch is not deployed to GitHub Pages. Run it through the loc
 
 ## Local startup
 
-The optimized type-theory checker uses a module Web Worker, so do **not** open `index.html` directly with a `file://` URL.
+The optimized type-theory engine runs in an isolated Node.js child process started by the local server, so do **not** open `index.html` directly with a `file://` URL.
 
 For the Windows release package:
 
@@ -16,6 +16,8 @@ For the Windows release package:
 2. Extract the archive.
 3. Double-click `start.cmd`.
 4. The default browser opens `http://127.0.0.1:4174/`.
+
+The release package does not require `npm install`; its `package.json` only preserves the ES Module mode required by the browser scripts.
 
 To run from source:
 
@@ -27,7 +29,20 @@ npm start
 
 Use `npm run typecheck` to check TypeScript without emitting JavaScript. Set the `PORT` environment variable before starting if port `4174` is already occupied.
 
-The type-theory Worker keeps validated definitions and inference caches alive between requests. Edits, moves, and disabled folders only invalidate the affected suffix. The proof assistant runs in a separate Worker so tactic search and undo do not block the main page.
+Each open game page creates an isolated Node.js type-theory child process on demand. The process runs core checking and the proof assistant in separate worker threads, so a long type check does not block tactic search. Closing the page disposes its session, and stopping the local server terminates any remaining child processes. The browser falls back to Web Workers only when the server truly does not expose the process API; a normally started release package always uses the isolated process.
+
+The child process has a 2048 MB heap limit by default. Large saves can raise it before startup:
+
+```powershell
+$env:DEDUCTRIUM_TT_HEAP_MB=4096
+node server.mjs
+```
+
+This heap cap is separate from the in-game inference resource multiplier: the former controls available Node.js memory, while the latter controls the amount of semantic-inference work allowed for one request.
+
+The server also caps the maximum wait for one RPC at 30 minutes by default. Set `DEDUCTRIUM_TT_MAX_RPC_TIMEOUT_MS` to lower that cap. `DEDUCTRIUM_TT_MAX_PENDING` and `DEDUCTRIUM_TT_MAX_SESSIONS` limit queued requests per session and simultaneously open pages.
+
+The type-theory process keeps validated definitions and inference caches alive between requests. Edits, moves, and disabled folders only invalidate the affected suffix. The proof assistant runs in its own worker thread, so tactic search and undo do not block the main page or wait behind core checking.
 
 Run correctness regressions and the complex type-theory benchmark with:
 
@@ -46,18 +61,18 @@ Run this command from the project root:
 npm run package
 ```
 
-The script runs regression tests, type-checks, and builds the project, then creates a runnable directory and ZIP archive under `release/`. It also prints the archive SHA256.
+The script runs regression tests, type-checks, and builds the project. It then starts the isolated process from the packaged directory and performs a health check plus a minimal type check before creating the runnable directory and ZIP archive under `release/`. It also prints the archive SHA256.
 
 ### Automated GitHub Releases
 
 `.github/workflows/release.yml` runs the tests, builds the archive, and creates a GitHub Release whenever a `hott-v*` tag is pushed:
 
 ```powershell
-git tag hott-v2026.8.8
-git push origin hott-v2026.8.8
+git tag hott-v2026.08.16
+git push origin hott-v2026.08.16
 ```
 
-The `Package Release` workflow can also be run manually. With no tag input it uses `hott-v<package.json version>`; an existing release asset with the same name is replaced. Update the package version before publishing a new release.
+The `Package Release` workflow can also be run manually. With no tag input it automatically uses `hott-vYYYY.MM.DD` in China Standard Time; rerunning it on the same date retargets that release and replaces its ZIP with the latest commit.
 
 Game progress is stored in the browser for the current origin. Export a text save from the Progress Layer before changing browsers or ports.
 

@@ -285,6 +285,10 @@
                         <option value="1e10">∞</option>
                     </select>
                 </div>
+                <div id="semantic-resource-limit"><label>类型推断资源上限：</label>
+                    <input id="semanticResourceScale" type="number" min="1" max="64" step="1" value="1"
+                        style="width: 4em;" title="提高后可检查更大的证明项，但会占用更多时间和内存" />×
+                </div>
                 <div id="tactic-div" class="hide">
                     <div id="copygate"></div>
                     <label>证明策略：</label><button class="inhabitat-modify hide" id="tactic-clear">x</button><span

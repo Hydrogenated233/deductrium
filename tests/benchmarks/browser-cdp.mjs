@@ -44,23 +44,55 @@ export async function withHeadlessBrowser(callback, options = {}) {
         try {
             return await callback(cdp);
         } finally {
+            try {
+                await Promise.race([
+                    cdp.command("Browser.close").catch(() => { }),
+                    new Promise(resolve => setTimeout(resolve, 1_000))
+                ]);
+            } catch { }
             cdp.close();
         }
     } finally {
-        browser.kill();
+        await waitForExit(browser, 5_000);
         if (browser.exitCode === null) {
-            await Promise.race([
-                new Promise(resolve => browser.once("exit", resolve)),
-                new Promise(resolve => setTimeout(resolve, 5_000))
-            ]);
+            await terminateBrowserTree(browser);
+            await waitForExit(browser, 5_000);
         }
-        await rm(profileDir, {
-            recursive: true,
-            force: true,
-            maxRetries: 20,
-            retryDelay: 100
-        });
+        try {
+            await rm(profileDir, {
+                recursive: true,
+                force: true,
+                maxRetries: 50,
+                retryDelay: 100
+            });
+        } catch (error) {
+            console.warn(`Unable to remove browser benchmark profile ${profileDir}: ${error.message}`);
+        }
     }
+}
+
+async function waitForExit(child, timeoutMs) {
+    if (child.exitCode !== null) return;
+    await Promise.race([
+        new Promise(resolve => child.once("exit", resolve)),
+        new Promise(resolve => setTimeout(resolve, timeoutMs))
+    ]);
+}
+
+async function terminateBrowserTree(browser) {
+    if (browser.exitCode !== null) return;
+    if (process.platform !== "win32") {
+        browser.kill("SIGKILL");
+        return;
+    }
+    await new Promise(resolve => {
+        const killer = spawn("taskkill", ["/pid", String(browser.pid), "/t", "/f"], {
+            stdio: "ignore",
+            windowsHide: true
+        });
+        killer.once("error", resolve);
+        killer.once("exit", resolve);
+    });
 }
 
 export class CdpConnection {

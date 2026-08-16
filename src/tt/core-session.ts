@@ -24,6 +24,17 @@ export class TTCoreSession {
 
     truncate(startIndex: number) {
         const start = Math.max(0, Math.floor(startIndex));
+        this.rewind(start);
+        this.definitions.length = Math.min(this.definitions.length, start);
+    }
+
+    /**
+     * Move the loaded definition cursor backwards without discarding stored
+     * slots. This keeps ordinary same-row checks O(1) and lets a later forward
+     * move reload only the definitions it crosses.
+     */
+    private rewind(start: number) {
+        start = Math.min(Math.max(0, Math.floor(start)), this.loadedThrough);
         const retainedNames = new Set<string>();
         for (let i = 0; i < start; i++) {
             const definition = this.definitions[i];
@@ -37,8 +48,7 @@ export class TTCoreSession {
             this.engine.core.setUserDefinition(definition[0]);
             delete this.engine.core.state.defTypes[definition[0]];
         }
-        this.definitions.length = Math.min(this.definitions.length, start);
-        this.loadedThrough = Math.min(this.loadedThrough, start);
+        this.loadedThrough = start;
         // A local definition may intentionally shadow an ancestor using the
         // same short name (for example `f` in two proof folders). Removing
         // the child must restore the retained ancestor, not leave the name
@@ -87,7 +97,7 @@ export class TTCoreSession {
         if (!this.config) throw new Error("Type-theory worker session is not configured");
         index = Math.max(0, Math.floor(index));
         if (this.loadedThrough > index) {
-            this.rebuild(index);
+            this.rewind(index);
         } else {
             for (let i = this.loadedThrough; i < index; i++) {
                 const definition = this.definitions[i];

@@ -1,6 +1,6 @@
 {
   "name": "deductrium-hott-optimization",
-  "version": "2026.8.8",
+  "version": "2026.8.16",
   "description": "Deductrium with an optimized worker-based HoTT/type-theory engine",
   "private": true,
   "type": "module",
@@ -22,9 +22,12 @@
     "benchmark:k609:profile": "node tests/benchmarks/k609-profile.mjs",
     "prebenchmark:k609:semantic": "npm run build",
     "benchmark:k609:semantic": "node tests/benchmarks/k609-semantic-coverage.mjs",
+    "prebenchmark:short": "npm run build",
+    "benchmark:short": "node tests/benchmarks/short-expression-worker.mjs",
     "test:tt-assist-even": "node tests/tt-assist-even.test.mjs",
     "test:tt-definition-caches": "node tests/tt-worker-definition-caches.test.mjs",
     "test:tt-worker-cache": "node tests/tt-worker-cache.test.mjs",
+    "test:tt-process": "node tests/tt-process-transport-fallback.test.mjs && node tests/tt-process-transport-recovery.test.mjs && node tests/tt-process-transport-ordering.test.mjs && node tests/tt-process-http.test.mjs",
     "test:tt-validation": "node tests/tt-validation-scheduling.test.mjs",
     "package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1"
   },

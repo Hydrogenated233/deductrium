@@ -15,6 +15,7 @@ const sourceSave = readFileSync(
 ).trim();
 const expectedTheoremCount = createK609BenchmarkTheorems(sourceSave).length;
 const encodedSave = appendTheoremToSave(sourceSave, K609_FINAL_THEOREM);
+const validationTimeoutMs = Math.max(1_000, Number(process.env.TT_BROWSER_TIMEOUT_MS || 180_000));
 const server = await startServer();
 
 try {
@@ -41,6 +42,11 @@ try {
                     created: 0,
                     coreCreated: 0,
                     assistCreated: 0,
+                    processSessions: 0,
+                    processConfigure: 0,
+                    processConfigureSlots: 0,
+                    processValidate: 0,
+                    processAssist: 0,
                     configure: 0,
                     configureSlots: 0,
                     validate: 0,
@@ -80,6 +86,25 @@ try {
                             : super.postMessage(message, transfer);
                     }
                 };
+                const nativeFetch = globalThis.fetch.bind(globalThis);
+                globalThis.fetch = (input, init) => {
+                    const url = typeof input === "string" ? input : input?.url || "";
+                    if (url.includes("/api/tt/session")) {
+                        stats.processSessions++;
+                    } else if (url.includes("/api/tt/rpc")) {
+                        try {
+                            const message = JSON.parse(init?.body || "{}");
+                            if (message.channel === "assist") stats.processAssist++;
+                            if (message.channel === "core" && message.request?.kind === "configure") {
+                                stats.processConfigure++;
+                                stats.processConfigureSlots += message.request.definitions?.length ?? 0;
+                            } else if (message.channel === "core" && message.request?.kind === "validate") {
+                                stats.processValidate++;
+                            }
+                        } catch { }
+                    }
+                    return nativeFetch(input, init);
+                };
                 globalThis.__benchmarkNavigationStarted = performance.now();
             })();`
         }, sessionId);
@@ -95,22 +120,24 @@ try {
         await cdp.command("Page.navigate", { url: `${origin}/index.html` }, sessionId);
         await loaded;
         const browserResult = await evaluate(cdp, sessionId, `(async () => {
-            const deadline = Date.now() + 180000;
+            const deadline = Date.now() + ${validationTimeoutMs};
             while (!globalThis.deductriumGame) {
                 if (Date.now() >= deadline) throw new Error("game did not initialize");
                 await new Promise(resolve => setTimeout(resolve, 10));
             }
             const game = globalThis.deductriumGame;
-            await game.ttGui.waitForValidationIdle();
-            while (document.querySelector(".inhabitat .checking")) {
-                if (Date.now() >= deadline) throw new Error("theorem validation did not settle");
-                await new Promise(resolve => setTimeout(resolve, 10));
-                await game.ttGui.waitForValidationIdle();
+            while (Date.now() < deadline) {
+                await Promise.race([
+                    game.ttGui.waitForValidationIdle(),
+                    new Promise(resolve => setTimeout(resolve, 100))
+                ]);
+                if (!document.querySelector(".inhabitat .checking")) break;
             }
             const inputs = Array.from(document.querySelectorAll(".inhabitat .tt-theorem-input"));
             const wrappers = inputs.map(input => input.parentElement);
             return {
                 pageElapsedMs: Math.round(performance.now() - globalThis.__benchmarkNavigationStarted),
+                timedOut: !!document.querySelector(".inhabitat .checking"),
                 theoremCount: inputs.length,
                 errorCount: wrappers.filter(wrapper => wrapper?.classList.contains("error")).length,
                 inferingCount: wrappers.filter(wrapper => wrapper?.classList.contains("infering")).length,
@@ -140,10 +167,9 @@ try {
         };
     });
 
-    assertBenchmarkCompleted(result, expectedTheoremCount);
-
     console.log("K609 full browser save-load benchmark; timing and memory are informational only.");
     console.log(JSON.stringify(result, null, 2));
+    assertBenchmarkCompleted(result, expectedTheoremCount);
 } finally {
     server.stop();
 }
@@ -218,6 +244,9 @@ function shortUrl(url = "") {
 }
 
 function assertBenchmarkCompleted(result, expectedCount) {
+    if (result.timedOut) {
+        throw new Error(`theorem validation did not settle within ${validationTimeoutMs}ms`);
+    }
     if (result.theoremCount !== expectedCount) {
         throw new Error(`expected ${expectedCount} restored theorems, received ${result.theoremCount}`);
     }
@@ -228,10 +257,12 @@ function assertBenchmarkCompleted(result, expectedCount) {
         );
     }
     const stats = result.workerStats;
-    if (stats.coreCreated !== 1 || stats.assistCreated !== 0
-        || stats.configure !== 1 || stats.configureSlots !== 0
-        || stats.validate !== expectedCount || stats.truncate !== 0) {
-        throw new Error(`unexpected Worker loading protocol: ${JSON.stringify(stats)}`);
+    if (stats.created !== 0 || stats.coreCreated !== 0 || stats.assistCreated !== 0
+        || stats.processSessions !== 1 || stats.processAssist !== 0
+        || stats.processConfigure !== 1 || stats.processConfigureSlots !== 0
+        || stats.processValidate !== expectedCount
+        || stats.configure !== 0 || stats.validate !== 0 || stats.truncate !== 0) {
+        throw new Error(`unexpected background-checking protocol: ${JSON.stringify(stats)}`);
     }
 }
 

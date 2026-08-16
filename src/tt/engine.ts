@@ -13,6 +13,8 @@ export type TTCoreConfig = {
     disableSimpleEq?: boolean;
     inferDisplayMode?: "_" | "@";
     timeout?: number;
+    /** Finite multiplier applied to all semantic NbE node and step budgets. */
+    semanticResourceScale?: number;
     language?: string;
     /** Definitions must already be desugared, as TTGui.userDefinedConsts stores them. */
     userDefinitions?: [string, AST][];
@@ -47,6 +49,9 @@ export class TTCoreEngine {
         langMgr.lang = config.language ?? langMgr.lang;
         this.core = new Core();
         Core.timeout = config.timeout ?? Core.timeout;
+        if (config.semanticResourceScale !== undefined) {
+            Core.setSemanticResourceScale(config.semanticResourceScale);
+        }
         Core.timeoutOccured = false;
         this.registerComputeRules();
         // Seed built-in universe-level types before definitions are checked;

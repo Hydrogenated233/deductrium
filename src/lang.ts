@@ -844,6 +844,8 @@ class LangMgr {
         "斜体显示项": "Italicize Terms",
         "待证命题：":"Waiting to prove: ",
         "单条定理判定的默认等待时间：":"Default checking time per theorem: ",
+        "类型推断资源上限：":"Type-inference resource limit: ",
+        "提高后可检查更大的证明项，但会占用更多时间和内存":"Higher values allow larger proof terms but use more time and memory",
         // p
         '注意：创造模式与生存模式不共享进度系统。创造模式下无法体验双曲空间以及序数系统等游戏内容，前往生存模式<a href="?" target="_blank">请点击这里</a>。': "Note: Creative and Survival Mode do not share progress. Hyperbolic space and the ordinal number system cannot be accessed in Creative Mode. To switch to Survival Mode, <a href=\"?\" target=\"_blank\">Click Here</a>.",
         // h3
