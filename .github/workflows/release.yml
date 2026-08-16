@@ -37,18 +37,25 @@ jobs:
       - name: Resolve release metadata
         id: release
         shell: pwsh
+        env:
+          RELEASE_INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
         run: |
           $releaseDate = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString("yyyy.MM.dd", [Globalization.CultureInfo]::InvariantCulture)
-          $tag = "${{ inputs.tag }}".Trim()
+          $tag = ([string]$env:RELEASE_INPUT_TAG).Trim()
           if (-not $tag) {
-            $tag = if ("${{ github.ref_type }}" -eq "tag") {
-              "${{ github.ref_name }}"
+            $tag = if ($env:RELEASE_REF_TYPE -eq "tag") {
+              $env:RELEASE_REF_NAME
             } else {
               "hott-v$releaseDate"
             }
           }
           if ($tag -notmatch '^hott-v[0-9A-Za-z._-]+$') {
             throw "Release tag must start with hott-v and contain only letters, digits, dot, underscore, or hyphen."
+          }
+          if ($tag -match '^hott-v(?<date>\d{4}\.\d{2}\.\d{2})(?:[._-].*)?$') {
+            $releaseDate = $Matches.date
           }
           "date=$releaseDate" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT

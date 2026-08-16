@@ -63,9 +63,13 @@ export class TTProcessTransport {
     private anticipatedServerGeneration: number | null = null;
     private visibleGeneration = 1;
     private sessionPromise: Promise<void> | null = null;
+    private sessionPromiseEpoch: number | null = null;
     private resetPromise: Promise<void> = Promise.resolve();
     private recoveryPromise: Promise<void> | null = null;
+    private recoveryEpoch: number | null = null;
     private replayPromise: Promise<void> | null = null;
+    private replayEpoch: number | null = null;
+    private lifecycleEpoch = 0;
     private readonly configurations = new Map<TTProcessChannel, TTProcessConfiguration>();
     private readonly channelQueues: Record<TTProcessChannel, Promise<void>> = {
         core: Promise.resolve(),
@@ -123,48 +127,62 @@ export class TTProcessTransport {
     }
 
     request<T>(channel: TTProcessChannel, request: object, timeout?: number): Promise<T> {
-        const epoch = this.channelEpochs[channel];
+        const channelEpoch = this.channelEpochs[channel];
+        const lifecycleEpoch = this.lifecycleEpoch;
         const queued = this.channelQueues[channel]
             .catch(() => { })
             .then(() => {
-                if (epoch !== this.channelEpochs[channel]) {
-                    throw new TTProcessExecutionError("Type-theory process request was cancelled", {
-                        code: "TT_PROCESS_QUEUE_CANCELLED"
-                    });
-                }
-                return this.requestInOrder<T>(channel, request, timeout);
+                this.assertRequestCurrent(channel, channelEpoch, lifecycleEpoch);
+                return this.requestInOrder<T>(channel, request, timeout, channelEpoch, lifecycleEpoch);
             });
         this.channelQueues[channel] = queued.then(() => undefined, () => undefined);
         return queued;
     }
 
-    private async requestInOrder<T>(channel: TTProcessChannel, request: object, timeout?: number): Promise<T> {
+    private async requestInOrder<T>(
+        channel: TTProcessChannel,
+        request: object,
+        timeout: number | undefined,
+        channelEpoch: number,
+        lifecycleEpoch: number
+    ): Promise<T> {
         // A configure request is the authoritative snapshot for a channel. It
         // is recorded only after it succeeds, so a failed first configure does
         // not poison a later recovery with a half-built state.
         const isConfiguration = requestKind(request) === "configure";
+        const assertCurrent = () => this.assertRequestCurrent(channel, channelEpoch, lifecycleEpoch);
         let recovered = false;
         while (true) {
             try {
-                await this.ensureSession();
+                assertCurrent();
+                await this.ensureSession(lifecycleEpoch);
+                assertCurrent();
                 if (this.mode !== "process" || !this.sessionId) {
                     throw new TTProcessUnavailableError("Type-theory process API unavailable");
                 }
                 await this.resetPromise;
-                if (!this.sessionId) await this.ensureSession();
+                assertCurrent();
+                if (!this.sessionId) {
+                    await this.ensureSession(lifecycleEpoch);
+                    assertCurrent();
+                }
                 if (!this.sessionId) throw new TTProcessExecutionError("Type-theory process session unavailable");
 
                 // Rebuild a restarted child before the first non-configure
                 // operation. The current configure call itself is the rebuild
                 // for its channel and must not be preceded by an old snapshot.
-                await this.ensureConfigured(isConfiguration ? channel : undefined);
+                await this.ensureConfigured(isConfiguration ? channel : undefined, lifecycleEpoch, assertCurrent);
+                assertCurrent();
                 const result = await this.requestOnce<T>(channel, request, timeout);
+                assertCurrent();
                 this.rememberSuccessfulRequest(channel, request, result);
                 return result;
             } catch (error) {
+                assertCurrent();
                 if (recovered || !this.shouldRecover(error)) throw error;
                 recovered = true;
-                await this.recoverSession(error);
+                await this.recoverSession(error, lifecycleEpoch, assertCurrent);
+                assertCurrent();
             }
         }
     }
@@ -257,16 +275,39 @@ export class TTProcessTransport {
         }
     }
 
-    private async recoverSession(error: TTProcessExecutionError) {
+    private async recoverSession(
+        error: TTProcessExecutionError,
+        lifecycleEpoch: number,
+        assertCurrent: () => void
+    ) {
+        if (this.recoveryPromise && this.recoveryEpoch !== lifecycleEpoch) {
+            try {
+                await this.recoveryPromise;
+            } catch {
+                // The stale recovery belongs to an invalidated lifecycle.
+            }
+            assertCurrent();
+        }
         if (!this.recoveryPromise) {
-            this.recoveryPromise = this.recoverSessionNow(error).finally(() => {
+            this.recoveryEpoch = lifecycleEpoch;
+            const recovery = this.recoverSessionNow(error, lifecycleEpoch, assertCurrent);
+            const tracked = recovery.finally(() => {
+                if (this.recoveryPromise !== tracked) return;
                 this.recoveryPromise = null;
+                this.recoveryEpoch = null;
             });
+            this.recoveryPromise = tracked;
         }
         await this.recoveryPromise;
+        assertCurrent();
     }
 
-    private async recoverSessionNow(error: TTProcessExecutionError) {
+    private async recoverSessionNow(
+        error: TTProcessExecutionError,
+        lifecycleEpoch: number,
+        assertCurrent: () => void
+    ) {
+        assertCurrent();
         // A generation change means the server still owns the session but the
         // child state was lost. Reuse that session for process-level failures;
         // a missing/unreachable server session must be recreated instead.
@@ -277,42 +318,68 @@ export class TTProcessTransport {
         );
         if (canReuseSession) this.invalidateConfigurations();
         else this.forgetSession();
-        await this.ensureSession();
-        await this.ensureConfigured();
+        await this.ensureSession(lifecycleEpoch);
+        assertCurrent();
+        await this.ensureConfigured(undefined, lifecycleEpoch, assertCurrent);
+        assertCurrent();
     }
 
-    private async ensureConfigured(skipChannel?: TTProcessChannel) {
+    private async ensureConfigured(
+        skipChannel: TTProcessChannel | undefined,
+        lifecycleEpoch: number,
+        assertCurrent: () => void
+    ) {
+        assertCurrent();
         if (this.serverGeneration === null || !this.configurations.size) return;
         const pending = [...this.configurations.entries()].filter(([channel, state]) =>
             channel !== skipChannel && state.generation !== this.serverGeneration
         );
         if (!pending.length) return;
         if (this.replayPromise) {
-            await this.replayPromise;
-            return;
+            if (this.replayEpoch === lifecycleEpoch) {
+                await this.replayPromise;
+                assertCurrent();
+                return;
+            }
+            try {
+                await this.replayPromise;
+            } catch {
+                // The stale replay belongs to an invalidated lifecycle.
+            }
+            assertCurrent();
+            return this.ensureConfigured(skipChannel, lifecycleEpoch, assertCurrent);
         }
-        this.replayPromise = (async () => {
+        this.replayEpoch = lifecycleEpoch;
+        const replay = (async () => {
             // Use a fixed snapshot of the map so a concurrent configure can
             // replace a state without mutating the replay sequence in flight.
             for (const [channel, state] of pending) {
+                assertCurrent();
                 const revision = state.revision;
                 const configuration = parseReplayRequest(state.request) as { definitions?: unknown[] };
                 configuration.definitions = state.definitions.map(definition =>
                     definition === null ? null : JSON.parse(definition)
                 );
                 await this.requestOnce(channel, configuration);
+                assertCurrent();
                 if (channel === "assist" && state.assistStart) {
                     await this.requestOnce(channel, parseReplayRequest(state.assistStart));
+                    assertCurrent();
                 }
                 // A local commit may race recovery (for example a validation
                 // response arriving while a child is restarting). Leave that
                 // channel dirty so the next request replays the newer snapshot.
                 state.generation = state.revision === revision ? this.serverGeneration : null;
             }
-        })().finally(() => {
+        })();
+        const tracked = replay.finally(() => {
+            if (this.replayPromise !== tracked) return;
             this.replayPromise = null;
+            this.replayEpoch = null;
         });
-        await this.replayPromise;
+        this.replayPromise = tracked;
+        await tracked;
+        assertCurrent();
     }
 
     private rememberSuccessfulRequest(channel: TTProcessChannel, request: object, result: unknown) {
@@ -419,21 +486,29 @@ export class TTProcessTransport {
         });
     }
 
-    private async ensureSession() {
+    private async ensureSession(lifecycleEpoch: number) {
+        this.assertLifecycleCurrent(lifecycleEpoch);
         if (this.mode === "worker") {
             throw new TTProcessUnavailableError("Type-theory process API unavailable");
         }
         if (this.sessionId) return;
-        if (!this.sessionPromise) {
+        if (!this.sessionPromise || this.sessionPromiseEpoch !== lifecycleEpoch) {
             const initialProbe = this.mode === "undecided";
-            this.sessionPromise = this.createSession(initialProbe).finally(() => {
+            this.sessionPromiseEpoch = lifecycleEpoch;
+            const creation = this.createSession(initialProbe, lifecycleEpoch);
+            const tracked = creation.finally(() => {
+                if (this.sessionPromise !== tracked) return;
                 this.sessionPromise = null;
+                this.sessionPromiseEpoch = null;
             });
+            this.sessionPromise = tracked;
         }
         await this.sessionPromise;
+        this.assertLifecycleCurrent(lifecycleEpoch);
     }
 
-    private async createSession(initialProbe: boolean) {
+    private async createSession(initialProbe: boolean, lifecycleEpoch: number) {
+        this.assertLifecycleCurrent(lifecycleEpoch);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), SESSION_TIMEOUT);
         try {
@@ -445,6 +520,10 @@ export class TTProcessTransport {
                 signal: controller.signal
             });
             const result = await this.readJson<TTProcessSessionResponse>(response);
+            if (lifecycleEpoch !== this.lifecycleEpoch) {
+                if (result?.sessionId) await this.disposeCreatedSession(result.sessionId);
+                this.assertLifecycleCurrent(lifecycleEpoch);
+            }
             if (!response.ok || !result?.sessionId || result.ok === false) {
                 const message = result?.error || `Type-theory process API unavailable (${response.status})`;
                 const recognizedProcessApi = result?.code?.startsWith("TT_PROCESS_")
@@ -460,6 +539,7 @@ export class TTProcessTransport {
             this.sessionId = result.sessionId;
             this.adoptServerGeneration(result.generation);
         } catch (error) {
+            this.assertLifecycleCurrent(lifecycleEpoch);
             if (error instanceof TTProcessUnavailableError || error instanceof TTProcessExecutionError) {
                 throw error;
             }
@@ -475,6 +555,28 @@ export class TTProcessTransport {
             );
         } finally {
             clearTimeout(timer);
+        }
+    }
+
+    private async disposeCreatedSession(sessionId: string) {
+        const body = JSON.stringify({ sessionId });
+        try {
+            if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+                const sent = navigator.sendBeacon(
+                    "/api/tt/dispose",
+                    new Blob([body], { type: "application/json" })
+                );
+                if (sent) return;
+            }
+            await fetch("/api/tt/dispose", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body,
+                cache: "no-store",
+                keepalive: true
+            });
+        } catch {
+            // The server also expires abandoned sessions; disposal is best effort.
         }
     }
 
@@ -512,10 +614,31 @@ export class TTProcessTransport {
     }
 
     private cancelQueuedRequests(error: TTProcessExecutionError) {
+        this.lifecycleEpoch++;
         this.channelEpochs.core++;
         this.channelEpochs.assist++;
         for (const controller of this.pending) controller.abort(error);
         this.pending.clear();
+    }
+
+    private assertRequestCurrent(
+        channel: TTProcessChannel,
+        channelEpoch: number,
+        lifecycleEpoch: number
+    ) {
+        if (channelEpoch !== this.channelEpochs[channel] || lifecycleEpoch !== this.lifecycleEpoch) {
+            throw new TTProcessExecutionError("Type-theory process request was cancelled", {
+                code: "TT_PROCESS_QUEUE_CANCELLED"
+            });
+        }
+    }
+
+    private assertLifecycleCurrent(lifecycleEpoch: number) {
+        if (lifecycleEpoch !== this.lifecycleEpoch) {
+            throw new TTProcessExecutionError("Type-theory process request was cancelled", {
+                code: "TT_PROCESS_QUEUE_CANCELLED"
+            });
+        }
     }
 
     private disposePageSession() {

@@ -62,6 +62,7 @@ const tests = [
     "./tt-process-transport-recovery.test.mjs",
     "./tt-process-transport-ordering.test.mjs",
     "./tt-process-http.test.mjs",
+    "./release-workflow-input-safety.test.mjs",
     "./tt-nbe-definitional-equality.test.mjs",
     "./tt-nbe-assist-normalize.test.mjs",
     "./tt-nbe-assist-fnext.test.mjs",

@@ -98,14 +98,17 @@ async function resetCancelsQueuedMutations() {
     await transport.request("core", { kind: "configure", config: {}, definitions: [] });
     dispatches.length = 0;
 
-    const first = transport.request("core", { kind: "validate", label: "first" });
+    const first = transport.request("core", { kind: "validate", label: "first" })
+        .then(() => null, error => error);
     await firstDispatch;
     const stale = transport.request("core", { kind: "validate", label: "stale" })
         .then(() => null, error => error);
 
     transport.reset(new Error("the theorem list changed"));
     releaseFirst();
-    await first;
+    const firstError = await first;
+    assert.ok(firstError instanceof TTProcessExecutionError);
+    assert.equal(firstError.code, "TT_PROCESS_QUEUE_CANCELLED");
     const staleError = await stale;
     assert.ok(staleError instanceof TTProcessExecutionError);
     assert.equal(staleError.code, "TT_PROCESS_QUEUE_CANCELLED");
@@ -151,14 +154,17 @@ async function pageHideCancelsQueuedMutations() {
     await transport.request("core", { kind: "configure", config: {}, definitions: [] });
     dispatches.length = 0;
 
-    const first = transport.request("core", { kind: "validate", label: "first" });
+    const first = transport.request("core", { kind: "validate", label: "first" })
+        .then(() => null, error => error);
     await firstDispatch;
     const stale = transport.request("core", { kind: "validate", label: "stale" })
         .then(() => null, error => error);
 
     transport.disposePageSession();
     releaseFirst();
-    await first;
+    const firstError = await first;
+    assert.ok(firstError instanceof TTProcessExecutionError);
+    assert.equal(firstError.code, "TT_PROCESS_QUEUE_CANCELLED");
     const staleError = await stale;
     assert.ok(staleError instanceof TTProcessExecutionError);
     assert.equal(staleError.code, "TT_PROCESS_QUEUE_CANCELLED");
@@ -167,10 +173,114 @@ async function pageHideCancelsQueuedMutations() {
         "a hidden page recreated a process session for a stale queued request");
 }
 
+async function resetCancelsMutationAlreadyWaitingForReset() {
+    let releaseFirstReset;
+    let firstResetStarted;
+    let generation = 1;
+    let resetCount = 0;
+    const firstResetGate = new Promise(resolve => { releaseFirstReset = resolve; });
+    const firstResetDispatch = new Promise(resolve => { firstResetStarted = resolve; });
+    const dispatches = [];
+
+    globalThis.fetch = async (url, init = {}) => {
+        if (url === "/api/tt/session") {
+            return jsonResponse({
+                ok: true,
+                sessionId: "waiting-reset-session",
+                generation,
+                protocolVersion: 1
+            }, 201);
+        }
+        if (url === "/api/tt/reset") {
+            resetCount++;
+            dispatches.push(`reset:${resetCount}`);
+            if (resetCount === 1) {
+                firstResetStarted();
+                await firstResetGate;
+            }
+            generation++;
+            return jsonResponse({ ok: true, generation, restarted: true });
+        }
+
+        assert.equal(url, "/api/tt/rpc");
+        const body = JSON.parse(init.body);
+        dispatches.push(`${body.channel}:${body.request.label ?? body.request.kind}`);
+        return jsonResponse({ ok: true, result: { ok: true }, generation });
+    };
+
+    const transport = new TTProcessTransport();
+    await transport.request("core", { kind: "configure", config: {}, definitions: [] });
+    dispatches.length = 0;
+
+    transport.reset(new Error("first reset"));
+    await firstResetDispatch;
+    const stale = transport.request("core", { kind: "validate", label: "stale-after-await" })
+        .then(() => null, error => error);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    transport.reset(new Error("second reset"));
+    releaseFirstReset();
+    const staleError = await stale;
+    assert.ok(staleError instanceof TTProcessExecutionError);
+    assert.equal(staleError.code, "TT_PROCESS_QUEUE_CANCELLED");
+
+    await transport.request("core", { kind: "check", label: "fresh-after-resets" });
+    assert.equal(dispatches.includes("core:stale-after-await"), false,
+        "a request already awaiting the first reset crossed the second reset epoch");
+    assert.deepEqual(dispatches.filter(value => value.startsWith("reset:")), ["reset:1", "reset:2"]);
+}
+
+async function pageHideCancelsSessionCreationInFlight() {
+    let releaseSession;
+    let sessionStarted;
+    const sessionGate = new Promise(resolve => { releaseSession = resolve; });
+    const sessionDispatch = new Promise(resolve => { sessionStarted = resolve; });
+    const rpcDispatches = [];
+    const disposedSessions = [];
+
+    globalThis.fetch = async (url, init = {}) => {
+        if (url === "/api/tt/session") {
+            sessionStarted();
+            await sessionGate;
+            return jsonResponse({
+                ok: true,
+                sessionId: "pagehide-creating-session",
+                generation: 1,
+                protocolVersion: 1
+            }, 201);
+        }
+        if (url === "/api/tt/dispose") {
+            disposedSessions.push(JSON.parse(init.body).sessionId);
+            return jsonResponse({ ok: true });
+        }
+
+        assert.equal(url, "/api/tt/rpc");
+        const body = JSON.parse(init.body);
+        rpcDispatches.push(body.request.kind);
+        return jsonResponse({ ok: true, result: { ok: true }, generation: 1 });
+    };
+
+    const transport = new TTProcessTransport();
+    const stale = transport.request("core", { kind: "configure", config: {}, definitions: [] })
+        .then(() => null, error => error);
+    await sessionDispatch;
+
+    transport.disposePageSession();
+    releaseSession();
+    const staleError = await stale;
+    assert.ok(staleError instanceof TTProcessExecutionError);
+    assert.equal(staleError.code, "TT_PROCESS_QUEUE_CANCELLED");
+    assert.deepEqual(rpcDispatches, [], "a hidden page continued into RPC after session creation");
+    assert.deepEqual(disposedSessions, ["pagehide-creating-session"],
+        "a session created after pagehide was not disposed");
+}
+
 try {
     await preservesPerChannelCallOrder();
     await resetCancelsQueuedMutations();
     await pageHideCancelsQueuedMutations();
+    await resetCancelsMutationAlreadyWaitingForReset();
+    await pageHideCancelsSessionCreationInFlight();
 } finally {
     globalThis.fetch = originalFetch;
 }

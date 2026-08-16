@@ -39,14 +39,14 @@ node server.mjs
 
 每个打开的游戏页面会按需创建一个隔离的类型论 Node.js 子进程；进程内部由两条独立的 `worker thread` 分别运行核心检查和证明助手，因此长时间类型检查不会阻塞证明助手。关闭页面时会释放会话，关闭本地服务器会终止所有剩余子进程。仅当服务器确实没有提供进程 API 时，浏览器才回退到 Web Worker；发布包正常启动时始终使用独立进程。
 
-独立进程默认最多使用 2048 MB 堆内存。大型存档可在启动前调整此上限，例如：
+类型论子进程内每个 V8 isolate 的 old-space 默认上限为 2048 MB。大型存档可在启动前调整此上限，例如：
 
 ```powershell
 $env:DEDUCTRIUM_TT_HEAP_MB=4096
 node server.mjs
 ```
 
-这个进程内存上限与游戏设置中的“推断资源上限”倍率不同：前者控制 Node.js 可用内存，后者控制单次语义推断允许执行的工作量。
+该值不是整个子进程 RSS 的硬上限：核心检查和证明助手使用独立 worker thread，各自拥有 V8 isolate。它与游戏设置中的“推断资源上限”倍率也不同：前者控制每个 isolate 的 old-space，后者控制单次语义推断允许执行的工作量。
 
 服务器还会限制单条 RPC 的最长等待时间，默认 30 分钟；可用 `DEDUCTRIUM_TT_MAX_RPC_TIMEOUT_MS` 调小这个上限。`DEDUCTRIUM_TT_MAX_PENDING`、`DEDUCTRIUM_TT_MAX_SESSIONS` 可分别限制单会话排队数与同时打开的页面数。
 

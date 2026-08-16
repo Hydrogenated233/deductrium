@@ -787,7 +787,7 @@ server.on("error", error => {
 server.listen(port, host, () => {
     const url = `http://${host}:${port}/`;
     console.log(`Deductrium is running at ${url}`);
-    console.log(`Type-theory checks run in an isolated Node process (up to ${childHeapMb} MB).`);
+    console.log(`Type-theory checks run in an isolated Node process (${childHeapMb} MB old-space per V8 isolate).`);
     console.log("Press Ctrl+C to stop.");
     if (shouldOpen) openBrowser(url);
 });

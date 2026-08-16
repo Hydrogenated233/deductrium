@@ -31,14 +31,14 @@ Use `npm run typecheck` to check TypeScript without emitting JavaScript. Set the
 
 Each open game page creates an isolated Node.js type-theory child process on demand. The process runs core checking and the proof assistant in separate worker threads, so a long type check does not block tactic search. Closing the page disposes its session, and stopping the local server terminates any remaining child processes. The browser falls back to Web Workers only when the server truly does not expose the process API; a normally started release package always uses the isolated process.
 
-The child process has a 2048 MB heap limit by default. Large saves can raise it before startup:
+Each V8 isolate in the type-theory child process has a 2048 MB old-space limit by default. Large saves can raise it before startup:
 
 ```powershell
 $env:DEDUCTRIUM_TT_HEAP_MB=4096
 node server.mjs
 ```
 
-This heap cap is separate from the in-game inference resource multiplier: the former controls available Node.js memory, while the latter controls the amount of semantic-inference work allowed for one request.
+This value is not a hard cap on the child process's total RSS: core checking and the proof assistant use separate worker threads with separate V8 isolates. It is also separate from the in-game inference resource multiplier: the former controls each isolate's old-space, while the latter controls the amount of semantic-inference work allowed for one request.
 
 The server also caps the maximum wait for one RPC at 30 minutes by default. Set `DEDUCTRIUM_TT_MAX_RPC_TIMEOUT_MS` to lower that cap. `DEDUCTRIUM_TT_MAX_PENDING` and `DEDUCTRIUM_TT_MAX_SESSIONS` limit queued requests per session and simultaneously open pages.
 
