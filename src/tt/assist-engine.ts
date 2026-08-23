@@ -66,8 +66,7 @@ export class TTAssistEngine {
         const source = typeof target === "string" ? target : parser.stringify(target);
         this.options = { ...options };
         this.targetSource = source;
-        this.createAssist();
-        for (const command of history) this.executeCommand(command, true);
+        this.replayHistory(history);
         return this.snapshot();
     }
 
@@ -78,8 +77,7 @@ export class TTAssistEngine {
             this.executeCommand(command, true);
             return this.snapshot();
         } catch (error) {
-            this.createAssist();
-            for (const previous of history) this.executeCommand(previous, true);
+            this.replayHistory(history);
             throw error;
         }
     }
@@ -88,8 +86,7 @@ export class TTAssistEngine {
         this.requireAssist();
         this.history.pop();
         const history = this.history.slice();
-        this.createAssist();
-        for (const command of history) this.executeCommand(command, true);
+        this.replayHistory(history);
         return this.snapshot();
     }
 
@@ -128,6 +125,14 @@ export class TTAssistEngine {
         if (!isProofTargetSort(type)) throw new Error(TR("不是命题类型"));
         this.assist = new Assist(this.engine.core, target);
         this.history = [];
+    }
+
+    /** Rebuild a session from commands without consulting UI recommendations. */
+    private replayHistory(history: readonly string[]) {
+        this.createAssist();
+        for (const command of history) {
+            this.executeCommand(command, true);
+        }
     }
 
     private executeCommand(command: string, record: boolean) {

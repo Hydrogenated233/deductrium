@@ -88,6 +88,7 @@ export class Game {
             (btn as HTMLButtonElement).onclick = () => {
                 document.querySelectorAll("#panel>div").forEach(a => a.classList.remove("show"));
                 document.getElementById("panel-" + idx).classList.add("show");
+                this.ttGui.setTypePanelVisible(idx === 2);
                 if (idx === 0) {
                     this.hyperGui.onresize();
                     this.hyperGui.active = true;

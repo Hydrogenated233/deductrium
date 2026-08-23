@@ -70,7 +70,11 @@ export class TTCoreSession {
         if (result.ok && ast.type === ":=") {
             const definition = this.definitionFromResult(ast, result);
             this.definitions[index] = definition;
-            this.loadDefinition(definition);
+            // registerDefinition already installed this exact validated cache.
+            // Preserve it while attaching the definition source so the large
+            // term is compiled once instead of once before and once after the
+            // same cache is restored.
+            this.loadDefinition(definition, true);
         } else {
             this.definitions[index] = null;
         }
@@ -121,19 +125,22 @@ export class TTCoreSession {
         this.loadedThrough = end;
     }
 
-    private loadDefinition(definition: Exclude<TTDefinitionSlot, null>) {
+    private loadDefinition(
+        definition: Exclude<TTDefinitionSlot, null>,
+        cacheAlreadyInstalled = false
+    ) {
         const [name, value, cache] = definition;
         // Definition values are immutable inputs to the checker: Core clones
         // them before reduction. Reusing this owned AST avoids keeping a
         // second full copy of every restored theorem in the Worker session.
-        this.engine.core.setUserDefinition(name, value);
+        this.engine.core.setUserDefinition(name, value, cacheAlreadyInstalled && !!cache);
         if (cache) {
-            this.engine.core.restoreDefinitionCache(name, cache);
-        } else {
-            try {
-                definition[2] = this.engine.recoverUserDefinitionCache(name, value);
-            } catch { }
+            if (!cacheAlreadyInstalled) this.engine.core.restoreDefinitionCache(name, cache);
+            return;
         }
+        try {
+            definition[2] = this.engine.recoverUserDefinitionCache(name, value);
+        } catch { }
     }
 
     private definitionFromResult(ast: AST, result: TTCoreCheckResult): Exclude<TTDefinitionSlot, null> {
@@ -143,14 +150,14 @@ export class TTCoreSession {
         // The checked subtree belongs to the transient validation result and
         // is not needed when the definition is expanded later. Omitting it is
         // important for large restored theorem chains.
-        const filled = makePortableDefinition(
-            Core.clone(result.filledDefinition),
-            this.engine.core
-        );
+        const filled = makePortableDefinition(Core.clone(result.filledDefinition), this.engine.core);
         const value = ast.nodes[1].type === ":" ? filled.nodes[0] : filled;
         return [
             ast.nodes[0].name,
-            this.engine.core.desugar(Core.clone(value), true),
+            // checkDefinition captured this subtree after desugaring and
+            // before presentation restoration. It is already kernel-ready;
+            // cloning and desugaring it again is pure O(size(term)) overhead.
+            value,
             result.definitionCache
         ];
     }

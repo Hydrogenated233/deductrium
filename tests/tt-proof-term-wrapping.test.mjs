@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const css = await readFile(new URL("../gui.css", import.meta.url), "utf8");
 const gui = await readFile(new URL("../src/tt/gui.ts", import.meta.url), "utf8");
+const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
 
 for (const selector of [".inhabitat-div", "#tactic-hint", "#tactic-state", "#tactic-list"]) {
     assert.match(css, new RegExp(`${selector.replace(/[.#]/g, "\\$&")}[^}]*overflow-wrap\\s*:\\s*anywhere`),
@@ -27,5 +28,19 @@ assert.match(gui, /theorem\.input\.value = String\(item\.value \?\? ""\)/,
     "save restore must put long proof terms back into the wrapping theorem editor");
 assert.match(gui, /input\.addEventListener\("focus", \(\) => \{[\s\S]*?resizeTheoremInput\(\)/,
     "a restored long proof term must resize when the user opens it for editing");
+assert.match(html, /class="list-wrapper tactic-assist-wrapper"[\s\S]*?<textarea id="tactic-input"[^>]*rows="1"/,
+    "the active proof command must use a selectable wrapping textarea");
+assert.match(css, /\.tactic-assist-wrapper\s*\{[^}]*user-select:\s*text/,
+    "proof-assistant history must remain selectable despite generic list controls");
+assert.match(css, /#tactic-state \.blocked\s*\{[^}]*white-space:\s*pre-wrap[^}]*overflow-wrap:\s*anywhere/,
+    "historical proof commands must wrap while preserving their command text");
+assert.match(gui, /input\.addEventListener\("input", \(\) => this\.resizeTacticInput\(\)\)/,
+    "the active proof command must resize as it is typed");
+assert.match(gui, /input\.addEventListener\("keydown", \(ev\) => \{[\s\S]*?ev\.preventDefault\(\);[\s\S]*?getElementById\("tactic-begin"\)\.click\(\)/,
+    "textarea input must keep Enter/Escape command submission without inserting a newline");
+assert.match(gui, /this\.addSpan\(statediv, command\)\.className = "blocked"/,
+    "a selected history line must contain the exact replayable command");
+assert.doesNotMatch(gui, /command \+ " \. "/,
+    "display-only tactic separators must not be copied into the command");
 
 console.log("proof-term wrapping stylesheet regression passed");

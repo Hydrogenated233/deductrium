@@ -62,6 +62,21 @@ try {
     pureEngine.apply("intro b");
 
     assert.doesNotThrow(() => pureEngine["assist"].expand(" eqv"));
+
+    const sumEngine = new TTAssistEngine();
+    sumEngine.configure({
+        unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))],
+        inferDisplayMode: "_",
+        timeout: 30_000,
+        language: "zh"
+    });
+    sumEngine.start("((True+True) ≃ Bool)", options);
+    const sumExpanded = sumEngine.apply("expand eqv");
+    assert.match(
+        parser.stringify(sumExpanded.goals[0].type),
+        /^\(Σf:/,
+        "expand eqv must normalize a Sum-valued equivalence target instead of failing in WHNF"
+    );
 } finally {
     console.log = originalLog;
     console.warn = originalWarn;

@@ -65,6 +65,29 @@ function exceedsSemanticNbeNodeBudget(ast, maxNodes) {
     }
     return false;
 }
+function countSemanticNbeNodes(ast) {
+    if (!ast)
+        return 0;
+    const stack = [ast];
+    let count = 0;
+    while (stack.length) {
+        const node = stack.pop();
+        if (!node || typeof node !== "object")
+            continue;
+        count++;
+        for (const child of node.nodes ?? [])
+            stack.push(child);
+    }
+    return count;
+}
+function semanticAssertionKernelNodeBudget(source, kernel, sourceMaxNodes) {
+    if (!source)
+        return sourceMaxNodes;
+    // The kernel tree was produced from this exact source subtree by the
+    // trusted desugarer. Keep the finite source cap and compensate only for
+    // nodes introduced by that deterministic transformation.
+    return sourceMaxNodes + Math.max(0, countSemanticNbeNodes(kernel) - countSemanticNbeNodes(source));
+}
 function hasSemanticElaborationHole(ast) {
     const stack = [ast];
     const seen = new WeakSet();
@@ -766,10 +789,12 @@ export class Core {
             throw error;
         }
     }
-    setUserDefinition(name, definition) {
+    /** Attach a user definition, optionally retaining its just-validated cache. */
+    setUserDefinition(name, definition, preserveDefinitionCache = false) {
         if (definition) {
-            if (this.state.userDefs[name] !== definition)
+            if (this.state.userDefs[name] !== definition && !preserveDefinitionCache) {
                 delete this.state.defTypes[name];
+            }
             this.state.userDefs[name] = definition;
         }
         else {
@@ -939,6 +964,18 @@ export class Core {
             || (!requireSemantic && hasExplicitAtOccurrence(ast)))
             ? Core.clone(ast)
             : undefined;
+        let semanticAssertionSource;
+        if (!allowModify || requireSemantic) {
+            const sourceRoot = semanticPresentation ?? ast;
+            const sourceTarget = sourceRoot.type === ":"
+                ? sourceRoot
+                : sourceRoot.type === ":=" && sourceRoot.nodes?.[1]?.type === ":"
+                    ? sourceRoot.nodes[1]
+                    : undefined;
+            semanticAssertionSource = sourceTarget
+                ? semanticPresentation ? sourceTarget : Core.clone(sourceTarget)
+                : undefined;
+        }
         if (semanticPresentation)
             this.captureDisplaySurface(ast, semanticPresentation);
         Core.timeoutOccured = false;
@@ -969,7 +1006,7 @@ export class Core {
             : undefined;
         if (semanticAssertionTarget) {
             const semanticAssertion = this.trySemanticTypeAssertion(semanticAssertionTarget, context, !beforeInferResolution, allowUnsolvedTermMetas
-                || hasSemanticElaborationHole(semanticAssertionTarget.nodes[0]));
+                || hasSemanticElaborationHole(semanticAssertionTarget.nodes[0]), semanticAssertionSource);
             if (isNbeTypeFailure(semanticAssertion)) {
                 this.reportSemanticFailure(semanticAssertionTarget, semanticAssertion);
             }
@@ -985,7 +1022,17 @@ export class Core {
                     beforeInferResolution(ast, semanticAssertion.generalizedMetas);
                 }
                 Core.semanticTypeCheckFastPathHits++;
-                this.finalizeSemanticResult(ast, context);
+                // Definition registration stores its kernel-ready term in the
+                // callback above, then restores the user's surface syntax for
+                // display. Only the returned type needs semantic finalization;
+                // walking and ensugaring the entire proof would be discarded
+                // immediately by restoreSemanticPresentation.
+                if (beforeInferResolution && semanticPresentation && ast.checked) {
+                    this.finalizeSemanticResult(ast.checked, context);
+                }
+                else {
+                    this.finalizeSemanticResult(ast, context);
+                }
                 if (semanticPresentation) {
                     this.restoreSemanticPresentation(ast, semanticPresentation);
                 }
@@ -1063,7 +1110,12 @@ export class Core {
                     beforeInferResolution(ast, generalizedMetas);
                 }
                 Core.semanticTypeCheckFastPathHits++;
-                this.finalizeSemanticResult(ast, context);
+                if (beforeInferResolution && semanticPresentation && ast.checked) {
+                    this.finalizeSemanticResult(ast.checked, context);
+                }
+                else {
+                    this.finalizeSemanticResult(ast, context);
+                }
                 if (semanticPresentation) {
                     this.restoreSemanticPresentation(ast, semanticPresentation);
                 }
@@ -1349,15 +1401,32 @@ export class Core {
         }
         return true;
     }
-    trySemanticTypeAssertion(ast, context, annotateTerm, allowUnsolvedTermMetas) {
+    trySemanticTypeAssertion(ast, context, annotateTerm, allowUnsolvedTermMetas, sourceAssertion) {
         if (ast.type !== ":")
             return;
         const term = Core.clone(ast.nodes?.[0]);
         const expected = Core.clone(ast.nodes?.[1]);
         const schematicMetaNames = collectInferenceMetaNames(expected, collectInferenceMetaNames(term));
-        if (!fitsSemanticNbeBudget(term, Core.semanticTypeAssertionMaxNodes, false, context, true, schematicMetaNames) || !fitsSemanticNbeBudget(expected, Core.semanticTypeAssertionMaxNodes, false, context, true, schematicMetaNames)) {
-            return exceedsSemanticNbeNodeBudget(term, Core.semanticTypeAssertionMaxNodes)
-                || exceedsSemanticNbeNodeBudget(expected, Core.semanticTypeAssertionMaxNodes)
+        const sourceTerm = sourceAssertion?.type === ":"
+            ? sourceAssertion.nodes?.[0]
+            : undefined;
+        const sourceExpected = sourceAssertion?.type === ":"
+            ? sourceAssertion.nodes?.[1]
+            : undefined;
+        const sourceMaxNodes = Core.semanticTypeAssertionMaxNodes;
+        const sourceFits = (!sourceTerm || fitsSemanticNbeBudget(sourceTerm, sourceMaxNodes, false, context, true, schematicMetaNames)) && (!sourceExpected || fitsSemanticNbeBudget(sourceExpected, sourceMaxNodes, false, context, true, schematicMetaNames));
+        if (!sourceFits) {
+            return (sourceTerm && exceedsSemanticNbeNodeBudget(sourceTerm, sourceMaxNodes))
+                || (sourceExpected && exceedsSemanticNbeNodeBudget(sourceExpected, sourceMaxNodes))
+                ? { status: "unsupported", code: "budget-exhausted" }
+                : undefined;
+        }
+        const termMaxNodes = semanticAssertionKernelNodeBudget(sourceTerm, term, sourceMaxNodes);
+        const expectedMaxNodes = semanticAssertionKernelNodeBudget(sourceExpected, expected, sourceMaxNodes);
+        const kernelFits = fitsSemanticNbeBudget(term, termMaxNodes, false, context, true, schematicMetaNames) && fitsSemanticNbeBudget(expected, expectedMaxNodes, false, context, true, schematicMetaNames);
+        if (!kernelFits) {
+            return exceedsSemanticNbeNodeBudget(term, termMaxNodes)
+                || exceedsSemanticNbeNodeBudget(expected, expectedMaxNodes)
                 ? { status: "unsupported", code: "budget-exhausted" }
                 : undefined;
         }
@@ -1423,8 +1492,8 @@ export class Core {
             return checked.status === "invalid" ? false : undefined;
         }
         const returnedSchematicMetaNames = new Set(checked.schematicMetaNames ?? []);
-        if (!fitsSemanticNbeBudget(checked.type, Core.semanticTypeAssertionMaxNodes, false, context, false, returnedSchematicMetaNames)) {
-            return exceedsSemanticNbeNodeBudget(checked.type, Core.semanticTypeAssertionMaxNodes) ? { status: "unsupported", code: "budget-exhausted" } : undefined;
+        if (!fitsSemanticNbeBudget(checked.type, expectedMaxNodes, false, context, false, returnedSchematicMetaNames)) {
+            return exceedsSemanticNbeNodeBudget(checked.type, expectedMaxNodes) ? { status: "unsupported", code: "budget-exhausted" } : undefined;
         }
         if (!this.commitSemanticSourceMetaConstraints(context, checked.sourceMetaConstraints))
             return;
@@ -2105,13 +2174,58 @@ export class Core {
         }
         return true;
     }
+    /**
+     * Definitions are stored with the binder ids from the check that created
+     * them.  Those ids are only meaningful in that old lexical tree: copying
+     * them into a live proof goal can make an inner binder look like a current
+     * binder with the same numeric id.  Rebind a fresh clone by lexical scope
+     * before inserting it into the caller.
+     */
+    instantiateDefinitionForExpansion(definition, context, surrounding) {
+        const clone = Core.clone(definition);
+        const seen = new WeakSet();
+        let largestId = this.state.bondVarId - 1;
+        const reserve = (node) => {
+            if (!node || typeof node !== "object" || seen.has(node))
+                return;
+            seen.add(node);
+            if (Number.isFinite(node.bondVarId) && node.bondVarId > largestId) {
+                largestId = node.bondVarId;
+            }
+            for (const child of node.nodes ?? [])
+                reserve(child);
+            if (node.checked)
+                reserve(node.checked);
+        };
+        // Existing goal/context ids remain live.  Never allocate one of them
+        // for a binder copied out of a stored definition.
+        reserve(surrounding);
+        for (const [, type, id] of context) {
+            if (Number.isFinite(id) && id > largestId)
+                largestId = id;
+            reserve(type);
+        }
+        this.state.bondVarId = Math.max(this.state.bondVarId, largestId + 1);
+        const clear = (node, visited = new WeakSet()) => {
+            if (!node || typeof node !== "object" || visited.has(node))
+                return;
+            visited.add(node);
+            delete node.bondVarId;
+            for (const child of node.nodes ?? [])
+                clear(child, visited);
+            if (node.checked)
+                clear(node.checked, visited);
+        };
+        clear(clone);
+        return this.markBondVars(clone, context);
+    }
     // count: [position to expand, current position]
     expandDef(ast, context, n, count = [0, 1]) {
         let found = false;
         if (ast.type === "~=" && (n === "eqv" || (typeof n === "object" && n.has("eqv")))) {
             const expr = this.state.sysDefs["eqv"];
             if (count[0] === 0 || Math.abs(count[0]) === count[1]) {
-                Core.assign(ast, wrapApply(Core.clone(expr), ...ast.nodes));
+                Core.assign(ast, wrapApply(this.instantiateDefinitionForExpansion(expr, context, ast), ...ast.nodes));
                 count[1]++;
                 this.expandDef(ast.nodes[0].nodes[1], context, n, count);
                 this.expandDef(ast.nodes[1], context, n, count);
@@ -2127,7 +2241,7 @@ export class Core {
         if (ast.type === "var" && !ast.bondVarId && (ast.name === n || (typeof n === "object" && n.has(ast.name))) && !hasContextName(context, ast.name)) {
             const expr = this.state.sysDefs[ast.name] || this.state.userDefs[ast.name];
             if (count[0] === 0 || Math.abs(count[0]) === count[1]) {
-                Core.assign(ast, this.markBondVars(Core.clone(expr), context));
+                Core.assign(ast, this.instantiateDefinitionForExpansion(expr, context, ast));
                 count[1]++;
                 return true;
             }

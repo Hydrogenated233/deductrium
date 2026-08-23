@@ -102,6 +102,15 @@ export class TTGui {
     private coreWorkerStateRevision = 0;
     private readonly coreWorkerMutations = new TTWorkerMutationQueue();
     private definitionRevision = 0;
+    /** Core context currently materialized for gate/type queries. */
+    private hottDefCtxtKey: string | null = null;
+    private hottDefCtxtMacroNames: Set<string> | null = null;
+    private hottDefCtxtCore: Core | null = null;
+    private hottDefCtxtMaterialized: {
+        scopeId: string | null;
+        configKey: string;
+        entries: { index: number, slot: definedConst }[];
+    } | null = null;
     private semanticResourceScale = 1;
     /** Changes whenever theorem rows are inserted, removed, or reordered. */
     private theoremStructureRevision = 0;
@@ -247,9 +256,12 @@ export class TTGui {
         const input = document.getElementById("tactic-input") as HTMLInputElement;
         input.addEventListener("keydown", (ev) => {
             if (ev.key === "Enter" || ev.key === "Escape") {
+                ev.preventDefault();
                 document.getElementById("tactic-begin").click();
             }
         });
+        input.addEventListener("input", () => this.resizeTacticInput());
+        input.addEventListener("focus", () => this.resizeTacticInput());
         (document.getElementById('timeSelect') as HTMLSelectElement).addEventListener('change', function () {
             Core.timeout = Number(this.value) * 1000;
         });
@@ -400,6 +412,21 @@ export class TTGui {
         // Keep the original assistant's controls interactive. The internal
         // flag still prevents overlapping async commands.
     }
+    /** Keep the active tactic command selectable without horizontal scrolling. */
+    private resizeTacticInput() {
+        const input = document.getElementById("tactic-input") as HTMLTextAreaElement | null;
+        if (!input) return;
+        input.style.height = "auto";
+        // Growing the editor can add a scrollbar to the history list, which
+        // narrows the editor and may create another wrapped line. Re-measure
+        // a few times so the last line is not clipped.
+        for (let pass = 0; pass < 3; pass++) {
+            const nextHeight = Math.max(input.scrollHeight, 21);
+            const borderHeight = Math.max(0, input.offsetHeight - input.clientHeight);
+            if (input.clientHeight >= nextHeight) break;
+            input.style.height = `${nextHeight + borderHeight}px`;
+        }
+    }
     /**
      * Assist tactics are configured when a Worker session starts.  Keep the
      * option change in TTGui as the source of truth and invalidate the active
@@ -445,6 +472,7 @@ export class TTGui {
         document.getElementById("copygate").classList.remove("hide");
         const input = document.getElementById("tactic-input") as HTMLInputElement;
         input.value = "";
+        this.resizeTacticInput();
         input.classList.add("hide");
         this.setTacticBusy(false);
         this.assistWorker?.clear().catch(() => { });
@@ -595,7 +623,12 @@ export class TTGui {
         statediv.innerHTML = "";
         if (this.mode instanceof Array) {
             for (const command of this.mode.slice(1)) {
-                this.addSpan(statediv, command + " . ").className = "blocked";
+                // Keep history text identical to the command accepted by the
+                // assistant. The old display-only ` . ` suffix was copied
+                // with a selected line, so pasting it back made a valid tactic
+                // look like an invalid command. Each blocked span is already
+                // a visual line on its own.
+                this.addSpan(statediv, command).className = "blocked";
             }
         }
         this.updateTacticStateDisplay(snapshot, statediv);
@@ -611,6 +644,7 @@ export class TTGui {
         document.getElementById("copygate").classList.add("hide");
         const input = document.getElementById("tactic-input") as HTMLInputElement;
         input.classList.remove("hide");
+        this.resizeTacticInput();
         window.scrollTo(0, document.body.clientHeight);
         const wrapperDiv = document.getElementById("tactic-list").parentElement;
         wrapperDiv.scrollTo(0, document.getElementById("tactic-list").clientHeight);
@@ -918,6 +952,14 @@ export class TTGui {
             this.userConstNames.add(definition[0]);
         }
     }
+    private invalidateHottDefCtxt(hard = true) {
+        this.hottDefCtxtKey = null;
+        this.hottDefCtxtMacroNames = null;
+        if (hard) {
+            this.hottDefCtxtCore = null;
+            this.hottDefCtxtMaterialized = null;
+        }
+    }
     private isKnownTheoremName(name: string, userLineNumber: number) {
         if (isKnownTheoremIdentifier(name, consts, sysmacro)) return true;
         const inputs = this.getInhabitatArray();
@@ -940,6 +982,7 @@ export class TTGui {
             || Object.prototype.hasOwnProperty.call(this.core.state.sysDefs ?? {}, name);
     }
     updateTypeList(terms: Set<string>) {
+        this.invalidateHottDefCtxt();
         const list = this.typeList;
         consts.clear();
         while (list.lastChild) {
@@ -1243,6 +1286,7 @@ export class TTGui {
         return index !== targetIndex && this.isDefinitionInScope(index, selectedFolderId);
     }
     private clearUserDefinitionContext() {
+        this.invalidateHottDefCtxt();
         const names = new Set(Object.keys(this.core.state.userDefs));
         for (const definition of this.userDefinedConsts) {
             if (definition) names.add(definition[0]);
@@ -1345,6 +1389,70 @@ export class TTGui {
             stack.push({ end: i + folderLength, open: item.open, disabled: disabled || item.disabled });
         }
     }
+
+    private isTypePanelVisible() {
+        return document.getElementById("panel-2")?.classList.contains("show") ?? false;
+    }
+
+    private theoremDisplayDiv(input: HTMLInputElement) {
+        return input.parentElement?.querySelector(".inhabitat-div") as HTMLDivElement | null;
+    }
+
+    private clearTheoremDisplay(item: Extract<TTTheoremItem, { kind: "theorem" }>) {
+        const div = this.theoremDisplayDiv(item.input);
+        if (!div) return;
+        while (div.firstChild) div.removeChild(div.firstChild);
+        item.input["ttDisplayDeferred"] = true;
+    }
+
+    private renderTheoremDisplay(item: Extract<TTTheoremItem, { kind: "theorem" }>) {
+        const input = item.input;
+        const div = this.theoremDisplayDiv(input);
+        if (!div || !input.value.trim()) return;
+        while (div.firstChild) div.removeChild(div.firstChild);
+        const currentIdx = this.getInhabitatArray().indexOf(input);
+        const parseError = input["ttDisplayParseError"] as string | undefined;
+        const error = input["ttDisplayError"] as string | undefined;
+        if (parseError) {
+            this.addSpan(div, input.value + " - " + parseError);
+        } else {
+            try {
+                const displayAst = restoreSemanticMetaNamesForDisplay(parser.parse(input.value));
+                div.appendChild(this.ast2HTML("", displayAst, [], [], currentIdx));
+                if (error) this.addSpan(div, " - " + error);
+                const validatedType = input["validatedType"] as AST | undefined;
+                if (!error && displayAst.type[0] !== ":" && validatedType) {
+                    this.addSpan(div, " &nbsp; : &nbsp; ", true);
+                    div.appendChild(this.ast2HTML(
+                        "",
+                        restoreSemanticMetaNamesForDisplay(Core.clone(validatedType, true)),
+                        [],
+                        [],
+                        currentIdx
+                    ));
+                }
+            } catch (renderError) {
+                this.addSpan(div, input.value + " - " + String(renderError));
+            }
+        }
+        input["ttDisplayDeferred"] = false;
+    }
+
+    /** Release large theorem formula DOM while the map or another layer is visible. */
+    setTypePanelVisible(visible: boolean) {
+        if (visible) {
+            for (const item of this.theoremItems) {
+                if (item.kind === "theorem" && item.input["ttDisplayDeferred"]) {
+                    this.renderTheoremDisplay(item);
+                }
+            }
+            return;
+        }
+        for (const item of this.theoremItems) {
+            if (item.kind === "theorem") this.clearTheoremDisplay(item);
+        }
+    }
+
     private isTheoremInputDisabled(input: HTMLInputElement) {
         return input?.dataset.ttDisabled === "true";
     }
@@ -1649,6 +1757,7 @@ export class TTGui {
             });
     }
     restoreTheoremItems(items: TTTheoremSaveItem[]) {
+        this.invalidateHottDefCtxt();
         this.definitionRevision++;
         this.theoremStructureRevision++;
         this.gatePreviewStructureRevision = -1;
@@ -1688,24 +1797,104 @@ export class TTGui {
         if (!this.skipRendering) this.revalidateTheorems();
     }
     getHottDefCtxt(input: HTMLInputElement | number, selectedFolderId: string | null = null) {
-        macro.clear();
-        for (const s of sysmacro) macro.add(s);
-        this.clearUserDefinitionContext();
         const inputs = this.getInhabitatArray();
         const currentIdx = typeof input === "number" ? input : inputs.indexOf(input);
         const end = typeof input === "number" ? Math.min(inputs.length - 1, input) : currentIdx - 1;
         const scopeId = selectedFolderId ?? (typeof input === "number"
             ? this.getActiveTacticScopeId()
             : this.getDefaultTacticScope(input));
+        const configKey = JSON.stringify({
+            scopeId,
+            disableSimpleFn: this.disableSimpleFn,
+            disableSimpleEq: this.disableSimpleEq,
+            inferDisplayMode: this.inferDisplayMode,
+            semanticResourceScale: this.semanticResourceScale,
+            language: langMgr.lang,
+            unlockedTypes: Array.from(this.unlockedTypes ?? []).sort()
+        });
+        const key = JSON.stringify({
+            definitionRevision: this.definitionRevision,
+            theoremStructureRevision: this.theoremStructureRevision,
+            currentIdx,
+            end,
+            configKey
+        });
+        const targetIndex = currentIdx + (typeof input === "number" ? 0 : 1);
+        const desiredEntries: { index: number, slot: definedConst }[] = [];
         for (let i = 0; i <= end; i++) {
             const def = this.userDefinedConsts[i];
-            if (!def || !this.isDefinitionVisible(i, currentIdx + (typeof input === "number" ? 0 : 1), scopeId)) continue;
-            macro.add(def[0]);
-            this.addUserDefinitionToContext(def[0], def);
+            if (!def || !this.isDefinitionVisible(i, targetIndex, scopeId)) continue;
+            desiredEntries.push({ index: i, slot: def });
         }
+        const materialized = this.hottDefCtxtMaterialized;
+        const sameEntry = (
+            left: { index: number, slot: definedConst },
+            right: { index: number, slot: definedConst }
+        ) => left.index === right.index
+            && left.slot === right.slot
+            && left.slot?.[1] === right.slot?.[1]
+            && left.slot?.[2] === right.slot?.[2];
+        const exactMaterialized = this.hottDefCtxtCore === this.core
+            && materialized
+            && materialized.scopeId === scopeId
+            && materialized.configKey === configKey
+            && materialized.entries.length === desiredEntries.length
+            && materialized.entries.every((entry, index) => sameEntry(entry, desiredEntries[index]));
+        if (exactMaterialized && this.hottDefCtxtKey === key && this.hottDefCtxtMacroNames) {
+            this.core.state.disableSimpleFn = this.disableSimpleFn;
+            this.core.state.disableSimpleEq = this.disableSimpleEq;
+            macro.clear();
+            for (const name of this.hottDefCtxtMacroNames) macro.add(name);
+            return currentIdx;
+        }
+
+        const canExtendMaterialized = this.hottDefCtxtCore === this.core
+            && materialized
+            && materialized.scopeId === scopeId
+            && materialized.configKey === configKey
+            && desiredEntries.length >= materialized.entries.length
+            && materialized.entries.every((entry, index) => sameEntry(entry, desiredEntries[index]));
+        if (canExtendMaterialized) {
+            const macroNames = new Set<string>(sysmacro);
+            for (const entry of materialized.entries) macroNames.add(entry.slot[0]);
+            for (const entry of desiredEntries.slice(materialized.entries.length)) {
+                macroNames.add(entry.slot[0]);
+                this.addUserDefinitionToContext(entry.slot[0], entry.slot);
+            }
+            macro.clear();
+            for (const name of macroNames) macro.add(name);
+            this.hottDefCtxtMaterialized = {
+                scopeId,
+                configKey,
+                entries: desiredEntries
+            };
+            this.hottDefCtxtKey = key;
+            this.hottDefCtxtMacroNames = macroNames;
+            this.hottDefCtxtCore = this.core;
+            return currentIdx;
+        }
+
+        macro.clear();
+        for (const s of sysmacro) macro.add(s);
+        this.clearUserDefinitionContext();
+        const materializedMacroNames = new Set<string>(sysmacro);
+        for (const entry of desiredEntries) {
+            macro.add(entry.slot[0]);
+            materializedMacroNames.add(entry.slot[0]);
+            this.addUserDefinitionToContext(entry.slot[0], entry.slot);
+        }
+        this.hottDefCtxtMaterialized = {
+            scopeId,
+            configKey,
+            entries: desiredEntries
+        };
+        this.hottDefCtxtKey = key;
+        this.hottDefCtxtMacroNames = materializedMacroNames;
+        this.hottDefCtxtCore = this.core;
         return currentIdx;
     }
     private getHottTacticDefCtxt(selectedFolderId: string | null) {
+        this.invalidateHottDefCtxt();
         macro.clear();
         for (const s of sysmacro) macro.add(s);
         this.clearUserDefinitionContext();
@@ -1840,6 +2029,7 @@ export class TTGui {
         return this.assistWorkerConfigurePromise;
     }
     private invalidateWorkerDefinitions(startIndex: number) {
+        this.invalidateHottDefCtxt(false);
         this.definitionRevision++;
         const start = Math.max(0, Math.floor(startIndex));
         if (this.coreWorker
@@ -2044,7 +2234,12 @@ export class TTGui {
             if (!ev["updateDefs"]) ev["updateDefs"] = input["needUpdate"];
             delete input["needUpdate"];
             this.onStateChange();
-            const currentIdx = this.getHottDefCtxt(input);
+            // Worker validation does not need a main-thread definition
+            // context. Materialize it only for synchronous checking, legacy
+            // inference, or definition/cache commit; this keeps map movement
+            // responsive while the isolated process validates the suffix.
+            const currentIdx = this.getInhabitatArray().indexOf(input);
+            const ensureMainContext = () => this.getHottDefCtxt(input);
             const validationItemId = this.getTheoremItemForInput(input)?.id ?? null;
             const rowPositionMatches = () => theoremValidationPositionMatches(
                 this.getInhabitatArray(),
@@ -2097,7 +2292,10 @@ export class TTGui {
                 }
                 this.refreshUserConstNames();
                 try { wrapper.remove(); } catch (e) { }
-                if (removed) macro.delete(removed[0]);
+                if (removed) {
+                    macro.delete(removed[0]);
+                    this.invalidateHottDefCtxt(false);
+                }
                 this.renderTheoremStructure();
                 continueValidation(!!nextInput && (!!removed || ev["updateDefs"]));
                 return;
@@ -2218,6 +2416,10 @@ export class TTGui {
                 if (Core.timeoutOccured) document.getElementById("timeout").classList.remove("hide");
                 if (ast && !error) {
                     try {
+                        const inferenceStatus = theoremInferenceStatus(inferenceComplete);
+                        if (!workerCommitted || inferenceStatus === "legacy") {
+                            ensureMainContext();
+                        }
                         if (ast.type === ":=") {
                             const defname = ast.nodes[0].name;
                             const defContent = ast.nodes[1];
@@ -2229,15 +2431,18 @@ export class TTGui {
                             } else {
                                 storedDefinition = this.core.desugar(Core.clone(filledAst), true);
                             }
-                            if (definitionCache) this.core.restoreDefinitionCache(defname, definitionCache);
-                            let storedCache = definitionCache
-                                ?? this.core.serializeDefinitionCache(defname);
+                            let storedCache = definitionCache;
+                            if (!storedCache) {
+                                ensureMainContext();
+                                storedCache = this.core.serializeDefinitionCache(defname);
+                            }
                             if (!storedCache) {
                                 // Compatibility with an older/stale Worker
                                 // response that validated the definition but
                                 // omitted its transferable type cache. Without
                                 // this repair the name remains visible while
                                 // every semantic use reports unknown-constant.
+                                ensureMainContext();
                                 try {
                                     const recovered = this.core.checkDefinition(Core.clone(ast, true), []);
                                     storedCache = recovered.definitionCache;
@@ -2250,6 +2455,7 @@ export class TTGui {
                                 storedCache
                             ];
                             this.userDefinedConsts[currentIdx] = storedSlot;
+                            this.invalidateHottDefCtxt(false);
                             // A previously rendered #t copy preview may have
                             // classified this name as a free variable.  Force
                             // its cached presentation to be rebuilt after the
@@ -2266,6 +2472,7 @@ export class TTGui {
                             if (workerCommitted) this.coreWorker?.rememberDefinition(currentIdx, storedSlot);
                             else this.syncCoreWorkerDefinition(currentIdx, storedSlot);
                             macro.add(defname);
+                            this.invalidateHottDefCtxt(false);
                         }
                         // The Worker returns a fully elaborated definition while
                         // `ast` deliberately preserves the user's `_` spelling
@@ -2273,14 +2480,15 @@ export class TTGui {
                         // that surface AST both marks solved holes as pending and
                         // can throw after expanding an earlier such definition.
                         const inferenceTarget = theoremInferenceTarget(ast, filledDefinition);
-                        const inferenceStatus = theoremInferenceStatus(inferenceComplete);
                         if (inferenceStatus === "incomplete") {
                             wrapper.classList.add("infering");
-                        } else {
-                            const trustValidatedHoles = inferenceStatus === "complete";
-                            checkInfer(inferenceTarget, trustValidatedHoles);
+                        } else if (inferenceStatus === "legacy") {
+                            // New Workers already checked the complete
+                            // inference tree. Rewalking a large elaborated
+                            // theorem on the UI thread only blocks the map.
+                            checkInfer(inferenceTarget, false);
                             if (inferenceTarget.type === ":") {
-                                checkInfer(inferenceTarget.nodes[1], trustValidatedHoles);
+                                checkInfer(inferenceTarget.nodes[1], false);
                             }
                         }
                     } catch (e) {
@@ -2297,22 +2505,30 @@ export class TTGui {
                 // stored above in separate objects, so presentation renaming
                 // can happen in place without deep-cloning a potentially huge
                 // checked tree for every restored theorem.
-                const displayAst = ast
-                    ? restoreSemanticMetaNamesForDisplay(ast)
-                    : ast;
-                const newDom = parseError
-                    ? this.addSpan(div, input.value + " - " + parseError)
-                    : this.ast2HTML("", displayAst, [], [], currentIdx);
-                div.appendChild(newDom);
-                if (ast && error) this.addSpan(div, " - " + error);
-                if (ast && !error && ast.type[0] != ":") {
-                    this.addSpan(div, " &nbsp; : &nbsp; ", true);
-                    div.appendChild(this.ast2HTML("", displayAst.checked, [], [], currentIdx));
+                input["ttDisplayParseError"] = parseError;
+                input["ttDisplayError"] = error;
+                if (this.isTypePanelVisible()) {
+                    const displayAst = ast
+                        ? restoreSemanticMetaNamesForDisplay(ast)
+                        : ast;
+                    const newDom = parseError
+                        ? this.addSpan(div, input.value + " - " + parseError)
+                        : this.ast2HTML("", displayAst, [], [], currentIdx);
+                    div.appendChild(newDom);
+                    if (ast && error) this.addSpan(div, " - " + error);
+                    if (ast && !error && ast.type[0] != ":") {
+                        this.addSpan(div, " &nbsp; : &nbsp; ", true);
+                        div.appendChild(this.ast2HTML("", displayAst.checked, [], [], currentIdx));
+                    }
+                    input["ttDisplayDeferred"] = false;
+                } else {
+                    input["ttDisplayDeferred"] = true;
                 }
                 continueValidation(continueAfter && !!nextInput && (ast?.type === ":=" || !!ev["updateDefs"]));
             };
             const validateSynchronously = () => {
                 try {
+                    ensureMainContext();
                     let filledDefinition: AST;
                     if (ast.type === ":=") {
                         if (ast.nodes[0].type !== "var") throw TR(":=符号左侧仅允许出现自定义常量");
@@ -2718,6 +2934,7 @@ export class TTGui {
             this.renderAssistSnapshot(snapshot);
             const input = document.getElementById("tactic-input") as HTMLInputElement;
             input.value = "";
+            this.resizeTacticInput();
             input.focus();
         } catch (error) {
             if (requestId !== this.tacticRequestId) return;
@@ -2794,6 +3011,7 @@ export class TTGui {
             if (requestId !== this.tacticRequestId || !(this.mode instanceof Array)) return;
             this.mode = [target, ...snapshot.history];
             input.value = "";
+            this.resizeTacticInput();
             this.renderAssistSnapshot(snapshot);
             input.focus();
         } catch (error) {

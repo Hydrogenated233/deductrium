@@ -586,6 +586,16 @@ div.wrapper.error {
 
 #tactic-input {
     width: calc(100% - 64px);
+    min-height: 21px;
+    max-width: calc(100% - 64px);
+    box-sizing: border-box;
+    resize: none;
+    overflow: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    vertical-align: top;
+    user-select: text;
 }
 
 #tactic-errmsg {
@@ -606,6 +616,21 @@ div.wrapper.error {
     white-space: normal;
     overflow-wrap: anywhere;
     word-break: break-word;
+}
+
+/* The proof-assistant history and its active command are user text.  The
+   generic list wrapper is non-selectable for game controls, so opt this
+   instance back into selection explicitly. */
+.tactic-assist-wrapper {
+    user-select: text;
+    cursor: default;
+}
+
+#tactic-state .blocked {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    user-select: text;
 }
 
 #tactic-list .highlighted {

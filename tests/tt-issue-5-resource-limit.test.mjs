@@ -25,7 +25,7 @@ const previous = {
 };
 const originalConsoleLog = console.log;
 
-function runIssueFixture(semanticResourceScale) {
+function createSession(semanticResourceScale) {
     const session = new TTCoreSession();
     session.configure({
         unlockedTypes,
@@ -36,6 +36,11 @@ function runIssueFixture(semanticResourceScale) {
         semanticResourceScale,
         language: "zh"
     });
+    return session;
+}
+
+function prepareIssueFixture(semanticResourceScale) {
+    const session = createSession(semanticResourceScale);
     for (let index = 0; index < statements.length - 1; index++) {
         const result = session.validate(index, parser.parse(statements[index]));
         assert.equal(
@@ -44,10 +49,38 @@ function runIssueFixture(semanticResourceScale) {
             `GitHub issue #5 prerequisite ${index} failed: ${result.error ?? "unknown error"}`
         );
     }
+    return session;
+}
+
+function runIssueFixture(semanticResourceScale) {
+    const session = prepareIssueFixture(semanticResourceScale);
     return session.validate(
         statements.length - 1,
         parser.parse(statements[statements.length - 1])
     );
+}
+
+function runIssueAssistAssertion(semanticResourceScale) {
+    const session = prepareIssueFixture(semanticResourceScale);
+    const assertion = parser.parse(statements[statements.length - 1]).nodes[1];
+    try {
+        session.engine.core.checkType(assertion, [], true, undefined, false, true);
+        return { ok: true };
+    } catch (error) {
+        return { ok: false, error: String(error) };
+    }
+}
+
+function countAstNodes(ast) {
+    const stack = [ast];
+    let count = 0;
+    while (stack.length) {
+        const node = stack.pop();
+        if (!node) continue;
+        count++;
+        for (const child of node.nodes ?? []) stack.push(child);
+    }
+    return count;
 }
 
 try {
@@ -61,17 +94,64 @@ try {
     assert.equal(defaultResult.timeout, false,
         "the issue is a semantic node budget, not a wall-clock timeout");
 
-    const raisedResult = runIssueFixture(3);
+    const raisedResult = runIssueFixture(2);
     assert.equal(
         raisedResult.ok,
         true,
-        `GitHub issue #5 must pass at 3x resources: ${raisedResult.error ?? "unknown error"}`
+        `GitHub issue #5 explicit assertion must pass at 2x resources: ${raisedResult.error ?? "unknown error"}`
     );
-    assert.equal(Core.semanticResourceScale, 3);
-    assert.equal(Core.semanticTypeAssertionMaxNodes, 6_144,
+    assert.equal(Core.semanticResourceScale, 2);
+    assert.equal(Core.semanticTypeAssertionMaxNodes, 4_096,
         "Worker/session configuration must scale the explicit-assertion node boundary");
-    assert.equal(Core.semanticTypeAssertionMaxSteps, 393_216,
+    assert.equal(Core.semanticTypeAssertionMaxSteps, 262_144,
         "the same setting must scale semantic evaluation work as one bounded resource policy");
+
+    const assistResult = runIssueAssistAssertion(2);
+    assert.equal(
+        assistResult.ok,
+        true,
+        `proof-assistant semantic assertions must use the same source budget: ${assistResult.error}`
+    );
+
+    const sugarSession = createSession(1);
+    let productType = "True";
+    let productValue = "true";
+    for (let index = 0; index < 26; index++) {
+        productType = `(True×${productType})`;
+        productValue = `(true,${productValue})`;
+    }
+    const productAssertion = parser.parse(
+        `((λx:${productType}.true) ${productValue}):True`
+    );
+    const productKernel = sugarSession.engine.core.desugar(
+        Core.clone(productAssertion),
+        true
+    );
+    assert.ok(countAstNodes(productAssertion.nodes[0]) <= 128);
+    assert.ok(countAstNodes(productKernel.nodes[0]) > 256,
+        "the regression must exceed the former fixed 2x desugaring allowance");
+    Core.semanticTypeAssertionMaxNodes = 128;
+    assert.doesNotThrow(
+        () => sugarSession.engine.core.checkType(productAssertion, [], false),
+        "trusted product/tuple desugaring must not consume the user's source budget"
+    );
+
+    let truncTerm = "true";
+    let truncType = "True";
+    for (let index = 0; index < 4; index++) {
+        truncTerm = `[ ${truncTerm} ]`;
+        truncType = `[[ ${truncType} ]]`;
+    }
+    const truncAssertion = parser.parse(`${truncTerm}:${truncType}`);
+    const truncKernel = sugarSession.engine.core.desugar(Core.clone(truncAssertion), true);
+    assert.ok(countAstNodes(truncAssertion.nodes[0]) <= 8);
+    assert.ok(countAstNodes(truncKernel.nodes[0]) > 16,
+        "nested truncation must also exceed the former fixed 2x allowance");
+    Core.semanticTypeAssertionMaxNodes = 8;
+    assert.doesNotThrow(
+        () => sugarSession.engine.core.checkType(truncAssertion, [], false),
+        "trusted truncation desugaring must not consume the user's source budget"
+    );
 
     Core.setSemanticResourceScale(10_000);
     assert.equal(Core.semanticResourceScale, Core.semanticResourceScaleMax,

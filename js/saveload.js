@@ -59,9 +59,10 @@ export class GameSaveLoad {
     stateChangeTimer = false;
     timeOut = 3000;
     stateChange(game) {
-        if (this.stateChangeTimer === false) {
-            this.stateChangeTimer = setTimeout(() => this.flush(game), this.timeOut);
+        if (this.stateChangeTimer !== false) {
+            clearTimeout(this.stateChangeTimer);
         }
+        this.stateChangeTimer = setTimeout(() => this.flush(game), this.timeOut);
     }
     flush(game) {
         if (this.stateChangeTimer === false)

@@ -16,6 +16,8 @@ const sourceSave = readFileSync(
 const expectedTheoremCount = createK609BenchmarkTheorems(sourceSave).length;
 const encodedSave = appendTheoremToSave(sourceSave, K609_FINAL_THEOREM);
 const validationTimeoutMs = Math.max(1_000, Number(process.env.TT_BROWSER_TIMEOUT_MS || 180_000));
+const movementDurationMs = Math.max(0, Number(process.env.TT_BROWSER_MOVEMENT_MS || 0));
+const movementDuringValidation = process.env.TT_BROWSER_MOVE_DURING_VALIDATION === "1";
 const server = await startServer();
 
 try {
@@ -119,6 +121,14 @@ try {
         );
         await cdp.command("Page.navigate", { url: `${origin}/index.html` }, sessionId);
         await loaded;
+        const overlapPromise = movementDuringValidation && movementDurationMs
+            ? evaluate(
+                cdp,
+                sessionId,
+                "(" + movementDuringValidationProbe.toString() + ")(" + movementDurationMs + ")",
+                { awaitPromise: true }
+            )
+            : null;
         const browserResult = await evaluate(cdp, sessionId, `(async () => {
             const deadline = Date.now() + ${validationTimeoutMs};
             while (!globalThis.deductriumGame) {
@@ -145,6 +155,15 @@ try {
                 workerStats: globalThis.__workerStats
             };
         })()`, { awaitPromise: true });
+        const movement = movementDurationMs
+            ? await evaluate(
+                cdp,
+                sessionId,
+                "(" + movementProbe.toString() + ")(" + movementDurationMs + ")",
+                { awaitPromise: true }
+            )
+            : undefined;
+        const movementOverlap = overlapPromise ? await overlapPromise : undefined;
         const metrics = await cdp.command("Performance.getMetrics", {}, sessionId);
         const metricMap = Object.fromEntries(metrics.metrics.map(metric => [metric.name, metric.value]));
         const cpuProfile = profileCpu
@@ -163,6 +182,8 @@ try {
                 layoutMs: toMs(metricMap.LayoutDuration),
                 styleMs: toMs(metricMap.RecalcStyleDuration)
             },
+            movement,
+            movementDuringValidation: movementOverlap,
             cpuProfile: cpuProfile ? summarizeCpuProfile(cpuProfile.profile) : undefined
         };
     });
@@ -174,6 +195,159 @@ try {
     server.stop();
 }
 
+async function movementProbe(durationMs) {
+    const game = globalThis.deductriumGame;
+    const { GameSaveLoad } = await import("./js/saveload.js");
+    const saveDurations = [];
+    const drawDurations = [];
+    const originalSave = GameSaveLoad.prototype.save;
+    const world = game.hyperGui.world;
+    const originalOnLoop = world.onLoop;
+    const originalStateChange = world.onStateChange;
+
+    GameSaveLoad.prototype.save = function (...args) {
+        const started = performance.now();
+        try {
+            return originalSave.apply(this, args);
+        } finally {
+            saveDurations.push(performance.now() - started);
+        }
+    };
+    world.onLoop = function (...args) {
+        const started = performance.now();
+        try {
+            return originalOnLoop.apply(this, args);
+        } finally {
+            drawDurations.push(performance.now() - started);
+        }
+    };
+
+    const summarize = (label, frames, saves, draws) => {
+        const sorted = frames.slice().sort((left, right) => left - right);
+        const sortedDraws = draws.slice().sort((left, right) => left - right);
+        const percentile = (values, ratio) => values[Math.min(
+            values.length - 1,
+            Math.floor(values.length * ratio)
+        )] ?? 0;
+        return {
+            label,
+            frameCount: frames.length,
+            meanFrameMs: Number((frames.reduce((sum, value) => sum + value, 0)
+                / Math.max(1, frames.length)).toFixed(2)),
+            p95FrameMs: Number(percentile(sorted, 0.95).toFixed(2)),
+            p99FrameMs: Number(percentile(sorted, 0.99).toFixed(2)),
+            maxFrameMs: Number((sorted.at(-1) ?? 0).toFixed(2)),
+            over50ms: frames.filter(value => value > 50).length,
+            over100ms: frames.filter(value => value > 100).length,
+            drawCount: draws.length,
+            meanDrawMs: Number((draws.reduce((sum, value) => sum + value, 0)
+                / Math.max(1, draws.length)).toFixed(2)),
+            p99DrawMs: Number(percentile(sortedDraws, 0.99).toFixed(2)),
+            maxDrawMs: Number((sortedDraws.at(-1) ?? 0).toFixed(2)),
+            saveCount: saves.length,
+            saveDurationsMs: saves.map(value => Number(value.toFixed(2)))
+        };
+    };
+    const sample = async (label, sampleDurationMs) => {
+        const frames = [];
+        const savesBefore = saveDurations.length;
+        const drawsBefore = drawDurations.length;
+        const started = performance.now();
+        let previous = started;
+        game.hyperGui.keyDowns.add("KeyD");
+        try {
+            await new Promise(resolve => {
+                const next = now => {
+                    frames.push(now - previous);
+                    previous = now;
+                    if (now - started >= sampleDurationMs) resolve();
+                    else requestAnimationFrame(next);
+                };
+                requestAnimationFrame(next);
+            });
+        } finally {
+            game.hyperGui.keyDowns.delete("KeyD");
+        }
+        return summarize(
+            label,
+            frames,
+            saveDurations.slice(savesBefore),
+            drawDurations.slice(drawsBefore)
+        );
+    };
+
+    try {
+        // Let any state change queued during save restoration settle first.
+        await new Promise(resolve => setTimeout(resolve, 3500));
+        saveDurations.length = 0;
+        drawDurations.length = 0;
+        const autosave = await sample("autosave-enabled", durationMs);
+        // Continued movement after a flush schedules one last delayed save.
+        await new Promise(resolve => setTimeout(resolve, 3500));
+        autosave.saveCount = saveDurations.length;
+        autosave.saveDurationsMs = saveDurations.map(value => Number(value.toFixed(2)));
+
+        saveDurations.length = 0;
+        drawDurations.length = 0;
+        world.onStateChange = () => { };
+        const noAutosave = await sample("autosave-disabled", durationMs);
+        return { autosave, noAutosave };
+    } finally {
+        game.hyperGui.keyDowns.delete("KeyD");
+        world.onStateChange = originalStateChange;
+        world.onLoop = originalOnLoop;
+        GameSaveLoad.prototype.save = originalSave;
+    }
+}
+
+async function movementDuringValidationProbe(durationMs) {
+    while (!globalThis.deductriumGame) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const game = globalThis.deductriumGame;
+    const frames = [];
+    const contextDurations = [];
+    const originalGetHottDefCtxt = game.ttGui.getHottDefCtxt;
+    game.ttGui.getHottDefCtxt = function (...args) {
+        const started = performance.now();
+        try {
+            return originalGetHottDefCtxt.apply(this, args);
+        } finally {
+            contextDurations.push(performance.now() - started);
+        }
+    };
+    const started = performance.now();
+    let previous = started;
+    game.hyperGui.keyDowns.add("KeyD");
+    try {
+        await new Promise(resolve => {
+            const next = now => {
+                frames.push(now - previous);
+                previous = now;
+                if (now - started >= durationMs) resolve();
+                else requestAnimationFrame(next);
+            };
+            requestAnimationFrame(next);
+        });
+    } finally {
+        game.hyperGui.keyDowns.delete("KeyD");
+        game.ttGui.getHottDefCtxt = originalGetHottDefCtxt;
+    }
+    const sorted = frames.slice().sort((left, right) => left - right);
+    return {
+        frameCount: frames.length,
+        meanFrameMs: Number((frames.reduce((sum, value) => sum + value, 0)
+            / Math.max(1, frames.length)).toFixed(2)),
+        p95FrameMs: Number((sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] ?? 0).toFixed(2)),
+        maxFrameMs: Number((sorted.at(-1) ?? 0).toFixed(2)),
+        over50ms: frames.filter(value => value > 50).length,
+        over100ms: frames.filter(value => value > 100).length,
+        contextCalls: contextDurations.length,
+        contextTotalMs: Number(contextDurations.reduce((sum, value) => sum + value, 0).toFixed(2)),
+        contextMaxMs: Number((Math.max(...contextDurations, 0)).toFixed(2)),
+        checkingAtEnd: !!document.querySelector(".inhabitat .checking")
+    };
+}
 async function startServer() {
     const port = await reservePort();
     const child = spawn(process.execPath, ["server.mjs", "--no-open"], {

@@ -1,6 +1,6 @@
 import { TR } from "../lang.js";
 import { ASTParser } from "./astparser.js";
-import { Core, wrapApply, wrapLambda, wrapVar } from "./core.js";
+import { Core, findContextByName, wrapApply, wrapLambda, wrapVar } from "./core.js";
 import { markExplicitAtSyntax } from "./presentation.js";
 let core = new Core;
 let parser = new ASTParser;
@@ -966,9 +966,11 @@ export class Assist {
             return true;
         }
         if (ast.nodes?.length) {
-            const nast = Core.clone(ast);
-            for (let i = nast.nodes.length - 1; i >= 0; i--) {
-                if (this.search(nast.nodes[i], search))
+            // exactEqualByAlphaConversion clones only the binder subtrees it
+            // needs to rename, so searching the original children is safe and
+            // avoids cloning the entire remaining tree on every miss.
+            for (let i = ast.nodes.length - 1; i >= 0; i--) {
+                if (this.search(ast.nodes[i], search))
                     return true;
             }
         }
@@ -1246,12 +1248,25 @@ export class Assist {
             throw TR("无证明目标，请使用qed命令结束证明");
         const nast = { type: "var", name: n };
         let nType;
-        try {
-            nType = core.checkType(nast, goal.context, false);
+        // A local variable's type is already recorded in the goal context.
+        // Re-synthesizing the variable as an ordinary term can desugar a
+        // surface Sum (for example `True+True`) into `@Sum _ _ ...`; the
+        // annotated semantic path then rejects those implicit holes even
+        // though the context binding was checked when it was introduced.
+        // Read the nearest binding directly and only fall back to synthesis
+        // for malformed/legacy contexts that do not carry a type.
+        const binding = findContextByName(goal.context, n);
+        if (binding?.[1]) {
+            nType = Core.clone(binding[1]);
         }
-        catch (e) {
-            this.goal.unshift(goal);
-            throw e;
+        else {
+            try {
+                nType = core.checkType(nast, goal.context, false);
+            }
+            catch (e) {
+                this.goal.unshift(goal);
+                throw e;
+            }
         }
         if (!this.isIndType(nType)) {
             this.goal.unshift(goal);
@@ -1603,8 +1618,14 @@ export class Assist {
             throw e;
         }
         this.goal.unshift(goal);
-        if (requiresStrictSimplification)
-            this.simpl();
+        if (requiresStrictSimplification) {
+            // The generic simpl tactic routes through a WHNF request. An
+            // expanded eqv goal can still contain a freshly desugared Sum
+            // argument, which that route rejects even though the expanded
+            // goal itself has already passed type checking. Normalize the
+            // local expansion directly instead.
+            core.normalizeExpandedProofGoal(goal.type, goal.context);
+        }
         return this;
     }
     replaceFreeVar(ast, src, dst, freevarInDst = Core.getFreeVars(dst)) {

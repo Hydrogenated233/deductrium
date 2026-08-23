@@ -243,31 +243,45 @@ function collectDefinitionDependencies(term, result = new Set()) {
     }
     return result;
 }
-function collectTransitiveDefinitionDependencies(term, definitions, dependencies) {
-    const result = collectDefinitionDependencies(term);
-    const pending = Array.from(result);
-    while (pending.length) {
-        const name = pending.pop();
-        for (const dependency of dependencies.get(name) ?? []) {
-            if (result.has(dependency))
-                continue;
-            result.add(dependency);
-            pending.push(dependency);
+function collectTransitiveDefinitionDependencies(term, definitions, dependencies, closureCache) {
+    const roots = collectDefinitionDependencies(term);
+    const cacheKey = closureCache
+        ? JSON.stringify(Array.from(roots).sort())
+        : undefined;
+    let closure = cacheKey === undefined ? undefined : closureCache.get(cacheKey);
+    if (!closure) {
+        const computed = new Set(roots);
+        const pending = Array.from(roots);
+        while (pending.length) {
+            const name = pending.pop();
+            for (const dependency of dependencies.get(name) ?? []) {
+                if (computed.has(dependency))
+                    continue;
+                computed.add(dependency);
+                pending.push(dependency);
+            }
         }
+        for (const name of computed) {
+            if (!definitions.has(name))
+                computed.delete(name);
+        }
+        closure = computed;
+        if (cacheKey !== undefined)
+            closureCache.set(cacheKey, closure);
     }
-    for (const name of Array.from(result)) {
-        if (!definitions.has(name))
-            result.delete(name);
-    }
-    return result;
+    return closure;
 }
 function sharedDefinitionBarriers(left, right, definitions, dependencies, opaqueDefinitions) {
     if (!dependencies?.size || !definitions.size)
         return null;
-    const leftDependencies = collectTransitiveDefinitionDependencies(left, definitions, dependencies);
+    // Both sides often mention the same definition roots. Keep this memo local
+    // to the current probe so dependency-graph edits can never leave stale
+    // closures behind.
+    const closureCache = new Map();
+    const leftDependencies = collectTransitiveDefinitionDependencies(left, definitions, dependencies, closureCache);
     if (!leftDependencies.size)
         return null;
-    const rightDependencies = collectTransitiveDefinitionDependencies(right, definitions, dependencies);
+    const rightDependencies = collectTransitiveDefinitionDependencies(right, definitions, dependencies, closureCache);
     const barriers = new Set();
     const [smaller, larger] = leftDependencies.size <= rightDependencies.size
         ? [leftDependencies, rightDependencies]

@@ -109,6 +109,15 @@ const ttParser = new TtAstParser();
         true,
         "search must recurse through every child"
     );
+    const alphaRoot = ttParser.parse("((Lx:True.x) z)");
+    const alphaBefore = ttParser.stringify(alphaRoot);
+    assert.equal(
+        assist.search(alphaRoot, ttParser.parse("(Ly:True.y)")),
+        true,
+        "search must retain alpha-equivalence while traversing original children"
+    );
+    assert.equal(ttParser.stringify(alphaRoot), alphaBefore,
+        "alpha-equivalence search must not mutate the source tree");
 }
 
 // Generic substitution must visit all children, including children after the

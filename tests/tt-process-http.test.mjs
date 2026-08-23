@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 import { ASTParser } from "../js/tt/astparser.js";
+import { initTypeSystem } from "../js/tt/initial.js";
 import {
     jsonRequest,
     minimalTTConfig,
@@ -151,6 +152,79 @@ try {
         assert.equal(qed.body?.ok, true, qed.body?.error);
         assert.equal(qed.body?.result?.theorem, "True");
         assert.match(qed.body?.result?.proof ?? "", /true/);
+    }
+
+    {
+        const config = {
+            ...minimalTTConfig,
+            unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))]
+        };
+        const options = {
+            disableMultipleApply: false,
+            disableDestructConds: false,
+            disableDestructEq: false
+        };
+        const target = "Πa:U0,Πb:U0,Πc:U0,(a ≃ b)→(b ≃ c)→((a ≃ c))";
+        const prefix = [
+            "intro a",
+            "intro b",
+            "intro c",
+            "expand eqv",
+            "intro ab",
+            "intro bc"
+        ];
+        const configured = await rpc(first, "assist", {
+            kind: "configure",
+            config,
+            definitions: []
+        });
+        assert.equal(configured.body?.ok, true, server.output());
+
+        let result = await rpc(first, "assist", { kind: "start", target, options });
+        assert.equal(result.body?.ok, true, result.body?.error ?? server.output());
+        for (const command of prefix) {
+            result = await rpc(first, "assist", { kind: "apply", command });
+            assert.equal(
+                result.body?.ok,
+                true,
+                command + ": " + (result.body?.error ?? server.output())
+            );
+        }
+        assert.equal(result.body?.result?.goals?.length, 1);
+        assert.equal(result.body?.result?.history?.at(-1), "intro bc");
+
+        // The reported stale-binder failure can surface after further work and
+        // undo. Exercise that exact path through the isolated process.
+        for (const command of [
+            "ex",
+            "intro f",
+            "exact (pr0 bc) ((pr0 ab) f)",
+            "case",
+            "ex"
+        ]) {
+            result = await rpc(first, "assist", { kind: "apply", command });
+            assert.equal(
+                result.body?.ok,
+                true,
+                command + ": " + (result.body?.error ?? server.output())
+            );
+        }
+        result = await rpc(first, "assist", { kind: "undo" });
+        assert.equal(result.body?.ok, true, result.body?.error ?? server.output());
+        result = await rpc(first, "assist", { kind: "undo" });
+        assert.equal(result.body?.ok, true, result.body?.error ?? server.output());
+        result = await rpc(first, "assist", { kind: "apply", command: "case" });
+        assert.equal(result.body?.ok, true, result.body?.error ?? server.output());
+
+        const replayed = await rpc(first, "assist", {
+            kind: "start",
+            target,
+            options,
+            history: prefix
+        });
+        assert.equal(replayed.body?.ok, true, replayed.body?.error ?? server.output());
+        assert.equal(replayed.body?.result?.goals?.length, 1);
+        assert.equal(replayed.body?.result?.history?.at(-1), "intro bc");
     }
 
     {

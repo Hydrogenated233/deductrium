@@ -78,6 +78,7 @@ const tests = [
     "./tt-save-restore-validation.test.mjs",
     "./tt-bug1-cache-revalidation.test.mjs",
     "./save-load-overwrite.test.mjs",
+    "./save-autosave-debounce.test.mjs",
     "./tt-persistent-worker-session.test.mjs",
     "./tt-gui-worker-incremental.test.mjs",
     "./tt-worker-mutation-queue.test.mjs",
@@ -93,6 +94,8 @@ const tests = [
     "./tt-assist-destruct-z.test.mjs",
     "./tt-assist-nested-destruct.test.mjs",
     "./tt-assist-expand-eqv.test.mjs",
+    "./tt-assist-destruct-sum.test.mjs",
+    "./tt-assist-history-replay.test.mjs",
     "./tt-assist-rw-semantic-cache.test.mjs",
     "./tt-assist-cacheless-user-definition.test.mjs",
     "./tt-assist-survival-save-rw.test.mjs",
@@ -101,6 +104,7 @@ const tests = [
     "./tt-assist-explicit-hole-arguments.test.mjs",
     "./tt-proof-term-wrapping.test.mjs",
     "./tt-gate-fuzzy-matching.test.mjs",
+    "./tt-hott-context-cache.test.mjs",
     "./tt-assist-multiple-apply.test.mjs",
     "./tt-factorial2-puzzle.test.mjs"
 ];
