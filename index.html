@@ -292,9 +292,10 @@
                     <summary>策略介绍</summary>
                     <div class="fs-proof-help-content">
                         <p><code>intro</code> 展开蕴含或全称前提；<code>exact h</code> 用假设、定理或无前件规则完成目标；<code>apply h</code> 应用来源并生成前件目标。</p>
-                            <p><code>assumption</code> 自动使用与当前目标相同的局部假设；<code>constructor</code> 构造合取 <code>A&amp;B</code> 或等价 <code>A&lt;&gt;B</code>；<code>left</code>/<code>right</code> 选择析取目标的一侧；<code>symm</code> 交换等式/等价两端。</p>
+                            <p><code>assumption</code> 自动使用与当前目标相同的局部假设；<code>constructor</code> 构造合取 <code>A&amp;B</code> 或等价 <code>A&lt;&gt;B</code>；<code>left</code>/<code>right</code> 选择析取目标的一侧；<code>symm</code> 交换等式/等价两端；<code>rfl</code> 证明两端定义相同的等式。</p>
                             <p><code>contradiction</code> 使用同时存在的 <code>P</code> 与 <code>~P</code>；<code>by_contra h</code> 加入反设 <code>h:~P</code>；<code>contrapose</code> 把 <code>A&gt;B</code> 改为 <code>~B&gt;~A</code>。</p>
                             <p><code>have h : P</code> 声明待证明事实，<code>have h := f a b</code> 实例化全称命题。依赖的内置规则未解锁时，系统只会使用当前作用域中结构等价的用户规则。</p>
+                            <p><code>obtain &lt;h1,h2&gt; := h</code> 拆分合取或等价假设；<code>obtain h1 | h2 := h</code> 对析取假设建立两个分支；<code>revert h</code> 把命题假设重新放回蕴含目标。</p>
                         <p><code>tauto</code> 在完备性规则已解锁时自动证明纯命题目标；完成所有目标后使用 <code>qed</code>。</p>
                     </div>
                 </details>

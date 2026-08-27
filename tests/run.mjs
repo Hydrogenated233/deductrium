@@ -6,6 +6,7 @@ const tests = [
     "./fs-proof-assistant.test.mjs",
     "./fs-proof-assistant-have.test.mjs",
     "./fs-proof-assistant-strategies.test.mjs",
+    "./fs-proof-assistant-obtain-revert.test.mjs",
     "./fs-proof-assistant-help.test.mjs",
     "./proof-assistant-text-mode.test.mjs",
     "./fs-proof-assistant-step.test.mjs",

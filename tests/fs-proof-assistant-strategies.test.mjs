@@ -214,4 +214,30 @@ const lockedRules = ["mp", "a1", "a2"];
     assert.throws(() => wrongTarget.apply("contrapose"), /只能作用于蕴含目标/);
 }
 
+// rfl is offered only for reflexive equality and follows the same unlock or
+// structurally equivalent user-rule policy as the other convenience tactics.
+{
+    const fs = initFormalSystem(false).fs;
+    const locked = new InferenceProofAssistant(fs, "A=A", { ruleNames: lockedRules });
+    assert.equal(locked.recommendations().includes("rfl"), false);
+    assert.throws(() => locked.apply("rfl"), /需要解锁|等价推理规则/);
+
+    fs.addDeduction("myRfl", parser.parse("⊢$0=$0"), "test");
+    const assistant = new InferenceProofAssistant(fs, "A=A", {
+        ruleNames: [...lockedRules, "myRfl"]
+    });
+    assert.ok(assistant.recommendations().includes("rfl"));
+    assistant.apply("rfl");
+    assert.equal(assistant.snapshot().complete, true);
+    assistant.qed();
+    fs.expandMacroWithProp(0);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A=A");
+
+    const mismatch = new InferenceProofAssistant(fs, "A=B", {
+        ruleNames: [...lockedRules, "myRfl"]
+    });
+    assert.equal(mismatch.recommendations().includes("rfl"), false);
+    assert.throws(() => mismatch.apply("rfl"), /只能证明两端定义相同/);
+}
+
 console.log("inference proof-assistant strategy regression passed");

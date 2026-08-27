@@ -9,7 +9,7 @@ assert.ok(inferenceHelp, "the inference proof assistant must expose collapsible 
 assert.match(inferenceHelp[0], /<summary>策略介绍<\/summary>/);
 assert.doesNotMatch(inferenceHelp[0], /<details[^>]*\bopen(?:\s|=|>)/,
     "inference help should start collapsed");
-for (const tactic of ["intro", "exact", "apply", "assumption", "constructor", "left", "right", "symm", "contradiction", "by_contra", "contrapose", "have", "qed"]) {
+for (const tactic of ["intro", "exact", "apply", "assumption", "constructor", "left", "right", "symm", "rfl", "contradiction", "by_contra", "contrapose", "have", "obtain", "revert", "qed"]) {
     assert.match(inferenceHelp[0], new RegExp(`<code>${tactic}(?:</code>|\\s)`),
         `inference help should describe ${tactic}`);
 }

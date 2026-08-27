@@ -133,6 +133,21 @@ export class InferenceProofAssistant {
         for (const hypothesis of node.hypotheses) {
             if (hypothesis.proposition && this.isHypothesisAvailable(hypothesis)) {
                 addPropositionSource(hypothesis.name, hypothesis.proposition, true);
+                add(`revert ${hypothesis.name}`);
+                if (hypothesis.proposition.type === "sym" && ["&", "<>"].includes(hypothesis.proposition.name)
+                    && hypothesis.proposition.nodes?.length === 2) {
+                    const rules = hypothesis.proposition.name === "&" ? [".&1", ".&2"] : [".<>1", ".<>2"];
+                    if (rules.every(rule => this.resolveStrategyRule(rule, availableRuleNames))) {
+                        const names = this.nextHypothesisNames(node, 2);
+                        add(`obtain <${names[0]},${names[1]}> := ${hypothesis.name}`);
+                    }
+                }
+                if (hypothesis.proposition.type === "sym" && hypothesis.proposition.name === "|"
+                    && hypothesis.proposition.nodes?.length === 2
+                    && this.resolveStrategyRule(".|m", availableRuleNames)) {
+                    const names = this.nextHypothesisNames(node, 2);
+                    add(`obtain ${names[0]} | ${names[1]} := ${hypothesis.name}`);
+                }
             }
         }
         if (this.findMatchingHypothesis(node))
@@ -150,6 +165,9 @@ export class InferenceProofAssistant {
         if (this.isSymmetryTarget(node.target)
             && this.resolveStrategyRule(node.target.name === "=" ? ".=s" : ".<>s", availableRuleNames)) {
             add("symm");
+        }
+        if (this.isReflexiveEqualityTarget(node.target) && this.resolveStrategyRule("a7", availableRuleNames)) {
+            add("rfl");
         }
         if (this.findContradictionPair(node) && this.resolveStrategyRule(".m", availableRuleNames)) {
             add("contradiction");
@@ -517,6 +535,7 @@ export class InferenceProofAssistant {
             haveSource: this.cloneSource(node.haveSource),
             haveArguments: node.haveArguments?.map(value => astmgr.clone(value)),
             haveProposition: node.haveProposition ? astmgr.clone(node.haveProposition) : undefined,
+            revertSource: this.cloneSource(node.revertSource),
             introBindings: this.cloneHypotheses(node.introBindings)
         };
     }
@@ -696,11 +715,14 @@ export class InferenceProofAssistant {
             case "exact": return this.exact(args);
             case "apply": return this.applyRule(args);
             case "have": return this.have(args);
+            case "obtain": return this.obtain(args);
+            case "revert": return this.revert(args);
             case "assumption": return this.assumption(args);
             case "constructor": return this.constructorStrategy(args);
             case "left": return this.disjunctionStrategy("left", args);
             case "right": return this.disjunctionStrategy("right", args);
             case "symm": return this.symm(args);
+            case "rfl": return this.rfl(args);
             case "contradiction": return this.contradiction(args);
             case "by_contra": return this.byContra(args);
             case "contrapose": return this.contrapose(args);
@@ -710,8 +732,10 @@ export class InferenceProofAssistant {
         }
     }
     intro(argument) {
-        const node = this.requireCurrentNode();
         const name = argument.trim();
+        this.introNode(this.requireCurrentNode(), name);
+    }
+    introNode(node, name) {
         if (name && !/^[^\s,]+$/.test(name))
             throw new Error(TR("intro名称无效"));
         const target = node.target;
@@ -832,6 +856,19 @@ export class InferenceProofAssistant {
         if (!rule)
             throw new Error(TR("symm需要解锁对称规则或提供等价推理规则"));
         this.applyRule(rule.name);
+    }
+    /** Close a reflexive equality through an unlocked/equivalent a7 rule. */
+    rfl(argument) {
+        if (argument.trim())
+            throw new Error(TR("rfl不接受参数"));
+        const node = this.requireCurrentNode();
+        if (!this.isReflexiveEqualityTarget(node.target)) {
+            throw new Error(TR("rfl只能证明两端定义相同的等式"));
+        }
+        const rule = this.resolveStrategyRule("a7");
+        if (!rule)
+            throw new Error(TR("rfl需要解锁等式自反规则或提供等价推理规则"));
+        this.exact(rule.name);
     }
     /** Derive any target from a matching proposition/negation pair. */
     contradiction(argument) {
@@ -1028,6 +1065,116 @@ export class InferenceProofAssistant {
         node.kind = "have";
         node.haveName = name;
         node.children = [subgoal, continuation];
+    }
+    /** Split conjunction/equivalence facts into two materializable local facts. */
+    obtain(argument) {
+        const branchMatch = /^([^\s|,:=]+)\s*\|\s*([^\s|,:=]+)\s*:=\s*([\s\S]+)$/.exec(argument.trim());
+        if (branchMatch) {
+            this.obtainDisjunction(branchMatch[1], branchMatch[2], branchMatch[3].trim());
+            return;
+        }
+        const match = /^(?:<|⟨)\s*([^,\s<>⟩]+)\s*,\s*([^,\s<>⟩]+)\s*(?:>|⟩)\s*:=\s*([\s\S]+)$/.exec(argument.trim());
+        if (!match)
+            throw new Error(TR("obtain语法应为 obtain <h1,h2> := h"));
+        const [, firstName, secondName, sourceTextValue] = match;
+        const sourceText = sourceTextValue.trim();
+        if (!sourceText)
+            throw new Error(TR("obtain需要一个假设或页面命题来源"));
+        if (firstName === secondName)
+            throw new Error(TR("obtain生成的两个假设名称不能相同"));
+        const node = this.requireCurrentNode();
+        this.assertUniqueHypothesis(node, firstName);
+        this.assertUniqueHypothesis(node, secondName);
+        const source = this.resolveSource(sourceText, node);
+        if (source.kind === "rule")
+            throw new Error(TR("obtain只支持假设或页面命题来源"));
+        const proposition = this.getSourceProposition(source, node);
+        if (proposition.type !== "sym" || proposition.nodes?.length !== 2) {
+            throw new Error(TR("obtain来源必须是合取、等价或析取命题"));
+        }
+        let facts;
+        if (proposition.name === "&") {
+            facts = [[proposition.nodes[0], ".&1"], [proposition.nodes[1], ".&2"]];
+        }
+        else if (proposition.name === "<>") {
+            facts = [
+                [parser.parse(`${parser.stringifyTight(proposition.nodes[0])}>${parser.stringifyTight(proposition.nodes[1])}`), ".<>1"],
+                [parser.parse(`${parser.stringifyTight(proposition.nodes[1])}>${parser.stringifyTight(proposition.nodes[0])}`), ".<>2"]
+            ];
+        }
+        else if (proposition.name === "|") {
+            throw new Error(TR("析取obtain语法应为 obtain h1 | h2 := h"));
+        }
+        else {
+            throw new Error(TR("obtain来源必须是合取、等价或析取命题"));
+        }
+        for (const [index, [fact, canonicalRule]] of facts.entries()) {
+            const rule = this.resolveStrategyRule(canonicalRule);
+            if (!rule)
+                throw new Error(TR("obtain需要解锁消去规则或提供等价推理规则：") + canonicalRule);
+            const current = this.requireCurrentNode();
+            this.createHaveGoal(current, index === 0 ? firstName : secondName, astmgr.clone(fact));
+            this.applyRule(rule.name);
+            this.exact(sourceText);
+        }
+    }
+    obtainDisjunction(firstName, secondName, sourceText) {
+        if (!sourceText)
+            throw new Error(TR("obtain需要一个假设或页面命题来源"));
+        const node = this.requireCurrentNode();
+        this.assertUniqueHypothesis(node, firstName);
+        this.assertUniqueHypothesis(node, secondName);
+        const source = this.resolveSource(sourceText, node);
+        if (source.kind === "rule")
+            throw new Error(TR("obtain只支持假设或页面命题来源"));
+        const proposition = this.getSourceProposition(source, node);
+        if (proposition.type !== "sym" || proposition.name !== "|" || proposition.nodes?.length !== 2) {
+            throw new Error(TR("分支obtain来源必须是析取命题"));
+        }
+        const rule = this.resolveStrategyRule(".|m");
+        if (!rule)
+            throw new Error(TR("obtain需要解锁析取消去规则或提供等价推理规则：.|m"));
+        const leftMeta = rule.metavariables.get("$0") ?? "$0";
+        const rightMeta = rule.metavariables.get("$1") ?? "$1";
+        const resultMeta = rule.metavariables.get("$2") ?? "$2";
+        const left = parser.stringifyTight(proposition.nodes[0]);
+        const right = parser.stringifyTight(proposition.nodes[1]);
+        const result = parser.stringifyTight(node.target);
+        this.applyRule(`${rule.name} ${leftMeta}=${left} ${rightMeta}=${right} ${resultMeta}=${result}`);
+        if (node.kind !== "apply" || node.children.length !== 3 || node.ruleConditionCount !== 2) {
+            throw new Error(TR("析取消去规则没有生成预期的两个分支和来源前提"));
+        }
+        this.introNode(node.children[0], firstName);
+        this.introNode(node.children[1], secondName);
+        const sourceGoal = node.children[2];
+        this.assertSameProposition(this.getSourceProposition(source, sourceGoal), sourceGoal.target);
+        sourceGoal.kind = "exact";
+        sourceGoal.source = this.cloneSource(source);
+        sourceGoal.children = [];
+    }
+    /** Move a proposition hypothesis back into the current implication target. */
+    revert(argument) {
+        const name = argument.trim();
+        if (!name || !/^[^\s,]+$/.test(name))
+            throw new Error(TR("revert需要一个假设名称"));
+        const node = this.requireCurrentNode();
+        const hypothesis = node.hypotheses.find(item => item.name === name);
+        if (!hypothesis)
+            throw new Error(TR("未找到要恢复的假设：") + name);
+        if (!hypothesis.proposition)
+            throw new Error(TR("revert暂不支持全称变量：") + name);
+        if (hypothesis.kind === "have" && !this.isHypothesisAvailable(hypothesis)) {
+            throw new Error(TR("该假设尚未完成"));
+        }
+        const childTarget = {
+            type: "sym",
+            name: ">",
+            nodes: [astmgr.clone(hypothesis.proposition), astmgr.clone(node.target)]
+        };
+        const child = this.makeNode(childTarget, this.cloneHypotheses(node.hypotheses.filter(item => item.name !== name)));
+        node.kind = "revert";
+        node.revertSource = { kind: "hypothesis", name, nodeId: hypothesis.sourceNodeId };
+        node.children = [child];
     }
     splitApplicationTerms(value) {
         const terms = [];
@@ -1271,6 +1418,17 @@ export class InferenceProofAssistant {
         return target?.type === "sym" && (target.name === "=" || target.name === "<>")
             && target.nodes?.length === 2;
     }
+    isReflexiveEqualityTarget(target) {
+        if (target?.type !== "sym" || target.name !== "=" || target.nodes?.length !== 2)
+            return false;
+        try {
+            this.assertSameProposition(target.nodes[0], target.nodes[1]);
+            return true;
+        }
+        catch {
+            return false;
+        }
+    }
     resolveStrategyRule(name, available = this.availableRuleNames) {
         const direct = this.fs.deductions[name];
         if ((!available || available.has(name)) && direct) {
@@ -1278,7 +1436,8 @@ export class InferenceProofAssistant {
                 name,
                 metavariables: new Map([
                     ["$0", "$0"],
-                    ["$1", "$1"]
+                    ["$1", "$1"],
+                    ["$2", "$2"]
                 ])
             };
         }
@@ -1312,10 +1471,25 @@ export class InferenceProofAssistant {
                 return { conditions: [parser.parse("$0")], conclusion: parser.parse("$0|$1") };
             case ".|2":
                 return { conditions: [parser.parse("$1")], conclusion: parser.parse("$0|$1") };
+            case ".&1":
+                return { conditions: [parser.parse("$0&$1")], conclusion: parser.parse("$0") };
+            case ".&2":
+                return { conditions: [parser.parse("$0&$1")], conclusion: parser.parse("$1") };
+            case ".<>1":
+                return { conditions: [], conclusion: parser.parse("($0<>$1)>($0>$1)") };
+            case ".<>2":
+                return { conditions: [], conclusion: parser.parse("($0<>$1)>($1>$0)") };
+            case ".|m":
+                return {
+                    conditions: [parser.parse("$0>$2"), parser.parse("$1>$2")],
+                    conclusion: parser.parse("($0|$1)>$2")
+                };
             case ".mn":
                 return { conditions: [], conclusion: parser.parse("(~$0>$0)>$0") };
             case "a3":
                 return { conditions: [], conclusion: parser.parse("(~$1>~$0)>($0>$1)") };
+            case "a7":
+                return { conditions: [], conclusion: parser.parse("$0=$0") };
             default:
                 return undefined;
         }
@@ -1726,6 +1900,18 @@ export class InferenceProofAssistant {
             if (!node.hypotheses.some(h => h.name === name))
                 return name;
         }
+    }
+    nextHypothesisNames(node, count) {
+        const used = new Set(node.hypotheses.map(hypothesis => hypothesis.name));
+        const names = [];
+        for (let index = 1; names.length < count; index++) {
+            const name = `h${index}`;
+            if (used.has(name))
+                continue;
+            used.add(name);
+            names.push(name);
+        }
+        return names;
     }
     assertUniqueHypothesis(node, name) {
         if (node.hypotheses.some(h => h.name === name))
@@ -2160,6 +2346,27 @@ export class InferenceProofAssistant {
                     }
                     return result;
                 };
+                if (node.kind === "revert") {
+                    if (node.children.length !== 1 || !node.revertSource) {
+                        throw new Error(TR("revert证明节点结构无效"));
+                    }
+                    const implicationResult = emit(node.children[0], hypothesisRows);
+                    const implication = implicationResult.proposition;
+                    if (implication.type !== "sym" || implication.name !== ">" || implication.nodes?.length !== 2) {
+                        throw new Error(TR("revert子目标没有生成蕴含证明"));
+                    }
+                    if (node.revertSource.kind === "rule")
+                        throw new Error(TR("revert证明来源不能是推理规则"));
+                    const sourceIndex = sourceAbsoluteRow(node.revertSource, hypothesisRows);
+                    this.assertSameProposition(implication.nodes[0], propositionAt(sourceIndex).value);
+                    this.assertSameProposition(implication.nodes[1], node.target);
+                    const result = appendDerived(node.target, {
+                        deductionIdx: "mp",
+                        conditionIdxs: [absolute(implicationResult.index), sourceIndex],
+                        replaceValues: []
+                    });
+                    return finish(result);
+                }
                 if (node.kind === "have") {
                     const first = emit(node.children[0], hypothesisRows);
                     const local = node.children[1].hypotheses.find(h => h.kind === "have" && h.sourceNodeId === node.children[0].id);
