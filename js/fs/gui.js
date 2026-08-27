@@ -992,6 +992,12 @@ export class FSGui {
                     return;
                 input.value = command;
                 input.focus();
+                const placeholder = command.indexOf("??");
+                if (placeholder >= 0) {
+                    input.selectionStart = placeholder;
+                    input.selectionEnd = placeholder + 2;
+                    return;
+                }
                 this.applyInferenceProofCommand();
             });
             container.appendChild(button);

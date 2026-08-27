@@ -54,6 +54,9 @@ assert.match(fsGui, /event\.key === "Enter" && event\.ctrlKey/);
 assert.match(fsGui, /deductrium-fs-proof-text-mode/);
 assert.match(ttGui, /renderTacticTextRecommendations/);
 assert.match(fsGui, /renderInferenceProofTextRecommendations/);
+assert.match(fsGui, /command\.indexOf\("\?\?"\)/,
+    "inference recommendation placeholders must be inserted without immediate execution");
+assert.match(fsGui, /input\.selectionStart = placeholder/);
 assert.match(ttGui, /createTextNode\("  \|  "\)/);
 assert.match(fsGui, /createTextNode\("  \|  "\)/);
 

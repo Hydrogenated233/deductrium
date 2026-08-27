@@ -133,6 +133,14 @@ export class InferenceProofAssistant {
         for (const hypothesis of node.hypotheses) {
             if (hypothesis.proposition && this.isHypothesisAvailable(hypothesis)) {
                 addPropositionSource(hypothesis.name, hypothesis.proposition, true);
+                if (this.canRewriteTarget(node.target, hypothesis.proposition, false, availableRuleNames)) {
+                    add(`rw ${hypothesis.name}`);
+                }
+                const simplifyDirection = this.simplifyDirection(hypothesis.proposition);
+                if (simplifyDirection !== null
+                    && this.canRewriteTarget(node.target, hypothesis.proposition, simplifyDirection, availableRuleNames)) {
+                    add("simp");
+                }
                 add(`revert ${hypothesis.name}`);
                 if (hypothesis.proposition.type === "sym" && ["&", "<>"].includes(hypothesis.proposition.name)
                     && hypothesis.proposition.nodes?.length === 2) {
@@ -174,12 +182,23 @@ export class InferenceProofAssistant {
         }
         if (this.resolveStrategyRule(".mn", availableRuleNames))
             add("by_contra");
+        if (this.resolveStrategyRule(".m2", availableRuleNames))
+            add("by_cases h : ??");
         if (node.target.type === "sym" && node.target.name === ">" && node.target.nodes?.length === 2
             && this.resolveStrategyRule("a3", availableRuleNames)) {
             add("contrapose");
         }
         const page = this.fs.inferencePages.page(this.pageId);
-        page?.propositions.forEach((proposition, index) => addPropositionSource(`p${index}`, proposition.value, false));
+        page?.propositions.forEach((proposition, index) => {
+            addPropositionSource(`p${index}`, proposition.value, false);
+            if (this.canRewriteTarget(node.target, proposition.value, false, availableRuleNames))
+                add(`rw p${index}`);
+            const simplifyDirection = this.simplifyDirection(proposition.value);
+            if (simplifyDirection !== null
+                && this.canRewriteTarget(node.target, proposition.value, simplifyDirection, availableRuleNames)) {
+                add("simp");
+            }
+        });
         for (const name of options.ruleNames ?? []) {
             const deduction = this.fs.deductions[name];
             if (deduction && !deduction.conditions.length && this.syntaxMayMatch(deduction.conclusion, node.target)) {
@@ -723,8 +742,12 @@ export class InferenceProofAssistant {
             case "right": return this.disjunctionStrategy("right", args);
             case "symm": return this.symm(args);
             case "rfl": return this.rfl(args);
+            case "rw": return this.rewrite(args);
+            case "nth_rw": return this.nthRewrite(args);
+            case "simp": return this.simplify(args);
             case "contradiction": return this.contradiction(args);
             case "by_contra": return this.byContra(args);
+            case "by_cases": return this.byCases(args);
             case "contrapose": return this.contrapose(args);
             case "tauto": return this.tauto(args);
             case "qed": throw new Error(TR("qed请使用结束证明按钮"));
@@ -870,6 +893,244 @@ export class InferenceProofAssistant {
             throw new Error(TR("rfl需要解锁等式自反规则或提供等价推理规则"));
         this.exact(rule.name);
     }
+    /** Rewrite every matching target occurrence using one or more equalities. */
+    rewrite(argument) {
+        const text = argument.trim();
+        if (!text)
+            throw new Error(TR("rw需要一个等式来源"));
+        if (/\s+at\s+/i.test(text))
+            throw new Error(TR("rw at 假设改写尚未支持"));
+        const sourceList = text.startsWith("[") && text.endsWith("]")
+            ? text.slice(1, -1).split(",").map(value => value.trim()).filter(Boolean)
+            : [text];
+        if (!sourceList.length)
+            throw new Error(TR("rw等式列表为空"));
+        for (const value of sourceList) {
+            const spec = this.parseRewriteSource(value);
+            this.rewriteWithSource(spec.source, spec.reverse, null);
+        }
+    }
+    /** Rewrite one left-to-right occurrence, numbered from one. */
+    nthRewrite(argument) {
+        const match = /^([1-9][0-9]*)\s+([\s\S]+)$/.exec(argument.trim());
+        if (!match)
+            throw new Error(TR("nth_rw语法应为 nth_rw 序号 等式来源"));
+        const spec = this.parseRewriteSource(match[2].trim().replace(/^\[(.*)\]$/, "$1"));
+        this.rewriteWithSource(spec.source, spec.reverse, Number(match[1]));
+    }
+    /** Normalize the target with local/page equalities in a terminating order. */
+    simplify(argument) {
+        const text = argument.trim();
+        if (/\bat\s+/i.test(text))
+            throw new Error(TR("simp at 假设化简尚未支持"));
+        let only = false;
+        let specified = [];
+        if (text) {
+            const match = /^(only\s+)?\[([^\]]*)\]$/.exec(text);
+            if (!match)
+                throw new Error(TR("simp语法应为 simp、simp [h,g] 或 simp only [h,g]"));
+            only = !!match[1];
+            specified = match[2].split(",").map(value => value.trim()).filter(Boolean);
+        }
+        const node = this.requireCurrentNode();
+        const names = [];
+        const addName = (name) => {
+            if (!names.includes(name))
+                names.push(name);
+        };
+        if (!only) {
+            for (const hypothesis of node.hypotheses) {
+                if (hypothesis.proposition && this.isHypothesisAvailable(hypothesis)
+                    && this.simplifyDirection(hypothesis.proposition) !== null)
+                    addName(hypothesis.name);
+            }
+            this.fs.inferencePages.page(this.pageId)?.propositions.forEach((proposition, index) => {
+                if (this.simplifyDirection(proposition.value) !== null)
+                    addName(`p${index}`);
+            });
+        }
+        specified.forEach(addName);
+        const sources = names.map(name => {
+            const current = this.requireCurrentNode();
+            const source = this.resolveSource(name, current);
+            if (source.kind === "rule") {
+                throw new Error(TR("simp目前只支持假设或页面等式；请先用have实例化推理规则"));
+            }
+            const equality = this.getSourceProposition(source, current);
+            const reverse = this.simplifyDirection(equality);
+            if (reverse === null)
+                throw new Error(TR("simp来源必须是两端不同的等式：") + name);
+            return { name, reverse };
+        });
+        let changed = false;
+        const maxRounds = 64;
+        for (let round = 0; round < maxRounds; round++) {
+            let roundChanged = false;
+            for (const source of sources) {
+                const current = this.requireCurrentNode();
+                const resolved = this.resolveSource(source.name, current);
+                const equality = this.getSourceProposition(resolved, current);
+                const left = source.reverse ? equality.nodes?.[1] : equality.nodes?.[0];
+                const right = source.reverse ? equality.nodes?.[0] : equality.nodes?.[1];
+                if (!left || !right)
+                    continue;
+                try {
+                    if (!this.planRewrite(current.target, left, right, null).length)
+                        continue;
+                }
+                catch {
+                    continue;
+                }
+                this.rewriteWithSource(source.name, source.reverse, null);
+                changed = true;
+                roundChanged = true;
+            }
+            if (!roundChanged)
+                break;
+            if (round === maxRounds - 1)
+                throw new Error(TR("simp达到最大化简轮次，可能存在循环规则"));
+        }
+        const current = this.requireCurrentNode();
+        if (this.isReflexiveEqualityTarget(current.target) && this.resolveStrategyRule("a7")) {
+            this.rfl("");
+            return;
+        }
+        if (!changed && sources.length)
+            return;
+    }
+    parseRewriteSource(value) {
+        let source = value.trim();
+        let reverse = false;
+        if (source.startsWith("←")) {
+            reverse = true;
+            source = source.slice(1).trim();
+        }
+        else if (source.startsWith("<-")) {
+            reverse = true;
+            source = source.slice(2).trim();
+        }
+        if (!source || /\s/.test(source))
+            throw new Error(TR("rw等式来源应为一个假设或页面命题名称"));
+        return { source, reverse };
+    }
+    /** True means use the equality right-to-left; null means it is not a simp rule. */
+    simplifyDirection(equality) {
+        if (equality.type !== "sym" || equality.name !== "=" || equality.nodes?.length !== 2)
+            return null;
+        const [left, right] = equality.nodes;
+        if (astmgr.equal(left, right))
+            return null;
+        const leftSize = this.astSize(left);
+        const rightSize = this.astSize(right);
+        if (leftSize !== rightSize)
+            return rightSize > leftSize;
+        const leftText = parser.stringifyTight(left);
+        const rightText = parser.stringifyTight(right);
+        return rightText > leftText;
+    }
+    astSize(ast) {
+        return 1 + (ast.nodes?.reduce((total, child) => total + this.astSize(child), 0) ?? 0);
+    }
+    canRewriteTarget(target, equality, reverse, available = this.availableRuleNames) {
+        if (!this.resolveStrategyRule("a8", available))
+            return false;
+        if (!reverse && !this.resolveStrategyRule(".=s", available))
+            return false;
+        if (equality.type !== "sym" || equality.name !== "=" || equality.nodes?.length !== 2)
+            return false;
+        const source = reverse ? equality.nodes[1] : equality.nodes[0];
+        const destination = reverse ? equality.nodes[0] : equality.nodes[1];
+        try {
+            return this.planRewrite(target, source, destination, null).length > 0;
+        }
+        catch {
+            return false;
+        }
+    }
+    rewriteWithSource(sourceText, reverse, nth) {
+        const node = this.requireCurrentNode();
+        const source = this.resolveSource(sourceText, node);
+        if (source.kind === "rule") {
+            throw new Error(TR("rw目前只支持假设或页面等式；请先用have实例化推理规则"));
+        }
+        const equality = this.getSourceProposition(source, node);
+        if (equality.type !== "sym" || equality.name !== "=" || equality.nodes?.length !== 2) {
+            throw new Error(TR("rw来源必须是等式"));
+        }
+        const sourceTerm = reverse ? equality.nodes[1] : equality.nodes[0];
+        const destinationTerm = reverse ? equality.nodes[0] : equality.nodes[1];
+        const substitution = this.resolveStrategyRule("a8");
+        if (!substitution)
+            throw new Error(TR("rw需要解锁等式替换规则或提供等价推理规则"));
+        const symmetry = reverse ? undefined : this.resolveStrategyRule(".=s");
+        if (!reverse && !symmetry)
+            throw new Error(TR("rw正向改写需要解锁等式对称规则或提供等价推理规则"));
+        const steps = this.planRewrite(node.target, sourceTerm, destinationTerm, nth);
+        for (const step of steps) {
+            const current = this.requireCurrentNode();
+            this.assertSameProposition(current.target, step.before);
+            const srcMeta = substitution.metavariables.get("$0") ?? "$0";
+            const dstMeta = substitution.metavariables.get("$1") ?? "$1";
+            const propositionMeta = substitution.metavariables.get("$2") ?? "$2";
+            const nthMeta = substitution.metavariables.get("$3") ?? "$3";
+            const inverseSource = parser.stringifyTight(destinationTerm);
+            const inverseDestination = parser.stringifyTight(sourceTerm);
+            const rewrittenTarget = parser.stringifyTight(step.after);
+            this.applyRule(`${substitution.name} ${srcMeta}=${inverseSource} ${dstMeta}=${inverseDestination} `
+                + `${propositionMeta}=${rewrittenTarget} ${nthMeta}=${step.inverseNth}`);
+            if (reverse) {
+                this.exact(sourceText);
+            }
+            else {
+                this.applyRule(symmetry.name);
+                this.exact(sourceText);
+            }
+            this.assertSameProposition(this.requireCurrentNode().target, step.after);
+        }
+    }
+    planRewrite(target, source, destination, nth) {
+        if (astmgr.equal(source, destination))
+            throw new Error(TR("rw等式两端相同，没有可执行的改写"));
+        const probe = astmgr.clone(target);
+        const allMatches = this.fs.assert.getSubAstMatchTimesAndReplace(probe, astmgr.clone(source), astmgr.clone(destination), -1, [], [], false);
+        if (allMatches === false)
+            throw new Error(TR("rw无法确认替换是否会捕获变量"));
+        if (!allMatches.length)
+            throw new Error(TR("当前目标中未找到可改写项"));
+        if (nth !== null && nth > allMatches.length) {
+            throw new Error(TR("nth_rw序号超出匹配数量：") + allMatches.length);
+        }
+        const indexes = nth === null
+            ? Array.from({ length: allMatches.length }, (_, index) => allMatches.length - index - 1)
+            : [nth - 1];
+        let current = astmgr.clone(target);
+        const steps = [];
+        for (const index of indexes) {
+            const before = astmgr.clone(current);
+            const after = astmgr.clone(current);
+            const matches = this.fs.assert.getSubAstMatchTimesAndReplace(after, astmgr.clone(source), astmgr.clone(destination), index, [], [], false);
+            if (matches === false || matches.length <= index || astmgr.equal(before, after)) {
+                throw new Error(TR("rw未能替换指定出现位置"));
+            }
+            const inverseNth = this.findInverseRewriteOccurrence(before, after, destination, source);
+            steps.push({ before, after, inverseNth });
+            current = after;
+        }
+        return steps;
+    }
+    findInverseRewriteOccurrence(before, after, source, destination) {
+        const probe = astmgr.clone(after);
+        const matches = this.fs.assert.getSubAstMatchTimesAndReplace(probe, astmgr.clone(source), astmgr.clone(destination), -1, [], [], false);
+        if (matches === false)
+            throw new Error(TR("rw无法构造反向替换证明"));
+        for (let index = 0; index < matches.length; index++) {
+            const candidate = astmgr.clone(after);
+            const result = this.fs.assert.getSubAstMatchTimesAndReplace(candidate, astmgr.clone(source), astmgr.clone(destination), index, [], [], false);
+            if (result !== false && result.length > index && astmgr.equal(candidate, before))
+                return index + 1;
+        }
+        throw new Error(TR("rw无法定位可还原原目标的替换位置"));
+    }
     /** Derive any target from a matching proposition/negation pair. */
     contradiction(argument) {
         if (argument.trim())
@@ -908,6 +1169,28 @@ export class InferenceProofAssistant {
             throw new Error(TR("反证规则生成的目标与原目标不一致"));
         }
     }
+    /** Split the current target into P and ~P branches through case analysis. */
+    byCases(argument) {
+        const match = /^([^\s,:=]+)\s*:\s*([\s\S]+)$/.exec(argument.trim());
+        if (!match)
+            throw new Error(TR("by_cases语法应为 by_cases h : P"));
+        const name = match[1];
+        const proposition = this.parseProposition(match[2]);
+        const node = this.requireCurrentNode();
+        this.assertUniqueHypothesis(node, name);
+        const rule = this.resolveStrategyRule(".m2");
+        if (!rule)
+            throw new Error(TR("by_cases需要解锁分类讨论规则或提供等价推理规则"));
+        const propositionMeta = rule.metavariables.get("$0") ?? "$0";
+        const targetMeta = rule.metavariables.get("$1") ?? "$1";
+        this.applyRule(`${rule.name} ${propositionMeta}=${parser.stringifyTight(proposition)} `
+            + `${targetMeta}=${parser.stringifyTight(node.target)}`);
+        if (node.kind !== "apply" || node.children.length !== 2 || node.ruleConditionCount !== 2) {
+            throw new Error(TR("分类讨论规则没有生成预期的两个分支"));
+        }
+        this.introNode(node.children[0], name);
+        this.introNode(node.children[1], name);
+    }
     /** Replace A -> B with its classical contrapositive ~B -> ~A. */
     contrapose(argument) {
         if (argument.trim())
@@ -945,6 +1228,8 @@ export class InferenceProofAssistant {
             });
             const instantiate = (value) => {
                 const result = this.instantiateRuleAst(value, application.context, matchTable);
+                if (this.astContainsFunction(result, "#rp"))
+                    this.fs.assert.expand(result, false);
                 this.fs.assert.checkGrammer(result, "p");
                 return result;
             };
@@ -952,9 +1237,7 @@ export class InferenceProofAssistant {
                 ...application.context.conditions,
                 ...implicationPremises.map(condition => this.renameRuleMetavariables(astmgr.clone(condition), application.context.internalByOriginal))
             ].map(condition => {
-                const result = this.instantiateRuleAst(condition, application.context, matchTable);
-                this.fs.assert.checkGrammer(result, "p");
-                return result;
+                return instantiate(condition);
             });
             node.kind = "apply";
             node.source = source;
@@ -1437,7 +1720,8 @@ export class InferenceProofAssistant {
                 metavariables: new Map([
                     ["$0", "$0"],
                     ["$1", "$1"],
-                    ["$2", "$2"]
+                    ["$2", "$2"],
+                    ["$3", "$3"]
                 ])
             };
         }
@@ -1486,10 +1770,14 @@ export class InferenceProofAssistant {
                 };
             case ".mn":
                 return { conditions: [], conclusion: parser.parse("(~$0>$0)>$0") };
+            case ".m2":
+                return { conditions: [parser.parse("$0>$1"), parser.parse("~$0>$1")], conclusion: parser.parse("$1") };
             case "a3":
                 return { conditions: [], conclusion: parser.parse("(~$1>~$0)>($0>$1)") };
             case "a7":
                 return { conditions: [], conclusion: parser.parse("$0=$0") };
+            case "a8":
+                return { conditions: [], conclusion: parser.parse("($0=$1)>($2>#rp($2,$0,$1,$3))") };
             default:
                 return undefined;
         }
@@ -1626,6 +1914,10 @@ export class InferenceProofAssistant {
             assign(original, value);
         try {
             const pattern = this.renameRuleMetavariables(conclusion, context.internalByOriginal);
+            astmgr.replaceByMatchTable(pattern, matchTable);
+            if (this.astContainsFunction(pattern, "#rp") && !this.astContainsPrivateRuleVariable(pattern)) {
+                this.fs.assert.expand(pattern, false);
+            }
             this.fs.assert.match(astmgr.clone(target), pattern, /^\$/, false, matchTable, replacedTypes, null, []);
         }
         catch (error) {
@@ -1667,6 +1959,16 @@ export class InferenceProofAssistant {
         if (positional.length > deduction.replaceNames.length)
             throw new Error(TR("apply参数过多"));
         return { positional, named };
+    }
+    astContainsFunction(ast, name) {
+        if (ast.type === "fn" && ast.name === name)
+            return true;
+        return !!ast.nodes?.some(child => this.astContainsFunction(child, name));
+    }
+    astContainsPrivateRuleVariable(ast) {
+        if (ast.type === "replvar" && ast.name.startsWith("$$assistant_rule_"))
+            return true;
+        return !!ast.nodes?.some(child => this.astContainsPrivateRuleVariable(child));
     }
     createRuleMetavariableContext(deduction, target, explicit, node) {
         const names = new Set();
