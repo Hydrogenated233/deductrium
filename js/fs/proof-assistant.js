@@ -141,12 +141,24 @@ export class InferenceProofAssistant {
             && this.resolveStrategyRule(node.target.name === "&" ? ".&" : ".<>", availableRuleNames)) {
             add("constructor");
         }
+        if (node.target.type === "sym" && node.target.name === "|" && node.target.nodes?.length === 2) {
+            if (this.resolveStrategyRule(".|1", availableRuleNames))
+                add("left");
+            if (this.resolveStrategyRule(".|2", availableRuleNames))
+                add("right");
+        }
         if (this.isSymmetryTarget(node.target)
             && this.resolveStrategyRule(node.target.name === "=" ? ".=s" : ".<>s", availableRuleNames)) {
             add("symm");
         }
         if (this.findContradictionPair(node) && this.resolveStrategyRule(".m", availableRuleNames)) {
             add("contradiction");
+        }
+        if (this.resolveStrategyRule(".mn", availableRuleNames))
+            add("by_contra");
+        if (node.target.type === "sym" && node.target.name === ">" && node.target.nodes?.length === 2
+            && this.resolveStrategyRule("a3", availableRuleNames)) {
+            add("contrapose");
         }
         const page = this.fs.inferencePages.page(this.pageId);
         page?.propositions.forEach((proposition, index) => addPropositionSource(`p${index}`, proposition.value, false));
@@ -686,8 +698,12 @@ export class InferenceProofAssistant {
             case "have": return this.have(args);
             case "assumption": return this.assumption(args);
             case "constructor": return this.constructorStrategy(args);
+            case "left": return this.disjunctionStrategy("left", args);
+            case "right": return this.disjunctionStrategy("right", args);
             case "symm": return this.symm(args);
             case "contradiction": return this.contradiction(args);
+            case "by_contra": return this.byContra(args);
+            case "contrapose": return this.contrapose(args);
             case "tauto": return this.tauto(args);
             case "qed": throw new Error(TR("qed请使用结束证明按钮"));
             default: throw new Error(TR("未知的证明策略") + name);
@@ -790,6 +806,20 @@ export class InferenceProofAssistant {
         }
         throw new Error(TR("constructor只能作用于合取或等价目标"));
     }
+    /** Select one side of a disjunction goal through an available intro rule. */
+    disjunctionStrategy(side, argument) {
+        if (argument.trim())
+            throw new Error(TR(side + "不接受参数"));
+        const node = this.requireCurrentNode();
+        if (node.target.type !== "sym" || node.target.name !== "|" || node.target.nodes?.length !== 2) {
+            throw new Error(TR(side + "只能作用于析取目标"));
+        }
+        const ruleName = side === "left" ? ".|1" : ".|2";
+        const rule = this.resolveStrategyRule(ruleName);
+        if (!rule)
+            throw new Error(TR(side + "需要解锁析取构造规则或提供等价推理规则"));
+        this.applyRule(rule.name);
+    }
     /** Swap both sides of an equality or equivalence target. */
     symm(argument) {
         if (argument.trim())
@@ -819,6 +849,40 @@ export class InferenceProofAssistant {
         this.applyRule(`${rule.name} ${metavariable}=${proposition}`);
         this.exact(pair.positiveName);
         this.exact(pair.negativeName);
+    }
+    /** Start classical reductio using (~P -> P) -> P, then name ~P. */
+    byContra(argument) {
+        const node = this.requireCurrentNode();
+        const name = argument.trim();
+        if (name && !/^[^\s,]+$/.test(name))
+            throw new Error(TR("by_contra名称无效"));
+        const rule = this.resolveStrategyRule(".mn");
+        if (!rule)
+            throw new Error(TR("by_contra需要解锁反证规则或提供等价推理规则"));
+        const originalTarget = parser.stringifyTight(node.target);
+        this.applyRule(rule.name);
+        const implication = this.requireCurrentNode().target;
+        if (implication.type !== "sym" || implication.name !== ">" || implication.nodes?.length !== 2) {
+            throw new Error(TR("反证规则没有生成预期的蕴含目标"));
+        }
+        this.intro(name);
+        const current = this.requireCurrentNode();
+        if (parser.stringifyTight(current.target) !== originalTarget) {
+            throw new Error(TR("反证规则生成的目标与原目标不一致"));
+        }
+    }
+    /** Replace A -> B with its classical contrapositive ~B -> ~A. */
+    contrapose(argument) {
+        if (argument.trim())
+            throw new Error(TR("contrapose不接受参数"));
+        const node = this.requireCurrentNode();
+        if (node.target.type !== "sym" || node.target.name !== ">" || node.target.nodes?.length !== 2) {
+            throw new Error(TR("contrapose只能作用于蕴含目标"));
+        }
+        const rule = this.resolveStrategyRule("a3");
+        if (!rule)
+            throw new Error(TR("contrapose需要解锁逆否规则或提供等价推理规则"));
+        this.applyRule(rule.name);
     }
     applyRule(argument) {
         const node = this.requireCurrentNode();
@@ -1244,6 +1308,14 @@ export class InferenceProofAssistant {
                 return { conditions: [parser.parse("$0<>$1")], conclusion: parser.parse("$1<>$0") };
             case ".m":
                 return { conditions: [parser.parse("$0"), parser.parse("~$0")], conclusion: parser.parse("$1") };
+            case ".|1":
+                return { conditions: [parser.parse("$0")], conclusion: parser.parse("$0|$1") };
+            case ".|2":
+                return { conditions: [parser.parse("$1")], conclusion: parser.parse("$0|$1") };
+            case ".mn":
+                return { conditions: [], conclusion: parser.parse("(~$0>$0)>$0") };
+            case "a3":
+                return { conditions: [], conclusion: parser.parse("(~$1>~$0)>($0>$1)") };
             default:
                 return undefined;
         }

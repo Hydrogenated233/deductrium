@@ -127,4 +127,91 @@ const lockedRules = ["mp", "a1", "a2"];
     assert.equal(assistant.snapshot().complete, true);
 }
 
+// left/right use unlocked disjunction constructors and create exactly the
+// selected side as the next goal.
+{
+    const fs = initFormalSystem(false).fs;
+    const locked = new InferenceProofAssistant(fs, "A|B", { ruleNames: lockedRules });
+    assert.equal(locked.recommendations().includes("left"), false);
+    assert.equal(locked.recommendations().includes("right"), false);
+    assert.throws(() => locked.apply("left"), /需要解锁|等价推理规则/);
+    assert.throws(() => locked.apply("right"), /需要解锁|等价推理规则/);
+
+    fs.addDeduction("myLeft", parser.parse("$0⊢$0|$1"), "test");
+    fs.addDeduction("myRight", parser.parse("$1⊢$0|$1"), "test");
+
+    const left = new InferenceProofAssistant(fs, "A>(A|B)", {
+        ruleNames: [...lockedRules, "myLeft", "myRight"]
+    });
+    left.apply("intro ha");
+    assert.ok(left.recommendations().includes("left"));
+    assert.ok(left.recommendations().includes("right"));
+    left.apply("left");
+    assert.equal(parser.stringifyTight(left.currentGoal.target), "A");
+    left.apply("exact ha");
+    assert.equal(left.snapshot().complete, true);
+    left.qed();
+    const leftRow = fs.propositions[0];
+    assert.deepEqual(leftRow?.from?.assistant?.history, ["intro ha", "left", "exact ha"],
+        "left must be saved as one deferred assistant step");
+    fs.expandMacroWithProp(0);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A>(A|B)");
+
+    const right = new InferenceProofAssistant(fs, "B>(A|B)", {
+        ruleNames: [...lockedRules, "myLeft", "myRight"]
+    });
+    right.apply("intro hb");
+    right.apply("right");
+    assert.equal(parser.stringifyTight(right.currentGoal.target), "B");
+    right.apply("exact hb");
+    assert.equal(right.snapshot().complete, true);
+
+    const wrongTarget = new InferenceProofAssistant(fs, "A&B", {
+        ruleNames: [...lockedRules, "myLeft", "myRight"]
+    });
+    assert.throws(() => wrongTarget.apply("left"), /只能作用于析取目标/);
+}
+
+// by_contra and contrapose are gated classical transformations. Equivalent
+// user rules must behave exactly like the bundled .mn/a3 rules.
+{
+    const fs = initFormalSystem(false).fs;
+    const lockedContra = new InferenceProofAssistant(fs, "A", { ruleNames: lockedRules });
+    assert.equal(lockedContra.recommendations().includes("by_contra"), false);
+    assert.throws(() => lockedContra.apply("by_contra h"), /需要解锁|等价推理规则/);
+
+    const lockedContrapose = new InferenceProofAssistant(fs, "A>B", { ruleNames: lockedRules });
+    assert.equal(lockedContrapose.recommendations().includes("contrapose"), false);
+    assert.throws(() => lockedContrapose.apply("contrapose"), /需要解锁|等价推理规则/);
+
+    fs.addDeduction("myReductio", parser.parse("⊢(~$0>$0)>$0"), "test");
+    fs.addDeduction("myContrapose", parser.parse("⊢(~$1>~$0)>($0>$1)"), "test");
+    const ruleNames = [...lockedRules, "myReductio", "myContrapose"];
+
+    const reductio = new InferenceProofAssistant(fs, "(~A>A)>A", { ruleNames });
+    reductio.apply("intro step");
+    assert.ok(reductio.recommendations().includes("by_contra"));
+    reductio.apply("by_contra hna");
+    assert.equal(parser.stringifyTight(reductio.currentGoal.target), "A");
+    assert.ok(reductio.currentGoal.hypotheses.some(h => h.name === "hna"
+        && parser.stringifyTight(h.proposition) === "~A"));
+    reductio.apply("apply step");
+    reductio.apply("exact hna");
+    assert.equal(reductio.snapshot().complete, true);
+    reductio.qed();
+    fs.expandMacroWithProp(0);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(~A>A)>A");
+
+    const contrapose = new InferenceProofAssistant(fs, "(~B>~A)>(A>B)", { ruleNames });
+    contrapose.apply("intro h");
+    assert.ok(contrapose.recommendations().includes("contrapose"));
+    contrapose.apply("contrapose");
+    assert.equal(parser.stringifyTight(contrapose.currentGoal.target), "~B>~A");
+    contrapose.apply("exact h");
+    assert.equal(contrapose.snapshot().complete, true);
+
+    const wrongTarget = new InferenceProofAssistant(fs, "A&B", { ruleNames });
+    assert.throws(() => wrongTarget.apply("contrapose"), /只能作用于蕴含目标/);
+}
+
 console.log("inference proof-assistant strategy regression passed");
