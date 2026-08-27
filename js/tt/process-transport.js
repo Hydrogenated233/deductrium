@@ -1,3 +1,4 @@
+import { cloneTTCoreSessionSnapshot, cloneTTDefinitionSlot, createTTCoreSessionSnapshot } from "./core-session-snapshot.js";
 const SESSION_TIMEOUT = 20_000;
 const MAX_TIMER = 2_147_000_000;
 /** The local server did not expose the process API, so clients may use Web Workers. */
@@ -71,15 +72,16 @@ export class TTProcessTransport {
         const target = Math.max(0, Math.floor(index));
         const stored = definition === null || definition === undefined
             ? null
-            : JSON.stringify(definition);
-        const previous = state.definitions[target];
+            : cloneTTDefinitionSlot(definition);
+        const previous = state.snapshot.definitions[target];
         if (forceTruncate || stored !== null || previous !== null && previous !== undefined) {
-            state.definitions.length = target + 1;
+            state.snapshot.definitions.length = target + 1;
         }
-        else if (state.definitions.length <= target) {
-            state.definitions.length = target + 1;
+        else if (state.snapshot.definitions.length <= target) {
+            state.snapshot.definitions.length = target + 1;
         }
-        state.definitions[target] = stored;
+        state.snapshot.definitions[target] = stored;
+        state.snapshot.loadedThrough = target + 1;
         state.revision++;
     }
     request(channel, request, timeout) {
@@ -128,6 +130,13 @@ export class TTProcessTransport {
                 return result;
             }
             catch (error) {
+                // A request timeout deliberately resets the remote process so
+                // later queued work is cancelled. The request which caused
+                // that reset must still surface its timeout to the UI; calling
+                // assertCurrent first would replace it with queue-cancelled.
+                if (error instanceof TTProcessExecutionError && error.code === "TT_PROCESS_TIMEOUT") {
+                    throw error;
+                }
                 assertCurrent();
                 if (recovered || !this.shouldRecover(error))
                     throw error;
@@ -288,8 +297,13 @@ export class TTProcessTransport {
             for (const [channel, state] of pending) {
                 assertCurrent();
                 const revision = state.revision;
-                const configuration = parseReplayRequest(state.request);
-                configuration.definitions = state.definitions.map(definition => definition === null ? null : JSON.parse(definition));
+                const snapshot = cloneTTCoreSessionSnapshot(state.snapshot);
+                const configuration = {
+                    kind: "configure",
+                    config: snapshot.config,
+                    definitions: snapshot.definitions,
+                    loadedThrough: snapshot.loadedThrough
+                };
                 await this.requestOnce(channel, configuration);
                 assertCurrent();
                 if (channel === "assist" && state.assistStart) {
@@ -318,12 +332,10 @@ export class TTProcessTransport {
             const configuration = request;
             const definitions = Array.isArray(configuration.definitions)
                 ? configuration.definitions
-                : [];
-            const replayRequest = { ...configuration, definitions: [] };
+                : undefined;
             this.configurations.set(channel, {
-                request: serializeReplayRequest(replayRequest),
+                snapshot: createTTCoreSessionSnapshot(configuration.config, definitions, configuration.loadedThrough),
                 generation: this.serverGeneration,
-                definitions: definitions.map(definition => definition === null || definition === undefined ? null : JSON.stringify(definition)),
                 assistStart: null,
                 revision: 1
             });
@@ -335,7 +347,8 @@ export class TTProcessTransport {
         if (kind === "truncate") {
             const start = Number(request.startIndex);
             if (Number.isFinite(start)) {
-                state.definitions.length = Math.min(state.definitions.length, Math.max(0, Math.floor(start)));
+                state.snapshot.definitions.length = Math.min(state.snapshot.definitions.length, Math.max(0, Math.floor(start)));
+                state.snapshot.loadedThrough = Math.min(state.snapshot.loadedThrough, state.snapshot.definitions.length);
                 state.revision++;
             }
             return;

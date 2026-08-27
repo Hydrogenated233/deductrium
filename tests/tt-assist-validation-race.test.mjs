@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import { TTGui } from "../js/tt/gui.js";
+import { TTProofSessionStore } from "../js/tt/proof-sessions.js";
 import { TheoremValidationCoordinator } from "../js/tt/theorem-validation.js";
 
 const variable = name => ({
@@ -32,11 +33,22 @@ try {
     const gui = Object.create(TTGui.prototype);
     gui.tacticBusy = false;
     gui.tacticRequestId = 0;
+    gui.tacticTextReplayRevision = 0;
+    gui.tacticTextReplayTimer = null;
+    gui.tacticTextMode = false;
+    gui.tacticScript = "";
+    gui.tacticScriptDirty = false;
+    gui.tacticSelectingTarget = false;
     gui.tacticTargetInput = null;
     gui.tacticScopeFolderId = null;
     gui.tacticScopeExplicit = false;
     gui.tacticDefinitionsRevision = -1;
     gui.definitionRevision = 0;
+    gui.proofSessions = new TTProofSessionStore();
+    gui.assistFallback = { clear() { } };
+    gui.assistWorkerSessionReady = false;
+    gui.assistSnapshot = null;
+    gui.onStateChange = () => { };
     gui.userDefinedConsts = [
         ["zero_add", variable("true")],
         null
@@ -54,7 +66,9 @@ try {
     gui.isTheoremInputDisabled = () => false;
     gui.theoremValidation = new TheoremValidationCoordinator();
     gui.renderTacticScopeOptions = () => { };
+    gui.renderTacticSessionTabs = () => { };
     gui.renderAssistSnapshot = () => { };
+    gui.resizeTacticInput = () => { };
     gui.setTacticBusy = busy => { gui.tacticBusy = busy; };
 
     let scheduledValidationStart = null;

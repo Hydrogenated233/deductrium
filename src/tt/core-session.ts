@@ -1,8 +1,46 @@
 import { AST } from "./astparser.js";
-import { Context, Core, DefinitionTypeCacheSnapshot } from "./core.js";
+import { Core, DefinitionTypeCacheSnapshot } from "./core.js";
 import { TTCoreCheckResult, TTCoreConfig, TTCoreEngine } from "./engine.js";
+import {
+    cloneTTCoreSessionSnapshot,
+    cloneTTDefinitionSlot,
+    createTTCoreSessionSnapshot,
+    type TTCoreSessionConfig,
+    type TTCoreSessionSnapshot,
+    type TTDefinitionSlot
+} from "./core-session-snapshot.js";
+import {
+    ScopeCursor,
+    isBinderNode,
+    validBondVarId,
+    type Context
+} from "./scoped-syntax.js";
 
-export type TTDefinitionSlot = [string, AST, DefinitionTypeCacheSnapshot?] | null;
+export type {
+    TTCoreSessionConfig,
+    TTCoreSessionSnapshot,
+    TTDefinitionSlot
+} from "./core-session-snapshot.js";
+
+/**
+ * The complete persistent-core command surface. Browser Workers and Node
+ * process threads are adapters over this module; neither owns definition
+ * cursor or cache-recovery behaviour.
+ */
+export type TTCoreSessionRequest =
+    | {
+        kind: "configure";
+        config: TTCoreConfig;
+        definitions?: TTDefinitionSlot[];
+        /** Restores a retained suffix without exposing it to the active Core. */
+        loadedThrough?: number;
+    }
+    | { kind: "truncate", startIndex: number }
+    | { kind: "set-definition", index: number, definition: TTDefinitionSlot }
+    | { kind: "check", input?: string, ast?: AST, context?: Context }
+    | { kind: "validate", index: number, ast: AST, context?: Context };
+
+export type TTCoreSessionResult = TTCoreCheckResult | undefined;
 
 /**
  * Ordered, persistent definition state for a type-theory worker. Sequential
@@ -11,15 +49,58 @@ export type TTDefinitionSlot = [string, AST, DefinitionTypeCacheSnapshot?] | nul
  */
 export class TTCoreSession {
     readonly engine = new TTCoreEngine();
-    private config: TTCoreConfig = null;
+    private config: TTCoreSessionConfig = null;
     private definitions: TTDefinitionSlot[] = [];
     private loadedThrough = 0;
 
-    configure(config: TTCoreConfig, definitions: TTDefinitionSlot[] = []) {
-        const { userDefinitions, userDefinitionCaches, ...systemConfig } = config;
-        this.config = systemConfig;
-        this.definitions = definitions.map(cloneDefinitionSlot);
-        this.rebuild(this.definitions.length);
+    configure(config: TTCoreConfig, definitions?: TTDefinitionSlot[], loadedThrough?: number) {
+        const snapshot = createTTCoreSessionSnapshot(config, definitions, loadedThrough);
+        this.config = snapshot.config;
+        this.definitions = snapshot.definitions;
+        this.rebuild(snapshot.loadedThrough);
+    }
+
+    /** Restore a previously exported portable session state. */
+    restore(snapshot: TTCoreSessionSnapshot) {
+        const restored = cloneTTCoreSessionSnapshot(snapshot);
+        this.config = restored.config;
+        this.definitions = restored.definitions;
+        this.rebuild(restored.loadedThrough);
+    }
+
+    /**
+     * Execute one command against this persistent session. This is the seam
+     * shared by the Worker and Node-process adapters, so they cannot drift in
+     * their definition cursor, rewind, or cache restoration semantics.
+     */
+    dispatch(request: TTCoreSessionRequest): TTCoreSessionResult {
+        switch (request.kind) {
+            case "configure":
+                this.configure(request.config, request.definitions, request.loadedThrough);
+                return undefined;
+            case "truncate":
+                this.truncate(request.startIndex);
+                return undefined;
+            case "set-definition":
+                this.setDefinition(request.index, request.definition);
+                return undefined;
+            case "validate":
+                return this.validate(request.index, request.ast, request.context);
+            case "check":
+                return request.ast
+                    ? this.checkAst(request.ast, request.context)
+                    : this.check(request.input, request.context);
+            default:
+                throw new Error(`Unknown core request: ${String((request as { kind?: unknown }).kind)}`);
+        }
+    }
+
+    check(input: string | undefined, context: Context = []): TTCoreCheckResult {
+        return this.engine.check(input, context);
+    }
+
+    checkAst(ast: AST, context: Context = []): TTCoreCheckResult {
+        return this.engine.checkAst(ast, context);
     }
 
     truncate(startIndex: number) {
@@ -87,14 +168,24 @@ export class TTCoreSession {
         this.prepare(index);
         const previousDefinition = this.definitions[index];
         if (definition || previousDefinition) this.definitions.length = index + 1;
-        const stored = cloneDefinitionSlot(definition);
+        const stored = cloneTTDefinitionSlot(definition);
         this.definitions[index] = stored;
         if (stored) this.loadDefinition(stored);
         this.loadedThrough = index + 1;
     }
 
     getDefinitionSlots(end = this.definitions.length) {
-        return this.definitions.slice(0, Math.max(0, end)).map(cloneDefinitionSlot);
+        return this.definitions.slice(0, Math.max(0, end)).map(cloneTTDefinitionSlot);
+    }
+
+    /** A portable state snapshot for recovery and adapter tests. */
+    snapshot(end = this.definitions.length) {
+        if (!this.config) throw new Error("Type-theory worker session is not configured");
+        return createTTCoreSessionSnapshot(
+            this.config,
+            this.definitions.slice(0, Math.max(0, end)),
+            Math.min(this.loadedThrough, Math.max(0, end))
+        );
     }
 
     private prepare(index: number) {
@@ -150,7 +241,7 @@ export class TTCoreSession {
         // The checked subtree belongs to the transient validation result and
         // is not needed when the definition is expanded later. Omitting it is
         // important for large restored theorem chains.
-        const filled = makePortableDefinition(Core.clone(result.filledDefinition), this.engine.core);
+        const filled = makePortableDefinition(Core.clone(result.filledDefinition));
         const value = ast.nodes[1].type === ":" ? filled.nodes[0] : filled;
         return [
             ast.nodes[0].name,
@@ -163,55 +254,46 @@ export class TTCoreSession {
     }
 }
 
-function cloneDefinitionSlot(definition: TTDefinitionSlot): TTDefinitionSlot {
-    if (!definition) return null;
-    return [
-        definition[0],
-        Core.clone(definition[1]),
-        definition[2] ? structuredClone(definition[2]) : undefined
-    ];
-}
-
-type PortableBinding = Readonly<{ id: number, name: string }>;
-
-function makePortableDefinition(ast: AST, core: Core) {
+function makePortableDefinition(ast: AST) {
     const freeNames = new Set<string>;
     collectFreeNames(ast, freeNames);
-
-    const uniqueBinderName = (source: string, scope: readonly PortableBinding[]) => {
+    const scope = new ScopeCursor();
+    const uniqueBinderName = (source: string) => {
         let name = source || "*";
-        while (freeNames.has(name) || scope.some(binding => binding.name === name)) name += "'";
+        while (freeNames.has(name) || scope.hasName(name)) name += "'";
         return name;
     };
 
-    const visit = (node: AST, scope: readonly PortableBinding[]) => {
+    const visit = (node: AST) => {
         if (node.type === "var") {
             if (validBondVarId(node.bondVarId)) {
-                const binding = scope.find(candidate =>
-                    candidate.id === node.bondVarId
-                    || core.isBondVarIdEqual(candidate.id, node.bondVarId)
-                );
+                const binding = scope.findById(node.bondVarId);
                 if (binding) node.name = binding.name;
             }
             node.bondVarId = undefined;
             return;
         }
 
-        if (isBinder(node) && validBondVarId(node.bondVarId)) {
-            visit(node.nodes?.[0], scope);
+        if (isBinderNode(node) && validBondVarId(node.bondVarId)) {
+            visit(node.nodes?.[0]);
             const id = node.bondVarId;
-            const name = uniqueBinderName(node.name, scope);
+            const name = uniqueBinderName(node.name);
             node.name = name;
             node.bondVarId = undefined;
-            visit(node.nodes?.[1], [{ id, name }, ...scope]);
+            scope.push({ id, name });
+            try {
+                visit(node.nodes?.[1]);
+            } finally {
+                scope.pop();
+            }
             return;
         }
 
         node.bondVarId = undefined;
-        for (const child of node.nodes ?? []) visit(child, scope);
+        for (const child of node.nodes ?? []) visit(child);
     };
 
-    visit(ast, []);
+    visit(ast);
     return ast;
 }
 
@@ -220,12 +302,4 @@ function collectFreeNames(ast: AST, names: Set<string>) {
         names.add(ast.name);
     }
     for (const child of ast.nodes ?? []) collectFreeNames(child, names);
-}
-
-function isBinder(ast: AST) {
-    return ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W";
-}
-
-function validBondVarId(id: number | undefined): id is number {
-    return Number.isFinite(id) && id > 0;
 }

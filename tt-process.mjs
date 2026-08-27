@@ -25,29 +25,7 @@ async function startChannelWorker(channel) {
     if (channel === "core") {
         const { TTCoreSession } = await import("./js/tt/core-session.js");
         const session = new TTCoreSession();
-        return request => {
-            if (request.kind === "configure") {
-                session.configure(request.config, request.definitions);
-                return undefined;
-            }
-            if (request.kind === "truncate") {
-                session.truncate(request.startIndex);
-                return undefined;
-            }
-            if (request.kind === "set-definition") {
-                session.setDefinition(request.index, request.definition);
-                return undefined;
-            }
-            if (request.kind === "validate") {
-                return session.validate(request.index, request.ast, request.context);
-            }
-            if (request.kind === "check") {
-                return request.ast
-                    ? session.engine.checkAst(request.ast, request.context)
-                    : session.engine.check(request.input, request.context);
-            }
-            throw new Error(`Unknown core request: ${String(request.kind)}`);
-        };
+        return request => session.dispatch(request);
     }
 
     if (channel === "assist") {
@@ -59,7 +37,7 @@ async function startChannelWorker(channel) {
         const engine = new TTAssistEngine(definitions.engine);
         return request => {
             if (request.kind === "configure") {
-                definitions.configure(request.config, request.definitions);
+                definitions.configure(request.config, request.definitions, request.loadedThrough);
                 engine.clear();
                 return undefined;
             }

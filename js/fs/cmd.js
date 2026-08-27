@@ -40,6 +40,38 @@ export class FSCmd {
             }
         });
     }
+    /**
+     * Keep lazy rules materialized by an expansion while discarding unrelated
+     * generated rules.  Expansion commands snapshot the rule map to roll back
+     * metarule side effects; blindly restoring that snapshot would throw away
+     * the assistant replay cache as well.
+     */
+    finishExpansion(fs, snapshot) {
+        const current = fs.deductions;
+        for (const [name, oldDeduction] of Object.entries(snapshot)) {
+            const currentDeduction = current[name];
+            if (!currentDeduction || currentDeduction === oldDeduction)
+                continue;
+            if (currentDeduction.steps !== undefined)
+                oldDeduction.steps = currentDeduction.steps;
+            if (currentDeduction.tempvars !== undefined)
+                oldDeduction.tempvars = currentDeduction.tempvars;
+            if (currentDeduction.deferredKind !== undefined)
+                oldDeduction.deferredKind = currentDeduction.deferredKind;
+            if (currentDeduction.deferredPayload !== undefined)
+                oldDeduction.deferredPayload = currentDeduction.deferredPayload;
+        }
+        const referenced = new Set();
+        for (const proposition of fs.propositions) {
+            if (proposition.from?.deductionIdx)
+                referenced.add(proposition.from.deductionIdx);
+        }
+        for (const name of referenced) {
+            if (!snapshot[name] && current[name])
+                snapshot[name] = current[name];
+        }
+        fs.deductions = snapshot;
+    }
     actionInputKeydown(e) {
         const actionInput = this.gui.actionInput;
         // autoComplete:
@@ -176,7 +208,7 @@ export class FSCmd {
             }
             // cmd, only for empty cmdbuffer
             if (value && this.cmdBuffer.length === 0) {
-                const unlockedCmd = ["pop", "clear"];
+                const unlockedCmd = ["pop", "clear", "newpage", "delpage"];
                 if (!document.getElementById("hyp-btn").classList.contains("hide"))
                     unlockedCmd.push("hyp");
                 if (!document.getElementById("macro-btns").classList.contains("hide"))
@@ -242,6 +274,8 @@ export class FSCmd {
                 case "clear": return this.execClear();
                 case "pop": return this.execPop();
                 case "meta": return this.execMetaDeduct();
+                case "newpage": return this.execNewPage();
+                case "delpage": return this.execDeletePage();
             }
             if (this.gui.unlockedMacro)
                 switch (cmdBuffer[0]) {
@@ -333,7 +367,7 @@ export class FSCmd {
                     fs.fastmetarules = "cvuqe><:#zZQRR";
                     fs.expandMacroWithDefaultValue(item);
                     fs.fastmetarules = fmr;
-                    fs.deductions = fsd;
+                    this.finishExpansion(fs, fsd);
                     this.execCmdBuffer();
                 }
                 catch (e) {
@@ -357,7 +391,7 @@ export class FSCmd {
                     fs.fastmetarules = "cvuqe><:#zZQR";
                     fs.expandMacroWithProp(Number(p));
                     fs.fastmetarules = fmr;
-                    fs.deductions = fsd;
+                    this.finishExpansion(fs, fsd);
                     this.execCmdBuffer();
                 }
                 catch (e) {
@@ -427,7 +461,7 @@ export class FSCmd {
                 formalSystem.inlineMacroInProp(Number(cmdBuffer[1]));
             }
             formalSystem.fastmetarules = fmr;
-            formalSystem.deductions = fsd;
+            this.finishExpansion(formalSystem, fsd);
             this.gui.updatePropositionList(true);
             this.clearCmdBuffer();
         }
@@ -901,6 +935,49 @@ export class FSCmd {
         this.gui.updatePropositionList(true);
         this.clearCmdBuffer();
     }
+    execNewPage() {
+        if (this.cmdBuffer.length < 2) {
+            this.gui.hintText.innerText = TR("请输入新推理表名称，按Esc取消");
+            return;
+        }
+        if (this.cmdBuffer.length > 2) {
+            this.clearCmdBuffer();
+            this.gui.hintText.innerText = TR("推理表名称只能是一个单词");
+            return;
+        }
+        try {
+            this.gui.createInferencePage(String(this.cmdBuffer[1]));
+            this.clearCmdBuffer();
+            this.gui.onStateChange();
+            this.gui.onStateChange();
+        }
+        catch (e) {
+            this.clearCmdBuffer();
+            this.gui.hintText.innerText = String(e);
+        }
+    }
+    execDeletePage() {
+        if (this.cmdBuffer.length < 2) {
+            this.gui.hintText.innerText = TR("请输入要删除的推理表名称，按Esc取消");
+            return;
+        }
+        if (this.cmdBuffer.length > 2) {
+            this.clearCmdBuffer();
+            this.gui.hintText.innerText = TR("推理表名称只能是一个单词");
+            return;
+        }
+        const name = String(this.cmdBuffer[1]);
+        const page = this.gui.pageStore.page(name);
+        if (!page) {
+            this.clearCmdBuffer();
+            this.gui.hintText.innerText = TR("推理表不存在：") + name;
+            return;
+        }
+        this.gui.deleteInferencePage(page.id);
+        this.clearCmdBuffer();
+        this.gui.onStateChange();
+        this.gui.onStateChange();
+    }
     execHyp() {
         const cmdBuffer = this.cmdBuffer;
         const hintText = this.gui.hintText;
@@ -1085,19 +1162,7 @@ export class FSCmd {
         return true;
     }
     testBadNewName(name) {
-        if (name.match(/^[0-9<>acdempuv#\.]/)) {
-            return TR("以.<>acdempuv#或数字开头的推理规则名称由系统保留，请重新命名");
-        }
-        if (name.match(/^\$\$/)) {
-            return TR("以$$开头的推理规则名称由系统保留，请重新命名");
-        }
-        if (name.includes(",") || name.includes(":") || name.includes(" ")) {
-            return TR("推理规则名称中禁止出现空格或由系统保留的“:”或“,”符号，请重新命名");
-        }
-        if (this.gui.formalSystem.deductions[name]) {
-            return TR(`推理规则名称`) + name + TR(`已存在或被系统保留，请重新命名`);
-        }
-        return null;
+        return this.gui.formalSystem.validateNewDeductionName(name);
     }
     onEsc() {
         if (this.cmdBuffer[0] === "entr") {

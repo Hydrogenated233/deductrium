@@ -1,7 +1,10 @@
 import { AST } from "./astparser.js";
 import { Context } from "./core.js";
 import { TTCoreCheckResult, TTCoreConfig } from "./engine.js";
-import { TTDefinitionSlot } from "./core-session.js";
+import {
+    type TTCoreSessionRequest,
+    type TTDefinitionSlot
+} from "./core-session.js";
 import { getTTProcessTransport, isTTProcessUnavailableError } from "./process-transport.js";
 
 type WorkerResponse =
@@ -27,8 +30,8 @@ export class TTCoreWorkerClient {
             : this.processTransport.generation;
     }
 
-    configure(config: TTCoreConfig, definitions: TTDefinitionSlot[] = []): Promise<void> {
-        return this.request<void>({ kind: "configure", config, definitions });
+    configure(config: TTCoreConfig, definitions?: TTDefinitionSlot[], loadedThrough?: number): Promise<void> {
+        return this.request<void>({ kind: "configure", config, definitions, loadedThrough });
     }
 
     truncate(startIndex: number): Promise<void> {
@@ -72,7 +75,7 @@ export class TTCoreWorkerClient {
         this.processTransport.reset(new Error("Type-theory process session reset"));
     }
 
-    private async request<T>(message: object, timeout?: number): Promise<T> {
+    private async request<T>(message: TTCoreSessionRequest, timeout?: number): Promise<T> {
         if (this.disposed) throw new Error("Type-theory worker terminated");
         try {
             return await this.processTransport.request<T>("core", message, timeout);
@@ -82,7 +85,7 @@ export class TTCoreWorkerClient {
         }
     }
 
-    private requestWorker<T>(message: object, timeout?: number): Promise<T> {
+    private requestWorker<T>(message: TTCoreSessionRequest, timeout?: number): Promise<T> {
         const worker = this.ensureWorker();
         const id = this.nextId++;
         return new Promise<T>((resolve, reject) => {

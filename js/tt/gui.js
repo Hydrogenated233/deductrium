@@ -9,7 +9,9 @@ import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { initTypeSystem } from "./initial.js";
 import { restoreSemanticMetaNamesForDisplay } from "./presentation.js";
-import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremInputIndexBeforeItem, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator, typeTheoryValidationTimedOut } from "./theorem-validation.js";
+import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator, typeTheoryValidationTimedOut } from "./theorem-validation.js";
+import { TheoremWorkspace } from "./theorem-workspace.js";
+import { TTProofSessionStore } from "./proof-sessions.js";
 const parser = new ASTParser;
 const constructors = new Set();
 const destructors = new Set();
@@ -17,6 +19,7 @@ const computeEqs = new Set();
 const macro = new Set();
 const sysmacro = new Set();
 const semanticResourceScaleStorageKey = "deductrium-tt-semantic-resource-scale";
+const tacticTextModeStorageKey = "deductrium-tt-proof-text-mode";
 let consts = new Set;
 const allrules = initTypeSystem();
 const reservedConsts = new Set;
@@ -36,6 +39,9 @@ export class TTGui {
     unlockedTactics;
     inhabitList = document.getElementById("inhabit-list");
     theoremItems = [];
+    theoremWorkspace = new TheoremWorkspace();
+    /** The workspace is authoritative after its first hydration. */
+    theoremWorkspaceHydrated = false;
     /** Ordered theorem inputs derived from theoremItems, cached by structure revision. */
     theoremInputsCache = [];
     theoremInputsCacheRevision = -1;
@@ -66,6 +72,18 @@ export class TTGui {
     assistWorkerSessionReady = false;
     tacticBusy = false;
     tacticRequestId = 0;
+    tacticTextMode = false;
+    tacticTextModePreference = false;
+    tacticScript = "";
+    tacticScriptDirty = false;
+    tacticTextReplayTimer = null;
+    tacticTextReplayRevision = 0;
+    proofSessions = new TTProofSessionStore();
+    pendingProofSessions = null;
+    /** Prevent autosave from replacing a stored draft with a replay prefix. */
+    tacticSessionReplayId = null;
+    tacticCaptureBlockedSessionId = null;
+    tacticSelectingTarget = false;
     tacticTargetInput = null;
     tacticScopeFolderId = null;
     tacticScopeExplicit = false;
@@ -204,6 +222,11 @@ export class TTGui {
             console.warn("Type-theory worker unavailable", error);
         }
         this.skipRendering = skipRendering;
+        try {
+            this.tacticTextModePreference = window.localStorage.getItem(tacticTextModeStorageKey) === "1";
+        }
+        catch { }
+        this.tacticTextMode = this.tacticTextModePreference;
         this.theoremDragger.cols = 1;
         this.theoremDragger.onExecute = (src, dst) => this.moveTheoremItem(src, dst === "+" ? " " : dst);
         this.unlockedTypes = new Set(creative ? allrules.map(r => r.id) : ["True", "False"]);
@@ -244,6 +267,31 @@ export class TTGui {
         });
         input.addEventListener("input", () => this.resizeTacticInput());
         input.addEventListener("focus", () => this.resizeTacticInput());
+        document.getElementById("tactic-text-toggle")?.addEventListener("click", () => {
+            this.toggleTacticTextMode();
+        });
+        const scriptInput = document.getElementById("tactic-script");
+        scriptInput?.addEventListener("input", () => {
+            this.tacticScript = scriptInput.value;
+            this.tacticScriptDirty = true;
+            if (this.proofSessions.activeId) {
+                this.proofSessions.update(this.proofSessions.activeId, {
+                    script: this.tacticScript,
+                    stale: true
+                });
+            }
+            this.onStateChange();
+            this.scheduleTacticTextReplay();
+        });
+        scriptInput?.addEventListener("keydown", event => {
+            if (event.key === "Enter" && event.ctrlKey) {
+                event.preventDefault();
+                void this.replayTacticText(true);
+            }
+        });
+        document.getElementById("tactic-script-run")?.addEventListener("click", () => {
+            void this.replayTacticText(true);
+        });
         document.getElementById('timeSelect').addEventListener('change', function () {
             Core.timeout = Number(this.value) * 1000;
         });
@@ -253,13 +301,31 @@ export class TTGui {
             const select = document.getElementById("tactic-scope");
             this.tacticScopeFolderId = select.value || null;
             this.tacticScopeExplicit = true;
+            if (this.proofSessions.activeId) {
+                this.proofSessions.update(this.proofSessions.activeId, {
+                    scopeFolderId: this.tacticScopeFolderId,
+                    scopeExplicit: true,
+                    stale: true
+                });
+            }
             this.tacticDefinitionsRevision = -1;
             const requestId = ++this.tacticRequestId;
             this.renderTacticScopeOptions();
             this.ensureAssistSessionCurrent().then(snapshot => {
                 if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
                     return;
+                if (this.proofSessions.activeId) {
+                    this.proofSessions.update(this.proofSessions.activeId, {
+                        history: snapshot.history,
+                        stale: false
+                    });
+                    if (this.tacticCaptureBlockedSessionId === this.proofSessions.activeId) {
+                        this.tacticCaptureBlockedSessionId = null;
+                    }
+                }
                 this.renderAssistSnapshot(snapshot);
+                this.renderTacticSessionTabs();
+                this.onStateChange();
             }).catch(error => {
                 if (requestId === this.tacticRequestId) {
                     document.getElementById("tactic-errmsg").innerText = this.formatTacticError(error);
@@ -267,10 +333,11 @@ export class TTGui {
             });
         });
         document.getElementById("tactic-remove").addEventListener("click", () => void this.removeTactic());
-        document.getElementById("tactic-clear").addEventListener("click", () => void this.removeTactic(true));
+        document.getElementById("tactic-clear").addEventListener("click", () => this.resetTacticPage());
         document.getElementById("tactic-begin").addEventListener("click", () => {
             this.addTactic(false);
         });
+        this.renderTacticSessionTabs();
     }
     setLastGateTarget(target) {
         if (!theoremPreviewNeedsRefresh(target, this.lastGateTarget, this.definitionRevision, this.gatePreviewRevision, this.theoremStructureRevision, this.gatePreviewStructureRevision))
@@ -362,6 +429,7 @@ export class TTGui {
             const g = snapshot.goals[count];
             statediv.appendChild(document.createElement("hr"));
             const goalDiv = document.createElement("div");
+            goalDiv.className = "proof-text-goal";
             const scope = g.context.map(e => ({ type: "var", name: e[0], bondVarId: e[2] }));
             for (const [k, v, id] of g.context) {
                 const ast = {
@@ -374,10 +442,8 @@ export class TTGui {
             goalDiv.appendChild(document.createElement("br"));
             this.addSpan(goalDiv, count ? TR("目标") + (count) + TR("：") : TR("当前目标："));
             goalDiv.appendChild(this.ast2HTML("", g.type, scope, g.context, this.getInhabitatArray().length));
-            if (count) {
-                goalDiv.style.opacity = "0.5";
-                goalDiv.style.backgroundColor = "#DDD";
-            }
+            if (count)
+                goalDiv.classList.add("proof-text-goal-secondary");
             goalDiv.appendChild(document.createElement("br"));
             statediv.appendChild(goalDiv);
         }
@@ -402,6 +468,545 @@ export class TTGui {
             if (input.clientHeight >= nextHeight)
                 break;
             input.style.height = `${nextHeight + borderHeight}px`;
+        }
+    }
+    isBlankTacticSession(session) {
+        return !!session
+            && session.kind === "manual"
+            && !session.target.trim()
+            && session.history.length === 0
+            && !session.script.trim();
+    }
+    proofSessionLabel(session, index) {
+        if (session.title.trim())
+            return session.title.trim();
+        if (this.isBlankTacticSession(session))
+            return `${TR("证明页")} ${index + 1}`;
+        const prefix = session.kind === "gate" ? "#t " : session.kind === "manual" ? "? " : "";
+        return prefix + (session.target.trim() || TR("空目标"));
+    }
+    renderTacticSessionTabs() {
+        const tabs = document.getElementById("tactic-session-tabs");
+        if (!tabs || !this.proofSessions)
+            return;
+        tabs.replaceChildren();
+        for (const [index, session] of this.proofSessions.sessions.entries()) {
+            const tab = document.createElement("div");
+            tab.className = "proof-session-tab"
+                + (session.id === this.proofSessions.activeId ? " active" : "")
+                + (session.stale ? " stale" : "")
+                + (session.detached ? " detached" : "");
+            tab.draggable = true;
+            tab.dataset.proofSessionId = session.id;
+            const label = document.createElement("button");
+            label.type = "button";
+            label.className = "proof-session-label";
+            label.textContent = this.proofSessionLabel(session, index);
+            label.title = session.target
+                ? `${session.target}\n${TR("双击重命名证明页")}`
+                : TR("双击重命名证明页");
+            label.addEventListener("click", () => this.selectTacticSession(session.id));
+            label.addEventListener("dblclick", event => {
+                event.preventDefault();
+                event.stopPropagation();
+                const editor = document.createElement("input");
+                editor.className = "proof-session-name-input";
+                editor.value = session.title || this.proofSessionLabel(session, index);
+                let settled = false;
+                const finish = (cancel) => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    if (!cancel) {
+                        this.proofSessions.update(session.id, { title: editor.value.trim() });
+                        this.onStateChange();
+                    }
+                    this.renderTacticSessionTabs();
+                };
+                editor.addEventListener("keydown", keyEvent => {
+                    if (keyEvent.key === "Enter") {
+                        keyEvent.preventDefault();
+                        finish(false);
+                    }
+                    else if (keyEvent.key === "Escape") {
+                        keyEvent.preventDefault();
+                        finish(true);
+                    }
+                });
+                editor.addEventListener("blur", () => finish(false));
+                label.replaceWith(editor);
+                editor.focus();
+                editor.select();
+            });
+            const close = document.createElement("button");
+            close.type = "button";
+            close.className = "proof-session-close";
+            close.textContent = "x";
+            close.title = TR("关闭证明会话");
+            close.addEventListener("click", event => {
+                event.stopPropagation();
+                if (session.id === this.proofSessions.activeId) {
+                    this.closeTacticSession();
+                }
+                else {
+                    this.proofSessions.close(session.id);
+                    this.renderTacticSessionTabs();
+                    this.onStateChange();
+                }
+            });
+            tab.addEventListener("dragstart", event => {
+                event.dataTransfer?.setData("text/type-proof-session", session.id);
+                tab.classList.add("dragging");
+            });
+            tab.addEventListener("dragend", () => tab.classList.remove("dragging"));
+            tab.addEventListener("dragover", event => {
+                event.preventDefault();
+                tab.classList.add("drag-over");
+            });
+            tab.addEventListener("dragleave", () => tab.classList.remove("drag-over"));
+            tab.addEventListener("drop", event => {
+                event.preventDefault();
+                tab.classList.remove("drag-over");
+                const source = event.dataTransfer?.getData("text/type-proof-session");
+                if (!source || source === session.id)
+                    return;
+                this.captureActiveTacticSession();
+                this.proofSessions.reorder(source, session.id);
+                this.renderTacticSessionTabs();
+                this.onStateChange();
+            });
+            tab.append(label, close);
+            tabs.appendChild(tab);
+        }
+        const add = document.createElement("button");
+        add.id = "tactic-session-add";
+        add.type = "button";
+        add.className = "proof-session-add";
+        add.textContent = "+";
+        add.title = TR("新建证明页");
+        add.addEventListener("click", () => this.beginTacticTargetSelection(true));
+        tabs.appendChild(add);
+        tabs.ondragover = event => {
+            if (event.target.closest?.(".proof-session-tab"))
+                return;
+            event.preventDefault();
+        };
+        tabs.ondrop = event => {
+            if (event.target.closest?.(".proof-session-tab"))
+                return;
+            event.preventDefault();
+            const source = event.dataTransfer?.getData("text/type-proof-session");
+            if (!source)
+                return;
+            this.captureActiveTacticSession();
+            this.proofSessions.reorder(source, null);
+            this.renderTacticSessionTabs();
+            this.onStateChange();
+        };
+    }
+    selectTacticSession(id) {
+        if (id === this.proofSessions.activeId)
+            return;
+        void this.activateTacticSession(id);
+    }
+    beginTacticTargetSelection(createPage = false) {
+        if (this.tacticBusy)
+            return;
+        this.captureActiveTacticSession();
+        if (createPage || !this.isBlankTacticSession(this.proofSessions.active)) {
+            this.proofSessions.openBlank();
+        }
+        this.clearTacticRuntime();
+        this.tacticSelectingTarget = true;
+        this.mode = "tactic-begin";
+        document.getElementById("tactic-hint").innerText = TR("请在定理列表中点选待证命题");
+        this.renderTacticSessionTabs();
+        this.onStateChange();
+    }
+    captureActiveTacticSession() {
+        if (!this.proofSessions)
+            return;
+        const active = this.proofSessions.active;
+        if (!active || !(this.mode instanceof Array))
+            return;
+        if (active.id === this.tacticSessionReplayId
+            || active.id === this.tacticCaptureBlockedSessionId)
+            return;
+        const scriptInput = document.getElementById("tactic-script");
+        const script = this.tacticTextMode || this.tacticScriptDirty
+            ? scriptInput?.value ?? this.tacticScript
+            : this.mode.slice(1).join("\n");
+        this.proofSessions.update(active.id, {
+            target: this.mode[0],
+            history: this.mode.slice(1),
+            script,
+            scopeFolderId: this.tacticScopeFolderId,
+            scopeExplicit: this.tacticScopeExplicit
+        });
+    }
+    theoremItemById(id) {
+        if (!id)
+            return null;
+        return this.theoremItems.find((item) => item.kind === "theorem" && item.id === id) ?? null;
+    }
+    reconcileProofSessionBindings(allowIndexFallback) {
+        // Some state/helper regression tests construct TTGui without running
+        // its browser constructor. Session binding is optional in that path.
+        if (!this.proofSessions)
+            return;
+        const inputs = this.getInhabitatArray();
+        const bindings = this.proofSessions.sessions
+            .filter(session => session.kind === "theorem" && !session.detached)
+            .map(session => {
+            let item = this.theoremItemById(session.theoremItemId);
+            if (!item && allowIndexFallback && session.targetTheoremIndex !== null) {
+                const input = inputs[session.targetTheoremIndex];
+                item = input ? this.getTheoremItemForInput(input) : null;
+            }
+            return { session, item, index: item ? inputs.indexOf(item.input) : -1 };
+        })
+            .sort((left, right) => left.index - right.index);
+        for (const binding of bindings) {
+            const { session, item, index } = binding;
+            if (!item || index < 0) {
+                if (session.theoremItemId)
+                    this.proofSessions.detachTheorem(session.theoremItemId);
+                continue;
+            }
+            const defaultScope = this.getDefaultTacticScope(item.input);
+            if (allowIndexFallback && session.theoremItemId !== item.id) {
+                this.proofSessions.rebindTheoremByIndex({
+                    target: item.input.value,
+                    theoremItemId: item.id,
+                    targetTheoremIndex: index,
+                    scopeFolderId: session.scopeExplicit ? session.scopeFolderId : defaultScope,
+                    scopeExplicit: session.scopeExplicit
+                });
+            }
+            else {
+                if (session.target !== item.input.value) {
+                    this.proofSessions.markTheoremTargetChanged(item.id, item.input.value, index);
+                }
+                const allowedScopes = this.getFolderScopeForInput(item.input).map(folder => folder.id);
+                if (session.scopeExplicit && session.scopeFolderId !== null
+                    && !allowedScopes.includes(session.scopeFolderId)) {
+                    this.proofSessions.update(session.id, {
+                        scopeFolderId: defaultScope,
+                        scopeExplicit: false,
+                        stale: true
+                    });
+                }
+                else {
+                    this.proofSessions.updateTheoremLocation(item.id, index, defaultScope);
+                }
+            }
+        }
+        this.renderTacticSessionTabs();
+    }
+    async activateTacticSession(id, captureCurrent = true) {
+        if (this.tacticBusy)
+            return;
+        if (captureCurrent)
+            this.captureActiveTacticSession();
+        this.reconcileProofSessionBindings(false);
+        let session = this.proofSessions.activate(id);
+        this.clearTacticRuntime();
+        session = this.proofSessions.session(id) ?? session;
+        this.renderTacticSessionTabs();
+        this.onStateChange();
+        if (this.isBlankTacticSession(session)) {
+            this.tacticSelectingTarget = true;
+            this.mode = "tactic-begin";
+            document.getElementById("tactic-hint").innerText = TR("请在定理列表中点选待证命题");
+            return;
+        }
+        const targetItem = session.kind === "theorem" && !session.detached
+            ? this.theoremItemById(session.theoremItemId)
+            : null;
+        if (session.kind === "theorem" && !session.detached && !targetItem) {
+            if (session.theoremItemId)
+                this.proofSessions.detachTheorem(session.theoremItemId);
+            session = this.proofSessions.session(id) ?? session;
+        }
+        this.tacticTargetInput = targetItem?.input ?? null;
+        this.tacticScopeExplicit = session.scopeExplicit;
+        this.tacticScopeFolderId = session.scopeFolderId;
+        this.tacticScript = session.script;
+        this.tacticScriptDirty = session.script !== session.history.join("\n");
+        const scriptInput = document.getElementById("tactic-script");
+        if (scriptInput)
+            scriptInput.value = session.script;
+        this.mode = [session.target];
+        this.renderTacticScopeOptions();
+        this.renderTacticSessionTabs();
+        this.tacticSessionReplayId = id;
+        if (this.tacticTextMode) {
+            try {
+                await this.replayTacticText(false);
+            }
+            finally {
+                if (this.tacticSessionReplayId === id)
+                    this.tacticSessionReplayId = null;
+            }
+            return;
+        }
+        const requestId = ++this.tacticRequestId;
+        this.setTacticBusy(true);
+        let snapshot = null;
+        const accepted = [];
+        let failedAt = null;
+        try {
+            await this.theoremValidation.waitForIdle();
+            if (requestId !== this.tacticRequestId)
+                return;
+            snapshot = await this.startAssistSession(session.target, []);
+            this.tacticDefinitionsRevision = this.definitionRevision;
+            this.assistSnapshot = snapshot;
+            for (let index = 0; index < session.history.length; index++) {
+                failedAt = index + 1;
+                this.mode = [session.target, ...accepted];
+                snapshot = await this.applyAssistCommand(session.history[index]);
+                accepted.splice(0, accepted.length, ...snapshot.history);
+                this.assistSnapshot = snapshot;
+            }
+            this.mode = [session.target, ...accepted];
+            this.proofSessions.update(id, { history: accepted, stale: false });
+            if (this.tacticCaptureBlockedSessionId === id)
+                this.tacticCaptureBlockedSessionId = null;
+            this.renderAssistSnapshot(snapshot);
+        }
+        catch (error) {
+            if (requestId !== this.tacticRequestId)
+                return;
+            this.mode = [session.target, ...accepted];
+            this.proofSessions.update(id, { stale: true });
+            this.tacticCaptureBlockedSessionId = id;
+            if (snapshot)
+                this.renderAssistSnapshot(snapshot);
+            document.getElementById("tactic-errmsg").innerText = failedAt === null
+                ? this.formatTacticError(error)
+                : `第 ${failedAt} 行：${this.formatTacticError(error)}`;
+        }
+        finally {
+            if (this.tacticSessionReplayId === id)
+                this.tacticSessionReplayId = null;
+            if (requestId === this.tacticRequestId)
+                this.setTacticBusy(false);
+            this.renderTacticSessionTabs();
+        }
+    }
+    parseTacticScript(text) {
+        return text.split(/\r?\n/).map((raw, index) => {
+            let command = raw.trim();
+            // Existing saved/copyable tactic lines may carry the old visual
+            // trailing period. It is presentation syntax, not an argument.
+            command = command.replace(/\s+\.$/, "").trim();
+            return { command, lineNumber: index + 1 };
+        }).filter(entry => !!entry.command);
+    }
+    renderTacticTextRecommendations(tactics) {
+        const container = document.getElementById("tactic-script-recommendations");
+        if (!container)
+            return;
+        container.replaceChildren();
+        const visible = this.unlockedTactics
+            ? tactics.filter(tactic => this.unlockedTactics.has(tactic.split(" ", 1)[0]))
+            : tactics;
+        if (!visible.length)
+            return;
+        container.appendChild(document.createTextNode(TR("推荐：")));
+        visible.forEach((tactic, index) => {
+            if (index)
+                container.appendChild(document.createTextNode("  |  "));
+            const code = document.createElement("code");
+            code.textContent = tactic;
+            container.appendChild(code);
+        });
+    }
+    renderTacticTextSnapshot(snapshot, error = "", errorLine = null, terminal = false) {
+        const mode = document.getElementById("tactic-text-mode");
+        const state = document.getElementById("tactic-script-state");
+        const errorDiv = document.getElementById("tactic-script-error");
+        const script = document.getElementById("tactic-script");
+        if (!mode || !state || !errorDiv || !script)
+            return;
+        this.assistSnapshot = snapshot;
+        this.getHottTacticDefCtxt(this.getActiveTacticScopeId());
+        this.renderTacticScopeOptions();
+        mode.classList.remove("hide");
+        document.getElementById("tactic-clear")?.classList.remove("hide");
+        document.getElementById("tactic-list")?.parentElement?.classList?.add?.("hide");
+        if (script.value !== this.tacticScript)
+            script.value = this.tacticScript;
+        errorDiv.replaceChildren();
+        if (error) {
+            const line = document.createElement("div");
+            line.className = "proof-text-line-error";
+            line.textContent = errorLine === null
+                ? this.formatTacticError(error)
+                : `第 ${errorLine} 行：${this.formatTacticError(error)}`;
+            errorDiv.appendChild(line);
+        }
+        else if (terminal) {
+            const done = document.createElement("div");
+            done.className = "proof-text-status";
+            done.textContent = "qed 已就绪，按 Ctrl+Enter 或执行按钮提交";
+            errorDiv.appendChild(done);
+        }
+        state.replaceChildren();
+        this.updateTacticStateDisplay(snapshot, state);
+        this.renderTacticTextRecommendations(snapshot.tactics);
+    }
+    toggleTacticTextMode() {
+        if (!(this.mode instanceof Array)) {
+            document.getElementById("tactic-errmsg").innerText = TR("请在定理列表中点选待证命题");
+            return;
+        }
+        this.tacticTextMode = !this.tacticTextMode;
+        this.tacticTextModePreference = this.tacticTextMode;
+        try {
+            window.localStorage.setItem(tacticTextModeStorageKey, this.tacticTextMode ? "1" : "0");
+        }
+        catch { }
+        this.onStateChange();
+        const textMode = document.getElementById("tactic-text-mode");
+        const buttonMode = document.getElementById("tactic-list")?.parentElement;
+        const script = document.getElementById("tactic-script");
+        if (this.tacticTextMode) {
+            if (!this.tacticScriptDirty)
+                this.tacticScript = this.mode.slice(1).join("\n");
+            if (script)
+                script.value = this.tacticScript;
+            textMode?.classList?.remove?.("hide");
+            buttonMode?.classList?.add?.("hide");
+            if (this.assistSnapshot)
+                this.renderTacticTextSnapshot(this.assistSnapshot);
+            script?.focus();
+        }
+        else {
+            textMode?.classList?.add?.("hide");
+            buttonMode?.classList?.remove?.("hide");
+            if (this.assistSnapshot)
+                this.renderAssistSnapshot(this.assistSnapshot);
+        }
+    }
+    scheduleTacticTextReplay() {
+        if (!this.tacticTextMode || !(this.mode instanceof Array))
+            return;
+        if (this.tacticTextReplayTimer !== null)
+            window.clearTimeout(this.tacticTextReplayTimer);
+        this.tacticTextReplayTimer = window.setTimeout(() => {
+            this.tacticTextReplayTimer = null;
+            void this.replayTacticText(false);
+        }, 350);
+    }
+    async commitTacticQed(qedName) {
+        const result = await this.finishAssistProof();
+        const output = this.updateInhabitList(this.getTacticOutputInsertPosition(), this.getTacticOutputFolder());
+        output.focus();
+        output.value = qedName
+            ? `${qedName}:=${result.proof}:${result.theorem}`
+            : `${result.proof}:${result.theorem}`;
+        output.dispatchEvent(new Event("input"));
+        this.resetTacticPage();
+        output.blur();
+    }
+    async replayTacticText(explicitRun) {
+        if (!this.tacticTextMode || !(this.mode instanceof Array))
+            return;
+        if (this.tacticBusy) {
+            this.scheduleTacticTextReplay();
+            return;
+        }
+        const script = document.getElementById("tactic-script");
+        if (script)
+            this.tacticScript = script.value;
+        const target = this.mode[0];
+        const entries = this.parseTacticScript(this.tacticScript);
+        const requestId = ++this.tacticRequestId;
+        let accepted = [];
+        let snapshot = null;
+        let errorLine = null;
+        let terminal = false;
+        this.setTacticBusy(true);
+        try {
+            this.mode = [target];
+            snapshot = await this.startAssistSession(target, []);
+            if (requestId !== this.tacticRequestId || !this.tacticTextMode)
+                return;
+            this.assistSnapshot = snapshot;
+            this.tacticDefinitionsRevision = this.definitionRevision;
+            for (let index = 0; index < entries.length; index++) {
+                const entry = entries[index];
+                const commandName = entry.command.split(/\s+/, 1)[0];
+                errorLine = entry.lineNumber;
+                if (commandName === "qed") {
+                    if (index !== entries.length - 1) {
+                        throw new Error("qed 必须是策略序列的最后一行");
+                    }
+                    terminal = true;
+                    break;
+                }
+                this.mode = [target, ...accepted];
+                snapshot = await this.applyAssistCommand(entry.command);
+                if (requestId !== this.tacticRequestId || !this.tacticTextMode)
+                    return;
+                accepted = [...snapshot.history];
+                this.mode = [target, ...accepted];
+                this.assistSnapshot = snapshot;
+                this.tacticDefinitionsRevision = this.definitionRevision;
+            }
+            this.mode = [target, ...accepted];
+            this.assistSnapshot = snapshot;
+            if (this.proofSessions.activeId) {
+                this.proofSessions.update(this.proofSessions.activeId, {
+                    target,
+                    history: accepted,
+                    script: this.tacticScript,
+                    stale: false
+                });
+                if (this.tacticCaptureBlockedSessionId === this.proofSessions.activeId) {
+                    this.tacticCaptureBlockedSessionId = null;
+                }
+            }
+            if (terminal && explicitRun) {
+                const qed = entries.at(-1)?.command.match(/^qed(?:\s+([^\s]+))?$/);
+                const qedName = qed?.[1];
+                if (qedName) {
+                    const nameAst = parser.parse(qedName);
+                    if (nameAst?.type !== "var" || nameAst.name !== qedName) {
+                        throw new Error(TR("qed命名参数必须是单个常量名"));
+                    }
+                }
+                await this.commitTacticQed(qedName);
+                return;
+            }
+            this.renderTacticTextSnapshot(snapshot, "", null, terminal);
+            this.renderTacticSessionTabs();
+            this.onStateChange();
+        }
+        catch (error) {
+            if (requestId !== this.tacticRequestId || !this.tacticTextMode)
+                return;
+            this.mode = [target, ...accepted];
+            if (snapshot)
+                this.assistSnapshot = snapshot;
+            if (this.proofSessions.activeId) {
+                this.proofSessions.update(this.proofSessions.activeId, {
+                    target,
+                    history: accepted,
+                    script: this.tacticScript
+                });
+                this.tacticCaptureBlockedSessionId = this.proofSessions.activeId;
+            }
+            if (this.assistSnapshot)
+                this.renderTacticTextSnapshot(this.assistSnapshot, String(error), errorLine);
+            this.renderTacticSessionTabs();
+            this.onStateChange();
+        }
+        finally {
+            if (requestId === this.tacticRequestId)
+                this.setTacticBusy(false);
         }
     }
     /**
@@ -431,8 +1036,16 @@ export class TTGui {
         this.setAssistOption("disableMultipleApply", false);
         Assist.disableMultipleApply = false;
     }
-    closeTacticSession() {
+    clearTacticRuntime() {
         this.tacticRequestId++;
+        this.tacticTextReplayRevision++;
+        if (this.tacticTextReplayTimer !== null) {
+            window.clearTimeout(this.tacticTextReplayTimer);
+            this.tacticTextReplayTimer = null;
+        }
+        this.tacticScript = "";
+        this.tacticScriptDirty = false;
+        this.tacticSelectingTarget = false;
         this.mode = null;
         this.assistSnapshot = null;
         this.tacticDefinitionsRevision = -1;
@@ -446,21 +1059,62 @@ export class TTGui {
         document.getElementById("tactic-errmsg").innerText = "";
         document.getElementById("tactic-state").innerHTML = "";
         document.getElementById("tactic-remove").classList.add("hide");
+        document.getElementById("tactic-begin").classList.add("hide");
         document.getElementById("tactic-clear").classList.add("hide");
         document.getElementById("copygate").classList.remove("hide");
         const input = document.getElementById("tactic-input");
         input.value = "";
         this.resizeTacticInput();
         input.classList.add("hide");
+        const script = document.getElementById("tactic-script");
+        if (script)
+            script.value = "";
+        document.getElementById("tactic-text-mode")?.classList?.add?.("hide");
+        document.getElementById("tactic-list")?.parentElement?.classList?.remove?.("hide");
         this.setTacticBusy(false);
         this.assistWorker?.clear().catch(() => { });
         this.assistFallback.clear();
+    }
+    closeTacticSession() {
+        this.captureActiveTacticSession();
+        const closingId = this.proofSessions.activeId;
+        if (closingId)
+            this.proofSessions.close();
+        if (this.tacticSessionReplayId === closingId)
+            this.tacticSessionReplayId = null;
+        if (this.tacticCaptureBlockedSessionId === closingId)
+            this.tacticCaptureBlockedSessionId = null;
+        const nextId = this.proofSessions.activeId;
+        this.clearTacticRuntime();
+        this.renderTacticSessionTabs();
+        this.onStateChange();
+        if (nextId)
+            void this.activateTacticSession(nextId, false);
+    }
+    resetTacticPage() {
+        this.captureActiveTacticSession();
+        const activeId = this.proofSessions.activeId;
+        if (!activeId) {
+            this.beginTacticTargetSelection();
+            return;
+        }
+        this.proofSessions.reset(activeId);
+        if (this.tacticSessionReplayId === activeId)
+            this.tacticSessionReplayId = null;
+        if (this.tacticCaptureBlockedSessionId === activeId)
+            this.tacticCaptureBlockedSessionId = null;
+        this.clearTacticRuntime();
+        this.tacticSelectingTarget = true;
+        this.mode = "tactic-begin";
+        document.getElementById("tactic-hint").innerText = TR("请在定理列表中点选待证命题");
+        this.renderTacticSessionTabs();
+        this.onStateChange();
     }
     async removeTactic(all = false) {
         if (this.tacticBusy)
             return;
         if (!(this.mode instanceof Array) || this.mode.length <= 1 || all) {
-            this.closeTacticSession();
+            this.resetTacticPage();
             return;
         }
         this.mode.pop();
@@ -487,7 +1141,26 @@ export class TTGui {
                 return;
             this.tacticDefinitionsRevision = this.definitionRevision;
             this.mode = [this.mode[0], ...snapshot.history];
+            if (this.tacticTextMode) {
+                this.tacticScript = snapshot.history.join("\n");
+                this.tacticScriptDirty = false;
+                const script = document.getElementById("tactic-script");
+                if (script)
+                    script.value = this.tacticScript;
+            }
+            if (this.proofSessions.activeId) {
+                this.proofSessions.update(this.proofSessions.activeId, {
+                    history: snapshot.history,
+                    script: this.tacticScriptDirty ? this.tacticScript : snapshot.history.join("\n"),
+                    stale: false
+                });
+                if (this.tacticCaptureBlockedSessionId === this.proofSessions.activeId) {
+                    this.tacticCaptureBlockedSessionId = null;
+                }
+            }
             this.renderAssistSnapshot(snapshot);
+            this.renderTacticSessionTabs();
+            this.onStateChange();
         }
         catch (error) {
             if (requestId === this.tacticRequestId) {
@@ -609,6 +1282,10 @@ export class TTGui {
     }
     renderAssistSnapshot(snapshot) {
         this.assistSnapshot = snapshot;
+        if (this.tacticTextMode) {
+            this.renderTacticTextSnapshot(snapshot);
+            return;
+        }
         this.getHottTacticDefCtxt(this.getActiveTacticScopeId());
         this.renderTacticScopeOptions();
         const hint = document.getElementById("tactic-hint");
@@ -634,6 +1311,7 @@ export class TTGui {
             nodes: [snapshot.elem, snapshot.theorem]
         }, [], holes, this.getInhabitatArray().length));
         document.getElementById("tactic-remove").classList.remove("hide");
+        document.getElementById("tactic-begin").classList.remove("hide");
         document.getElementById("tactic-clear").classList.remove("hide");
         document.getElementById("copygate").classList.add("hide");
         const input = document.getElementById("tactic-input");
@@ -1170,6 +1848,70 @@ export class TTGui {
             }));
         }
     }
+    getTheoremWorkspace() {
+        this.theoremWorkspace ??= new TheoremWorkspace();
+        return this.theoremWorkspace;
+    }
+    theoremWorkspaceItemsFromDom() {
+        return this.theoremItems.map((item, index) => {
+            if (!item.id)
+                item.id = `${item.kind}-legacy-${index}`;
+            return item.kind === "theorem"
+                ? {
+                    kind: "theorem",
+                    id: item.id,
+                    value: String(item.input?.value ?? ""),
+                    local: !!item.localCheckbox?.checked
+                }
+                : {
+                    kind: "folder",
+                    id: item.id,
+                    name: item.name,
+                    length: item.length,
+                    open: item.open,
+                    disabled: item.disabled
+                };
+        });
+    }
+    syncTheoremWorkspaceFromDom(force = false) {
+        const workspace = this.getTheoremWorkspace();
+        // DOM hydration is a compatibility path for tests/legacy callers that
+        // construct theoremItems directly.  Normal reads use the already
+        // hydrated workspace; replacing the whole list on every scope query
+        // made ordered validation O(n^2) for large saves.
+        if (force || !this.theoremWorkspaceHydrated) {
+            workspace.replace(this.theoremWorkspaceItemsFromDom());
+            this.theoremWorkspaceHydrated = true;
+        }
+        return workspace;
+    }
+    applyTheoremWorkspaceSnapshot(snapshot, additionalItems = []) {
+        const byId = new Map();
+        for (const item of [...this.theoremItems, ...additionalItems]) {
+            if (item?.id)
+                byId.set(item.id, item);
+        }
+        const next = [];
+        for (const record of snapshot) {
+            const item = byId.get(record.id);
+            if (!item || item.kind !== record.kind)
+                continue;
+            if (item.kind === "theorem" && record.kind === "theorem") {
+                item.input.value = record.value;
+                item.localCheckbox.checked = record.local;
+            }
+            else if (item.kind === "folder" && record.kind === "folder") {
+                item.name = record.name;
+                item.length = record.length;
+                item.open = record.open;
+                item.disabled = record.disabled;
+            }
+            next.push(item);
+        }
+        this.theoremItems = next;
+        this.theoremInputsCacheRevision = -1;
+        this.theoremWorkspaceHydrated = true;
+    }
     createTheoremItemId(prefix) {
         const uuid = globalThis.crypto?.randomUUID?.();
         return prefix + "-" + (uuid ?? ++this.theoremItemSequence);
@@ -1186,22 +1928,6 @@ export class TTGui {
         this.theoremDragger.attachIdxListener(handle);
         return handle;
     }
-    insertTheoremItem(item, after) {
-        if (!after) {
-            this.theoremItems.push(item);
-            return;
-        }
-        const afterId = after.dataset.dragId;
-        const afterIndex = this.theoremItems.findIndex(entry => entry.id === afterId);
-        if (afterIndex < 0) {
-            this.theoremItems.push(item);
-            return;
-        }
-        const scopes = this.scanTheoremFolderScope([afterId]).get(afterId) ?? [];
-        for (const folder of scopes)
-            folder.length++;
-        this.theoremItems.splice(afterIndex + 1, 0, item);
-    }
     syncTheoremDomOrder() {
         const addButton = document.getElementById("add-btn");
         let nextSibling = addButton;
@@ -1213,28 +1939,31 @@ export class TTGui {
             nextSibling = wrapper;
         }
     }
-    normalizeTheoremFolderLengths() {
-        for (let i = 0; i < this.theoremItems.length; i++) {
-            const item = this.theoremItems[i];
-            if (item.kind !== "folder")
-                continue;
-            item.length = Math.max(0, Math.min(item.length, this.theoremItems.length - i - 1));
+    appendRestoredTheoremItem(item) {
+        this.theoremItems.push(item);
+        this.theoremInputsCacheRevision = -1;
+        const addButton = document.getElementById("add-btn");
+        if (this.inhabitList && addButton) {
+            this.inhabitList.insertBefore(item.wrapper, addButton);
+        }
+        else {
+            this.syncTheoremDomOrder();
         }
     }
+    normalizeTheoremFolderLengths() {
+        const workspace = this.syncTheoremWorkspaceFromDom();
+        this.applyTheoremWorkspaceSnapshot(workspace.snapshot());
+    }
     scanTheoremFolderScope(targets) {
-        const targetSet = new Set(targets.filter(Boolean));
-        const stack = [];
+        const scopes = this.syncTheoremWorkspaceFromDom().folderScopesForItems(targets);
+        const folders = new Map(this.theoremItems
+            .filter((item) => item.kind === "folder")
+            .map(folder => [folder.id, folder]));
         const result = new Map;
-        for (let i = 0; i < this.theoremItems.length; i++) {
-            while (stack.length && stack[stack.length - 1].end < i)
-                stack.pop();
-            const item = this.theoremItems[i];
-            if (item.kind === "folder") {
-                const length = Math.max(0, Math.min(item.length, this.theoremItems.length - i - 1));
-                stack.push({ folder: item, end: i + length });
-            }
-            if (targetSet.has(item.id))
-                result.set(item.id, stack.map(entry => entry.folder));
+        for (const [id, folderScopes] of scopes) {
+            result.set(id, folderScopes
+                .map(folder => folders.get(folder.id))
+                .filter((folder) => !!folder));
         }
         return result;
     }
@@ -1251,7 +1980,7 @@ export class TTGui {
         return this.theoremItems.filter((item) => item.kind === "folder");
     }
     getFolderPath(folderId) {
-        return this.getFolderScopeForFolder(folderId).map(folder => folder.name).join(" / ");
+        return this.syncTheoremWorkspaceFromDom().folderPath(folderId);
     }
     getFolderScopeForInput(input, selectedFolderId) {
         const item = this.getTheoremItemForInput(input);
@@ -1271,7 +2000,7 @@ export class TTGui {
         const item = this.getTheoremItemForInput(index);
         if (!item)
             return null;
-        const scopes = this.scanTheoremFolderScope([item.id]).get(item.id) ?? [];
+        const scopes = this.syncTheoremWorkspaceFromDom().folderScopesForItem(item.id);
         return scopes.length ? scopes[scopes.length - 1].id : null;
     }
     findVisibleDefinitionIndex(name, targetIndex, selectedFolderId) {
@@ -1309,15 +2038,7 @@ export class TTGui {
         const definition = this.userDefinedConsts[index];
         if (!definition)
             return false;
-        const item = this.getTheoremItemForInput(index);
-        if (!item?.localCheckbox.checked)
-            return true;
-        const definitionFolderId = this.getDefinitionFolderId(index);
-        if (!definitionFolderId)
-            return true;
-        if (!selectedFolderId)
-            return false;
-        return this.getFolderScopeForFolder(selectedFolderId).some(folder => folder.id === definitionFolderId);
+        return this.syncTheoremWorkspaceFromDom().isTheoremInScope(index, selectedFolderId);
     }
     isDefinitionVisible(index, targetIndex, selectedFolderId) {
         return index < targetIndex && this.isDefinitionInScope(index, selectedFolderId);
@@ -1410,37 +2131,36 @@ export class TTGui {
     renderTheoremStructure() {
         if (!this.restoringTheoremItems)
             this.normalizeTheoremFolderLengths();
+        const workspace = this.syncTheoremWorkspaceFromDom();
+        this.applyTheoremWorkspaceSnapshot(workspace.snapshot());
         this.syncTheoremDomOrder();
-        const stack = [];
-        for (let i = 0; i < this.theoremItems.length; i++) {
-            while (stack.length && stack[stack.length - 1].end < i)
-                stack.pop();
-            const item = this.theoremItems[i];
-            const hidden = stack.some(entry => !entry.open);
-            const disabled = stack.some(entry => entry.disabled);
-            item.wrapper.classList.toggle("hide", hidden);
-            item.wrapper.classList.toggle("tt-folder-disabled", disabled || (item.kind === "folder" && item.disabled));
-            item.wrapper.style.setProperty("--tt-folder-depth", String(stack.length));
+        const layout = new Map(workspace.layout().map(item => [item.id, item]));
+        for (const item of this.theoremItems) {
+            const state = layout.get(item.id);
+            if (!state)
+                continue;
+            item.wrapper.classList.toggle("hide", state.hidden);
+            item.wrapper.classList.toggle("tt-folder-disabled", state.disabled);
+            item.wrapper.style.setProperty("--tt-folder-depth", String(state.depth));
             if (item.kind === "theorem") {
-                const canBeLocal = stack.length > 0;
-                item.input.dataset.ttDisabled = String(disabled);
-                item.wrapper.classList.toggle("tt-theorem-disabled", disabled);
-                item.localCheckbox.disabled = !canBeLocal;
-                if (!canBeLocal)
+                item.input.dataset.ttDisabled = String(state.disabled);
+                item.wrapper.classList.toggle("tt-theorem-disabled", state.disabled);
+                item.localCheckbox.disabled = !state.canBeLocal;
+                if (!state.canBeLocal) {
                     item.localCheckbox.checked = false;
-                item.localCheckbox.title = TR(canBeLocal
+                    workspace.updateTheorem(item.id, { local: false });
+                }
+                item.localCheckbox.title = TR(state.canBeLocal
                     ? "局部常量仅在所在文件夹及子文件夹中可见"
                     : "局部常量需放在文件夹中");
                 item.localCheckbox.parentElement.title = item.localCheckbox.title;
                 continue;
             }
-            const folderLength = Math.max(0, Math.min(item.length, this.theoremItems.length - i - 1));
             item.title.innerText = item.name;
             item.title.classList.toggle("dir-open", item.open);
             item.title.classList.toggle("dir-close", !item.open);
             item.wrapper.dataset.dragFolderOpen = String(item.open);
             item.checkbox.checked = item.disabled;
-            stack.push({ end: i + folderLength, open: item.open, disabled: disabled || item.disabled });
         }
     }
     isTypePanelVisible() {
@@ -1596,19 +2316,6 @@ export class TTGui {
         else
             this.completeTheoremValidation(next.id);
     }
-    theoremInputIndexAtItem(item) {
-        return theoremInputIndexBeforeItem(this.theoremItems, this.theoremItems.indexOf(item));
-    }
-    getFolderTheoremRange(folder) {
-        const folderIndex = this.theoremItems.indexOf(folder);
-        if (folderIndex < 0)
-            return null;
-        const subtreeEnd = Math.min(this.theoremItems.length, folderIndex + Math.max(0, folder.length) + 1);
-        return {
-            startIndex: theoremInputIndexBeforeItem(this.theoremItems, folderIndex),
-            endIndex: theoremInputIndexBeforeItem(this.theoremItems, subtreeEnd)
-        };
-    }
     realignUserDefinitions(previousInputs, previousDefinitions) {
         const byInput = new Map();
         previousInputs.forEach((input, index) => byInput.set(input, previousDefinitions[index]));
@@ -1618,81 +2325,23 @@ export class TTGui {
     moveTheoremItem(srcId, dstId) {
         if (!srcId)
             return;
-        // Clamp malformed folder lengths before slicing a subtree.
-        this.renderTheoremStructure();
-        const srcIndex = this.theoremItems.findIndex(item => item.id === srcId);
-        if (srcIndex < 0)
-            return;
-        const source = this.theoremItems[srcIndex];
-        const movedCount = source.kind === "folder" ? source.length + 1 : 1;
-        const samePosition = srcId === dstId;
-        const moving = this.theoremItems.slice(srcIndex, srcIndex + movedCount);
-        const insideFolderId = dstId.startsWith("inside:") ? dstId.slice("inside:".length) : null;
-        const insideFolder = insideFolderId
-            ? this.theoremItems.find(item => item.id === insideFolderId && item.kind === "folder")
-            : null;
-        if (insideFolderId && !insideFolder)
-            return;
-        if (insideFolder && !insideFolder.open)
-            return;
-        if (!samePosition && moving.some(item => item.id === (insideFolderId ?? dstId)))
-            return;
-        const dstIndex = insideFolder
-            ? this.theoremItems.indexOf(insideFolder)
-            : dstId === " " ? -1 : this.theoremItems.findIndex(item => item.id === dstId);
-        if (dstIndex < 0 && dstId !== " ")
-            return;
-        const previousDestination = dstIndex < 0
-            ? this.theoremItems[this.theoremItems.length - 1]
-            : this.theoremItems[dstIndex - 1];
-        if (!insideFolder && previousDestination && moving.some(item => item.id === previousDestination.id))
-            return;
-        const scopeTargets = [srcId, insideFolderId, previousDestination?.id].filter(Boolean);
-        const scopes = this.scanTheoremFolderScope(scopeTargets);
-        for (const folder of scopes.get(srcId) ?? []) {
-            if (folder.id !== srcId)
-                folder.length = Math.max(0, folder.length - movedCount);
-        }
-        if (insideFolder) {
-            for (const folder of scopes.get(insideFolder.id) ?? [])
-                folder.length += movedCount;
-        }
-        else {
-            for (const folder of scopes.get(previousDestination?.id) ?? []) {
-                if (!folder.open)
-                    break;
-                folder.length += movedCount;
-            }
-        }
         const previousInputs = this.getInhabitatArray();
         const previousDefinitions = this.userDefinedConsts.slice();
-        const movingInputs = moving
-            .filter((item) => item.kind === "theorem")
-            .map(item => item.input);
-        const previousTheoremPositions = movingInputs.map(input => previousInputs.indexOf(input)).filter(index => index >= 0);
-        if (!samePosition) {
-            this.theoremItems.splice(srcIndex, movedCount);
-            const insertIndex = insideFolder
-                ? this.theoremItems.findIndex(item => item.id === insideFolder.id) + 1
-                : dstId === " "
-                    ? this.theoremItems.length
-                    : this.theoremItems.findIndex(item => item.id === dstId);
-            this.theoremItems.splice(insertIndex < 0 ? this.theoremItems.length : insertIndex, 0, ...moving);
-            this.syncTheoremDomOrder();
-            this.realignUserDefinitions(previousInputs, previousDefinitions);
-        }
+        const workspace = this.syncTheoremWorkspaceFromDom(true);
+        const mutation = workspace.move(srcId, dstId);
+        if (!mutation.changed)
+            return;
+        this.applyTheoremWorkspaceSnapshot(mutation.snapshot);
+        this.syncTheoremDomOrder();
+        this.realignUserDefinitions(previousInputs, previousDefinitions);
         this.definitionRevision++;
         this.theoremStructureRevision++;
         this.gatePreviewStructureRevision = -1;
         this.renderTheoremStructure();
+        this.reconcileProofSessionBindings(false);
         this.onStateChange();
-        if (movingInputs.length) {
-            const nextInputs = this.getInhabitatArray();
-            const nextTheoremPositions = movingInputs.map(input => nextInputs.indexOf(input)).filter(index => index >= 0);
-            const earliestChecking = nextInputs.findIndex(input => input.parentElement?.classList.contains("checking"));
-            const revalidateFrom = Math.min(...previousTheoremPositions, ...nextTheoremPositions, ...(earliestChecking >= 0 ? [earliestChecking] : []));
-            this.revalidateTheorems(Number.isFinite(revalidateFrom) ? revalidateFrom : 0);
-        }
+        if (mutation.revalidateFrom !== null)
+            this.revalidateTheorems(mutation.revalidateFrom);
     }
     addTheoremFolder(name, saved, silent = false) {
         if (name === undefined)
@@ -1746,28 +2395,30 @@ export class TTGui {
             checkbox
         };
         title.addEventListener("click", () => {
-            folder.open = !folder.open;
+            const workspace = this.syncTheoremWorkspaceFromDom(true);
+            const mutation = workspace.setFolderOpen(folder.id, !folder.open);
+            this.applyTheoremWorkspaceSnapshot(mutation.snapshot);
             this.renderTheoremStructure();
             this.onStateChange();
         });
         checkbox.addEventListener("change", () => {
-            const theoremRange = this.getFolderTheoremRange(folder);
-            folder.disabled = checkbox.checked;
+            const workspace = this.syncTheoremWorkspaceFromDom(true);
+            const mutation = workspace.setFolderDisabled(folder.id, checkbox.checked);
+            this.applyTheoremWorkspaceSnapshot(mutation.snapshot);
             this.definitionRevision++;
             this.theoremStructureRevision++;
             this.gatePreviewStructureRevision = -1;
             this.renderTheoremStructure();
             this.onStateChange();
-            // An empty folder changes no theorem visibility. In particular, a
-            // newly created folder at the top must not restart the complete
-            // validation chain merely because its checkbox changed.
-            if (theoremRange && theoremRange.endIndex > theoremRange.startIndex) {
-                this.revalidateTheorems(theoremRange.startIndex);
-            }
+            if (mutation.revalidateFrom !== null)
+                this.revalidateTheorems(mutation.revalidateFrom);
         });
         addTheorem.addEventListener("click", () => {
-            if (!folder.open)
-                folder.open = true;
+            if (!folder.open) {
+                const workspace = this.syncTheoremWorkspaceFromDom(true);
+                const mutation = workspace.setFolderOpen(folder.id, true);
+                this.applyTheoremWorkspaceSnapshot(mutation.snapshot);
+            }
             this.renderTheoremStructure();
             this.updateInhabitList(undefined, folder);
         });
@@ -1775,48 +2426,86 @@ export class TTGui {
             const nextName = prompt(TR("文件夹名称："), folder.name)?.trim();
             if (!nextName)
                 return;
-            folder.name = nextName;
+            const workspace = this.syncTheoremWorkspaceFromDom(true);
+            const mutation = workspace.renameFolder(folder.id, nextName);
+            this.applyTheoremWorkspaceSnapshot(mutation.snapshot);
             this.renderTheoremStructure();
             this.onStateChange();
         });
         remove.addEventListener("click", () => {
             if (!confirm(TR("删除文件夹后，里面的定理会移动到上一级。确定继续吗？")))
                 return;
-            const index = this.theoremItems.indexOf(folder);
-            const revalidateFrom = this.theoremInputIndexAtItem(folder);
-            const scopes = this.scanTheoremFolderScope([folder.id]).get(folder.id) ?? [];
-            for (const parent of scopes) {
-                if (parent.id !== folder.id)
-                    parent.length = Math.max(0, parent.length - 1);
-            }
-            if (index >= 0)
-                this.theoremItems.splice(index, 1);
+            const workspace = this.syncTheoremWorkspaceFromDom(true);
+            const mutation = workspace.removeFolder(folder.id);
+            this.applyTheoremWorkspaceSnapshot(mutation.snapshot);
             wrapper.remove();
             this.definitionRevision++;
             this.theoremStructureRevision++;
             this.gatePreviewStructureRevision = -1;
             this.renderTheoremStructure();
             this.onStateChange();
-            this.revalidateTheorems(revalidateFrom);
+            if (mutation.revalidateFrom !== null)
+                this.revalidateTheorems(mutation.revalidateFrom);
         });
-        this.theoremItems.push(folder);
+        if (this.restoringTheoremItems) {
+            // During save restore descendants have not been appended yet.
+            // Keep the saved flat length untouched and hydrate the workspace
+            // only after the complete ordered list exists.
+            this.appendRestoredTheoremItem(folder);
+            return folder;
+        }
+        const workspace = this.syncTheoremWorkspaceFromDom(true);
+        const mutation = workspace.insertFolder({
+            kind: "folder",
+            id: folder.id,
+            name: folder.name,
+            length: folder.length,
+            open: folder.open,
+            disabled: folder.disabled
+        }, workspace.itemCount, null);
+        this.applyTheoremWorkspaceSnapshot(mutation.snapshot, [folder]);
         this.renderTheoremStructure();
         if (!silent)
             this.onStateChange();
         return folder;
     }
     serializeTheoremItems() {
-        this.normalizeTheoremFolderLengths();
-        return this.theoremItems.map(item => item.kind === "theorem"
-            ? { kind: "theorem", value: item.input.value, local: item.localCheckbox.checked }
-            : {
-                kind: "folder",
-                id: item.id,
-                name: item.name,
-                length: item.length,
-                open: item.open,
-                disabled: item.disabled
-            });
+        return this.syncTheoremWorkspaceFromDom(true).serialize();
+    }
+    serializeProofSessions() {
+        this.captureActiveTacticSession();
+        this.reconcileProofSessionBindings(false);
+        return this.proofSessions.serialize();
+    }
+    resetProofAssistantForSaveLoad() {
+        this.pendingProofSessions = null;
+        this.proofSessions = new TTProofSessionStore();
+        this.tacticSessionReplayId = null;
+        this.tacticCaptureBlockedSessionId = null;
+        this.clearTacticRuntime();
+        this.renderTacticSessionTabs();
+    }
+    queueProofSessionsRestore(serialized) {
+        this.pendingProofSessions = serialized && Array.isArray(serialized.sessions)
+            ? { sessions: serialized.sessions, activeId: serialized.activeId ?? null }
+            : { sessions: [], activeId: null };
+        if (!this.skipRendering)
+            void this.restorePendingProofSessionsWhenReady();
+    }
+    async restorePendingProofSessionsWhenReady() {
+        const serialized = this.pendingProofSessions;
+        if (!serialized || this.skipRendering)
+            return;
+        await this.theoremValidation.waitForIdle();
+        if (this.pendingProofSessions !== serialized)
+            return;
+        this.pendingProofSessions = null;
+        this.proofSessions = TTProofSessionStore.deserialize(serialized);
+        this.reconcileProofSessionBindings(true);
+        this.renderTacticSessionTabs();
+        const activeId = this.proofSessions.activeId;
+        if (activeId)
+            await this.activateTacticSession(activeId, false);
     }
     restoreTheoremItems(items) {
         this.invalidateHottDefCtxt();
@@ -1832,6 +2521,11 @@ export class TTGui {
         for (const item of this.theoremItems)
             item.wrapper.remove();
         this.theoremItems = [];
+        this.getTheoremWorkspace().replace([]);
+        // Keep the empty workspace authoritative while rows are appended. A
+        // partial DOM hydration would normalize saved folder lengths against
+        // the incomplete suffix and lose nested scopes.
+        this.theoremWorkspaceHydrated = true;
         this.userDefinedConsts = [];
         this.refreshUserConstNames();
         this.gateQueryCache.clear();
@@ -1854,11 +2548,8 @@ export class TTGui {
         finally {
             this.restoringTheoremItems = false;
         }
-        this.theoremItems.forEach((item, index) => {
-            if (item.kind === "folder") {
-                item.length = Math.max(0, Math.min(item.length, this.theoremItems.length - index - 1));
-            }
-        });
+        const workspace = this.syncTheoremWorkspaceFromDom(true);
+        this.applyTheoremWorkspaceSnapshot(workspace.snapshot());
         this.renderTheoremStructure();
         if (!this.skipRendering)
             this.revalidateTheorems();
@@ -2177,14 +2868,19 @@ export class TTGui {
         }
         if (insertionItemIndex < 0)
             insertionItemIndex = this.theoremItems.length;
-        const previousInputs = this.getInhabitatArray();
-        const insertionInputIndex = theoremInputIndexBeforeItem(this.theoremItems, insertionItemIndex);
-        const hasShiftedSuffix = insertionInputIndex < previousInputs.length;
-        if (hasShiftedSuffix)
-            this.invalidateTheoremChecks(insertionInputIndex, true);
-        this.definitionRevision++;
-        this.theoremStructureRevision++;
-        this.gatePreviewStructureRevision = -1;
+        const previousInputs = this.restoringTheoremItems ? [] : this.getInhabitatArray();
+        const workspace = this.syncTheoremWorkspaceFromDom(!this.restoringTheoremItems);
+        const insertionInputIndex = this.restoringTheoremItems
+            ? 0
+            : workspace.theoremIndexBeforeItem(insertionItemIndex);
+        if (!this.restoringTheoremItems) {
+            const hasShiftedSuffix = insertionInputIndex < previousInputs.length;
+            if (hasShiftedSuffix)
+                this.invalidateTheoremChecks(insertionInputIndex, true);
+            this.definitionRevision++;
+            this.theoremStructureRevision++;
+            this.gatePreviewStructureRevision = -1;
+        }
         // A generated proof can be thousands of characters long.  Keep the
         // editor single-line in interaction semantics, but use a textarea so
         // the value can wrap and grow instead of creating horizontal scroll.
@@ -2235,6 +2931,19 @@ export class TTGui {
         });
         input.addEventListener("input", () => {
             resizeTheoremInput();
+            const theoremItem = this.getTheoremItemForInput(input);
+            if (theoremItem) {
+                this.getTheoremWorkspace().updateTheorem(theoremItem.id, { value: input.value });
+                const currentIdx = this.getInhabitatArray().indexOf(input);
+                this.proofSessions.markTheoremTargetChanged(theoremItem.id, input.value, currentIdx);
+                if (this.proofSessions.active?.theoremItemId === theoremItem.id
+                    && this.mode instanceof Array) {
+                    this.mode[0] = input.value;
+                    this.assistSnapshot = null;
+                    this.tacticDefinitionsRevision = -1;
+                }
+                this.renderTacticSessionTabs();
+            }
             if (!input["validationInvalidated"]) {
                 const currentIdx = this.getInhabitatArray().indexOf(input);
                 if (currentIdx >= 0)
@@ -2354,14 +3063,16 @@ export class TTGui {
                 this.theoremStructureRevision++;
                 this.gatePreviewStructureRevision = -1;
                 const [removed] = this.userDefinedConsts.splice(current, 1);
-                const itemIndex = this.theoremItems.findIndex(item => item.kind === "theorem" && item.input === input);
-                if (itemIndex >= 0) {
-                    const item = this.theoremItems[itemIndex];
-                    const scopes = this.scanTheoremFolderScope([item.id]).get(item.id) ?? [];
-                    for (const folder of scopes)
-                        folder.length = Math.max(0, folder.length - 1);
-                    this.theoremItems.splice(itemIndex, 1);
-                }
+                const theoremItem = this.getTheoremItemForInput(input);
+                if (theoremItem)
+                    this.proofSessions.detachTheorem(theoremItem.id);
+                const workspace = this.syncTheoremWorkspaceFromDom(true);
+                const mutation = theoremItem
+                    ? workspace.removeTheorem(theoremItem.id)
+                    : null;
+                if (mutation?.changed)
+                    this.applyTheoremWorkspaceSnapshot(mutation.snapshot);
+                this.reconcileProofSessionBindings(false);
                 this.refreshUserConstNames();
                 try {
                     wrapper.remove();
@@ -2732,7 +3443,8 @@ export class TTGui {
             });
         };
         div.addEventListener("click", ev => {
-            if (this.mode === "tactic-begin" && !this.isTheoremInputDisabled(input)) {
+            if ((this.mode === "tactic-begin" || this.tacticSelectingTarget)
+                && !this.isTheoremInputDisabled(input)) {
                 this.executeTactic(input.value, input);
             }
             else {
@@ -2748,25 +3460,32 @@ export class TTGui {
         const wrapper = document.createElement("div");
         wrapper.classList.add("wrapper");
         const id = this.createTheoremItemId("theorem");
-        const previousDefinitions = this.userDefinedConsts.slice();
+        const previousDefinitions = this.restoringTheoremItems ? [] : this.userDefinedConsts.slice();
         this.createTheoremDragHandle(wrapper, id);
         wrapper.appendChild(button);
         wrapper.appendChild(localLabel);
         wrapper.appendChild(input);
         wrapper.appendChild(div);
         const theorem = { kind: "theorem", id, wrapper, input, localCheckbox };
-        const insertIndex = destinationFolder ? this.getFolderAppendIndex(destinationFolder) : -1;
-        if (insertIndex >= 0) {
-            for (const folder of this.getFolderScopeForFolder(destinationFolder.id))
-                folder.length++;
-            this.theoremItems.splice(insertIndex, 0, theorem);
+        if (!this.restoringTheoremItems) {
+            const insertIndex = destinationFolder
+                ? workspace.folderAppendIndex(destinationFolder.id)
+                : insertionItemIndex;
+            const parentFolderId = destinationFolder
+                ? destinationFolder.id
+                : insertPos ? undefined : null;
+            const mutation = workspace.insertTheorem({
+                kind: "theorem",
+                id,
+                value: input.value,
+                local: localCheckbox.checked
+            }, insertIndex, parentFolderId);
+            this.applyTheoremWorkspaceSnapshot(mutation.snapshot, [theorem]);
+            this.syncTheoremDomOrder();
+            this.realignUserDefinitions(previousInputs, previousDefinitions);
+            this.renderTheoremStructure();
+            this.reconcileProofSessionBindings(false);
         }
-        else {
-            this.insertTheoremItem(theorem, insertPos);
-        }
-        this.syncTheoremDomOrder();
-        this.realignUserDefinitions(previousInputs, previousDefinitions);
-        this.renderTheoremStructure();
         // The newly inserted row is intentionally left empty and focused.  If
         // there are existing rows after it, validate those rows starting after
         // the new row so they regain their correct definition slots.
@@ -2781,12 +3500,24 @@ export class TTGui {
             const currentIdx = this.getInhabitatArray().indexOf(input);
             if (currentIdx < 0)
                 return;
+            const mutation = this.getTheoremWorkspace().updateTheorem(id, {
+                local: localCheckbox.checked
+            });
+            if (mutation.changed)
+                this.applyTheoremWorkspaceSnapshot(mutation.snapshot);
             this.definitionRevision++;
             this.theoremStructureRevision++;
             this.gatePreviewStructureRevision = -1;
             this.onStateChange();
             this.revalidateTheorems(currentIdx);
         });
+        if (this.restoringTheoremItems) {
+            // Restore builds the flat DOM list first. Inserting into the
+            // workspace here would normalize folder lengths against a
+            // partial suffix and destroy nested save structure.
+            this.appendRestoredTheoremItem(theorem);
+            return input;
+        }
         if (!this.restoringTheoremItems)
             input.focus();
         return input;
@@ -2804,10 +3535,7 @@ export class TTGui {
         return this.theoremItems.find((item) => item.kind === "folder" && item.id === scopeId);
     }
     getFolderAppendIndex(folder) {
-        const folderIndex = this.theoremItems.indexOf(folder);
-        return folderIndex < 0
-            ? -1
-            : Math.min(this.theoremItems.length, folderIndex + folder.length + 1);
+        return this.syncTheoremWorkspaceFromDom().folderAppendIndex(folder.id);
     }
     settlePendingTheorems(coordinateValidation = false) {
         const inputs = this.getInhabitatArray();
@@ -3030,65 +3758,45 @@ export class TTGui {
     async executeTactic(value, targetInput = null, initialScopeFolderId) {
         if (this.tacticBusy)
             return;
-        // A definition immediately above may still be in the Core Worker.
-        // Commit that pending validation before taking the definition snapshot
-        // used by the proof-assistant Worker.
+        this.proofSessions ??= new TTProofSessionStore();
         this.settlePendingTheorems(true);
         const target = typeof value === "string" ? value : parser.stringify(value);
-        const requestId = ++this.tacticRequestId;
-        this.tacticTargetInput = targetInput;
-        this.tacticScopeExplicit = initialScopeFolderId !== undefined;
-        this.tacticScopeFolderId = this.tacticScopeExplicit
-            ? initialScopeFolderId
-            : this.getDefaultTacticScope(targetInput);
-        this.renderTacticScopeOptions();
-        this.mode = [target];
-        this.setTacticBusy(true);
-        document.getElementById("tactic-errmsg").innerText = "";
-        try {
-            await this.theoremValidation.waitForIdle();
-            if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
-                return;
-            const snapshot = await this.startAssistSession(target);
-            if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
-                return;
-            this.tacticDefinitionsRevision = this.definitionRevision;
-            this.mode = [target, ...snapshot.history];
-            this.renderAssistSnapshot(snapshot);
-            const input = document.getElementById("tactic-input");
-            input.value = "";
-            this.resizeTacticInput();
-            input.focus();
+        this.captureActiveTacticSession();
+        let session;
+        const theoremItem = targetInput ? this.getTheoremItemForInput(targetInput) : null;
+        if (theoremItem?.kind === "theorem") {
+            const targetTheoremIndex = this.getInhabitatArray().indexOf(targetInput);
+            const scopeExplicit = initialScopeFolderId !== undefined;
+            session = this.proofSessions.openTheorem({
+                target,
+                theoremItemId: theoremItem.id,
+                targetTheoremIndex,
+                scopeFolderId: scopeExplicit
+                    ? initialScopeFolderId ?? null
+                    : this.getDefaultTacticScope(targetInput),
+                ...(scopeExplicit ? { scopeExplicit: true } : {})
+            }, true);
         }
-        catch (error) {
-            if (requestId !== this.tacticRequestId)
-                return;
-            document.getElementById("tactic-hint").innerText = TR("命题格式有误：") + this.formatTacticError(error);
-            document.getElementById("tactic-remove").classList.add("hide");
-            document.getElementById("tactic-clear").classList.add("hide");
-            document.getElementById("copygate").classList.remove("hide");
-            document.getElementById("tactic-input").classList.add("hide");
-            this.mode = null;
-            this.assistSnapshot = null;
-            this.tacticTargetInput = null;
-            this.tacticScopeFolderId = null;
-            this.tacticScopeExplicit = false;
-            this.renderTacticScopeOptions();
+        else if (initialScopeFolderId !== undefined) {
+            session = this.proofSessions.openGate({
+                target,
+                scopeFolderId: initialScopeFolderId,
+                scopeExplicit: true
+            }, true);
         }
-        finally {
-            if (requestId === this.tacticRequestId)
-                this.setTacticBusy(false);
+        else {
+            session = this.proofSessions.openManual({ target }, true);
         }
-        document.getElementById("tactic-list").parentElement.scrollTo(0, 1e8);
+        this.tacticSelectingTarget = false;
+        this.renderTacticSessionTabs();
+        this.onStateChange();
+        await this.activateTacticSession(session.id, false);
     }
     async addTactic(_noCheck) {
         const input = document.getElementById("tactic-input");
         const hint = document.getElementById("tactic-hint");
         if (!this.mode) {
-            hint.innerText = TR("请在定理列表中点选待证命题");
-            this.mode = "tactic-begin";
-            document.getElementById("tactic-clear").classList.add("hide");
-            document.getElementById("copygate").classList.remove("hide");
+            this.beginTacticTargetSelection();
             return;
         }
         if (!(this.mode instanceof Array) || this.tacticBusy)
@@ -3118,7 +3826,7 @@ export class TTGui {
                     ? `${qedName}:=${result.proof}:${result.theorem}`
                     : `${result.proof}:${result.theorem}`;
                 output.dispatchEvent(new Event("input"));
-                this.closeTacticSession();
+                this.resetTacticPage();
                 output.blur();
                 return;
             }
@@ -3135,9 +3843,21 @@ export class TTGui {
             if (requestId !== this.tacticRequestId || !(this.mode instanceof Array))
                 return;
             this.mode = [target, ...snapshot.history];
+            if (this.proofSessions.activeId) {
+                this.proofSessions.update(this.proofSessions.activeId, {
+                    history: snapshot.history,
+                    script: snapshot.history.join("\n"),
+                    stale: false
+                });
+                if (this.tacticCaptureBlockedSessionId === this.proofSessions.activeId) {
+                    this.tacticCaptureBlockedSessionId = null;
+                }
+            }
             input.value = "";
             this.resizeTacticInput();
             this.renderAssistSnapshot(snapshot);
+            this.renderTacticSessionTabs();
+            this.onStateChange();
             input.focus();
         }
         catch (error) {
@@ -3167,6 +3887,7 @@ export class TTGui {
         this.updateTypeList(this.unlockedTypes);
         this.warmCoreWorkerWhenEmpty();
         this.revalidateTheorems();
+        void this.restorePendingProofSessionsWhenReady();
     }
     warmCoreWorkerWhenEmpty() {
         if (!this.coreWorker)

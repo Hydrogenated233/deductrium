@@ -145,3 +145,17 @@ npm run package
   reporting a release.
 - When reusing a same-day release, verify that the lightweight tag, release
   target commit, and uploaded ZIP all point to the workflow's commit.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specifications live in GitHub Issues for Hydrogenated233/deductrium; use the gh CLI. See docs/agents/issue-tracker.md.
+
+### Triage labels
+
+Use the default triage labels: needs-triage, needs-info, ready-for-agent, ready-for-human, and wontfix. See docs/agents/triage-labels.md.
+
+### Domain docs
+
+This is a single-context repository with root CONTEXT.md and docs/adr/ conventions. See docs/agents/domain.md.

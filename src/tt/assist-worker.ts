@@ -9,7 +9,13 @@ import { TTCoreConfig } from "./engine.js";
 import { TTCoreSession, TTDefinitionSlot } from "./core-session.js";
 
 type Request =
-    | { id: number, kind: "configure", config: TTCoreConfig, definitions?: TTDefinitionSlot[] }
+    | {
+        id: number;
+        kind: "configure";
+        config: TTCoreConfig;
+        definitions?: TTDefinitionSlot[];
+        loadedThrough?: number;
+    }
     | { id: number, kind: "truncate", startIndex: number }
     | { id: number, kind: "set-definition", index: number, definition: TTDefinitionSlot }
     | { id: number, kind: "start", target: AST | string, options: TTAssistOptions, history?: string[] }
@@ -29,7 +35,7 @@ globalThis.addEventListener("message", (event: MessageEvent<Request>) => {
     try {
         let result: TTAssistSnapshot | TTAssistQedResult;
         if (request.kind === "configure") {
-            definitions.configure(request.config, request.definitions);
+            definitions.configure(request.config, request.definitions, request.loadedThrough);
             engine.clear();
         } else if (request.kind === "truncate") {
             definitions.truncate(request.startIndex);

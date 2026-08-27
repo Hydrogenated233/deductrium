@@ -209,6 +209,7 @@ async function generationChangeReusesSessionAndRetriesOnce() {
 async function ordinaryRecheckPreservesRetainedSuffix() {
     let checkAttempts = 0;
     const restoredDefinitions = [];
+    const restoredLoadedThrough = [];
     globalThis.fetch = async (url, init = {}) => {
         if (url === "/api/tt/session") {
             return jsonResponse({
@@ -222,6 +223,7 @@ async function ordinaryRecheckPreservesRetainedSuffix() {
         const body = JSON.parse(init.body);
         if (body.request.kind === "configure") {
             restoredDefinitions.push(body.request.definitions.map(definition => definition?.[0] ?? null));
+            restoredLoadedThrough.push(body.request.loadedThrough);
         }
         if (body.request.kind === "check" && checkAttempts++ === 0) {
             return jsonResponse({
@@ -258,12 +260,129 @@ async function ordinaryRecheckPreservesRetainedSuffix() {
         [null, "later"],
         [null, "later"]
     ], "rechecking a non-definition row discarded a retained suffix definition");
+    assert.deepEqual(restoredLoadedThrough, [undefined, 1],
+        "process recovery loaded a retained suffix instead of preserving its session cursor");
+}
+
+async function recoveryUsesOwnedCoreSessionSnapshot() {
+    let checkAttempts = 0;
+    const configurations = [];
+    globalThis.fetch = async (url, init = {}) => {
+        if (url === "/api/tt/session") {
+            return jsonResponse({
+                ok: true,
+                sessionId: "snapshot-session",
+                generation: 1,
+                protocolVersion: 1
+            }, 201);
+        }
+        assert.equal(url, "/api/tt/rpc");
+        const body = JSON.parse(init.body);
+        if (body.request.kind === "configure") configurations.push(body.request);
+        if (body.request.kind === "check" && checkAttempts++ === 0) {
+            return jsonResponse({
+                ok: false,
+                error: "Type-theory process generation changed",
+                code: "TT_PROCESS_GENERATION_CHANGED",
+                generation: 2
+            }, 409);
+        }
+        return jsonResponse({
+            ok: true,
+            result: body.request.kind === "check" ? { ok: true } : undefined,
+            generation: body.generation
+        });
+    };
+
+    const definition = ["snapshotBase", { type: "var", name: "true" }];
+    const config = {
+        marker: "snapshot-config",
+        // These legacy fields are redundant with the ordered slots and must
+        // never be retained in the recovery configuration.
+        userDefinitions: [["staleEmbedded", { type: "var", name: "false" }]],
+        userDefinitionCaches: [["staleEmbedded", { kind: "nbe" }]]
+    };
+    const transport = new TTProcessTransport();
+    await transport.request("core", {
+        kind: "configure",
+        config,
+        definitions: [definition]
+    });
+    definition[0] = "mutatedAfterConfigure";
+    definition[1].name = "false";
+    config.marker = "mutated-after-configure";
+    await transport.request("core", { kind: "check", input: "true" });
+
+    assert.equal(configurations.length, 2);
+    assert.deepEqual(configurations[0].config.userDefinitions, [
+        ["staleEmbedded", { type: "var", name: "false" }]
+    ], "the initial wire request must remain backwards compatible");
+    assert.equal(configurations[1].config.marker, "snapshot-config");
+    assert.equal("userDefinitions" in configurations[1].config, false);
+    assert.equal("userDefinitionCaches" in configurations[1].config, false);
+    assert.deepEqual(configurations[1].definitions, [
+        ["snapshotBase", { type: "var", name: "true", checked: null }, null]
+    ], "recovery must replay the owned cloned definition slots");
+}
+
+async function recoveryLiftsLegacyEmbeddedDefinitions() {
+    let checkAttempts = 0;
+    const configurations = [];
+    globalThis.fetch = async (url, init = {}) => {
+        if (url === "/api/tt/session") {
+            return jsonResponse({
+                ok: true,
+                sessionId: "legacy-prefix-session",
+                generation: 1,
+                protocolVersion: 1
+            }, 201);
+        }
+        assert.equal(url, "/api/tt/rpc");
+        const body = JSON.parse(init.body);
+        if (body.request.kind === "configure") configurations.push(body.request);
+        if (body.request.kind === "check" && checkAttempts++ === 0) {
+            return jsonResponse({
+                ok: false,
+                error: "Type-theory process generation changed",
+                code: "TT_PROCESS_GENERATION_CHANGED",
+                generation: 2
+            }, 409);
+        }
+        return jsonResponse({
+            ok: true,
+            result: body.request.kind === "check" ? { ok: true } : undefined,
+            generation: body.generation
+        });
+    };
+
+    const transport = new TTProcessTransport();
+    await transport.request("core", {
+        kind: "configure",
+        config: {
+            marker: "legacy-prefix-config",
+            userDefinitions: [["embeddedBase", { type: "var", name: "true" }]],
+            userDefinitionCaches: []
+        }
+    });
+    await transport.request("core", { kind: "check", input: "embeddedBase" });
+
+    assert.equal(configurations.length, 2);
+    assert.deepEqual(configurations[0].config.userDefinitions, [
+        ["embeddedBase", { type: "var", name: "true" }]
+    ], "the initial legacy wire request must be accepted unchanged");
+    assert.equal("userDefinitions" in configurations[1].config, false);
+    assert.equal("userDefinitionCaches" in configurations[1].config, false);
+    assert.deepEqual(configurations[1].definitions, [
+        ["embeddedBase", { type: "var", name: "true", checked: null }, null]
+    ], "recovery must lift legacy embedded definitions into the ordered session prefix");
 }
 
 try {
     await sessionLossRestoresBothChannels();
     await generationChangeReusesSessionAndRetriesOnce();
     await ordinaryRecheckPreservesRetainedSuffix();
+    await recoveryUsesOwnedCoreSessionSnapshot();
+    await recoveryLiftsLegacyEmbeddedDefinitions();
 } finally {
     globalThis.fetch = originalFetch;
 }

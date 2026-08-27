@@ -1,13 +1,8 @@
+import { contextBindings, findContextBinding, findKernelScopeIndex, ScopeCursor, validBondVarId as validId } from "./scoped-syntax.js";
 const EMPTY_CAPTURES = new Map();
 const EMPTY_COMPUTE_RULES = new Map();
 const EMPTY_OPAQUE_DEFINITIONS = new Set();
 const DIRECT_COMPUTE_HEADS = new Set(["add", "mul", "pow", "pred", "succ", "@succ", "@max"]);
-const EMPTY_CONTEXT_BINDINGS = {
-    entries: [],
-    bindings: [],
-    nextId: 1
-};
-const contextBindingSnapshots = new WeakMap();
 function step(state) {
     state.steps++;
     // Checking the clock every semantic step is disproportionately expensive
@@ -21,61 +16,6 @@ function step(state) {
         return false;
     }
     return true;
-}
-function validId(id) {
-    return Number.isFinite(id) && id > 0;
-}
-function contextBindings(context) {
-    if (!context.length)
-        return EMPTY_CONTEXT_BINDINGS;
-    const cached = contextBindingSnapshots.get(context);
-    if (cached && cached.entries.length === context.length
-        && cached.entries[0] === context[0]
-        && cached.entries[context.length - 1] === context[context.length - 1]) {
-        return cached;
-    }
-    let nextId = 1;
-    const bindings = context.map(([name, , id], index) => {
-        if (validId(id))
-            nextId = Math.max(nextId, id + 1);
-        return {
-            name,
-            id: validId(id) ? id : undefined,
-            key: validId(id) ? `context-id:${id}` : `context-name:${index}:${name}`
-        };
-    });
-    const snapshot = {
-        entries: Array.from(context),
-        bindings,
-        nextId
-    };
-    contextBindingSnapshots.set(context, snapshot);
-    return snapshot;
-}
-function findScopeIndex(ast, scope) {
-    if (validId(ast.bondVarId)) {
-        for (let index = 0; index < scope.length; index++) {
-            if (scope[index].id === ast.bondVarId)
-                return index;
-        }
-        return -1;
-    }
-    for (let index = 0; index < scope.length; index++) {
-        // Name lookup is only sound for a wholly unmarked syntax tree. Once
-        // a binder has an identity, an id-less same-name variable can be an
-        // intentionally free constant inserted by substitution. Treating it
-        // as bound here captures values such as the global `g` in
-        // `Pf:...,Pg:...` after applying the first binder to `g`.
-        if (!validId(scope[index].id) && scope[index].name === ast.name)
-            return index;
-    }
-    return -1;
-}
-function findContextBinding(ast, context) {
-    if (validId(ast.bondVarId)) {
-        return context.find(binding => binding.id === ast.bondVarId);
-    }
-    return context.find(binding => binding.name === ast.name);
 }
 function compile(ast, scope, context, state, allowMetas = false, rigidMetas = false, rigidHoles = false) {
     if (!ast || typeof ast !== "object" || !step(state))
@@ -98,7 +38,7 @@ function compile(ast, scope, context, state, allowMetas = false, rigidMetas = fa
                 return { kind: "meta", name: ast.name };
             return rigidMetas ? { kind: "free", key: `infer:${ast.name}` } : null;
         }
-        const index = findScopeIndex(ast, scope);
+        const index = findKernelScopeIndex(ast, scope);
         if (index >= 0)
             return { kind: "bound", index };
         const contextBinding = findContextBinding(ast, context);
@@ -110,12 +50,19 @@ function compile(ast, scope, context, state, allowMetas = false, rigidMetas = fa
     }
     if (ast.type === "L") {
         const domain = compile(ast.nodes?.[0], scope, context, state, allowMetas, rigidMetas, rigidHoles);
-        const body = compile(ast.nodes?.[1], [{ name: ast.name, id: validId(ast.bondVarId) ? ast.bondVarId : undefined }, ...scope], context, state, allowMetas, rigidMetas, rigidHoles);
+        scope.push({ name: ast.name, id: validId(ast.bondVarId) ? ast.bondVarId : undefined });
+        // This cursor is private to the top-level compile request. Avoid a
+        // callback/finally frame per binder so deep telescopes retain the
+        // legacy recursion depth; an unexpected exception aborts the request.
+        const body = compile(ast.nodes?.[1], scope, context, state, allowMetas, rigidMetas, rigidHoles);
+        scope.pop();
         return domain && body ? { kind: "lambda", name: ast.name, domain, body } : null;
     }
     if (ast.type === "P" || ast.type === "S" || ast.type === "W") {
         const domain = compile(ast.nodes?.[0], scope, context, state, allowMetas, rigidMetas, rigidHoles);
-        const body = compile(ast.nodes?.[1], [{ name: ast.name, id: validId(ast.bondVarId) ? ast.bondVarId : undefined }, ...scope], context, state, allowMetas, rigidMetas, rigidHoles);
+        scope.push({ name: ast.name, id: validId(ast.bondVarId) ? ast.bondVarId : undefined });
+        const body = compile(ast.nodes?.[1], scope, context, state, allowMetas, rigidMetas, rigidHoles);
+        scope.pop();
         return domain && body ? { kind: "binder", binder: ast.type, name: ast.name, domain, body } : null;
     }
     if (ast.type === "apply") {
@@ -137,10 +84,10 @@ function compile(ast, scope, context, state, allowMetas = false, rigidMetas = fa
 function compileRuleResult(ast, state) {
     if (ast?.type === "var" && ast.name === "_")
         return null;
-    return compile(ast, [], [], state, true, false, true);
+    return compile(ast, new ScopeCursor(), [], state, true, false, true);
 }
 function compilePattern(ast, state, topLevelWildcard = false) {
-    return compilePatternInScope(ast, state, topLevelWildcard, []);
+    return compilePatternInScope(ast, state, topLevelWildcard, new ScopeCursor());
 }
 function compilePatternInScope(ast, state, topLevelWildcard, scope) {
     if (!ast || typeof ast !== "object" || !step(state))
@@ -153,7 +100,7 @@ function compilePatternInScope(ast, state, topLevelWildcard, scope) {
             return { kind: "wildcard" };
         if (ast.name?.startsWith("?"))
             return { kind: "capture", name: ast.name };
-        const boundIndex = findScopeIndex(ast, scope);
+        const boundIndex = findKernelScopeIndex(ast, scope);
         if (boundIndex >= 0)
             return { kind: "bound", index: boundIndex };
         if (!ast.name || validId(ast.bondVarId))
@@ -167,7 +114,9 @@ function compilePatternInScope(ast, state, topLevelWildcard, scope) {
     }
     if (ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W") {
         const domain = compilePatternInScope(ast.nodes?.[0], state, false, scope);
-        const body = compilePatternInScope(ast.nodes?.[1], state, false, [{ name: ast.name, id: validId(ast.bondVarId) ? ast.bondVarId : undefined }, ...scope]);
+        scope.push({ name: ast.name, id: validId(ast.bondVarId) ? ast.bondVarId : undefined });
+        const body = compilePatternInScope(ast.nodes?.[1], state, false, scope);
+        scope.pop();
         return domain && body
             ? { kind: "binder", binder: ast.type, domain, body }
             : null;
@@ -388,7 +337,7 @@ function getDefinitionTerm(name, state) {
         return cached;
     // Source aliases may contain generalized `_` holes.  Compile them only
     // for a lazy probe; ordinary eager evaluation never supplies this map.
-    const term = compile(source, [], [], state, false, true, true);
+    const term = compile(source, new ScopeCursor(), [], state, false, true, true);
     state.sourceTerms?.set(name, term);
     return term;
 }
@@ -1371,7 +1320,7 @@ function tryNormalizeWithDefinitions(ast, context, options, definitions, opaqueD
     };
     const contextSnapshot = contextBindings(context);
     const bindings = contextSnapshot.bindings;
-    const term = compile(ast, [], bindings, state, false, options.rigidMetas === true);
+    const term = compile(ast, new ScopeCursor(), contextSnapshot, state, false, options.rigidMetas === true);
     if (!term || state.exhausted)
         return null;
     const value = evaluate(term, [], state);
@@ -1404,7 +1353,7 @@ function tryWhnfWithDefinitions(ast, context, options, definitions, opaqueDefini
     };
     const contextSnapshot = contextBindings(context);
     const bindings = contextSnapshot.bindings;
-    const term = compile(ast, [], bindings, state, false, options.rigidMetas === true);
+    const term = compile(ast, new ScopeCursor(), contextSnapshot, state, false, options.rigidMetas === true);
     if (!term || state.exhausted)
         return null;
     const value = evaluate(term, [], state);
@@ -1448,9 +1397,9 @@ function tryEqualWithDefinitions(left, right, context, options, definitions, opa
         computeRules,
         unfolding: new Set()
     };
-    const bindings = contextBindings(context).bindings;
-    const leftTerm = compile(left, [], bindings, state, false, options.rigidMetas === true);
-    const rightTerm = compile(right, [], bindings, state, false, options.rigidMetas === true);
+    const contextSnapshot = contextBindings(context);
+    const leftTerm = compile(left, new ScopeCursor(), contextSnapshot, state, false, options.rigidMetas === true);
+    const rightTerm = compile(right, new ScopeCursor(), contextSnapshot, state, false, options.rigidMetas === true);
     if (!leftTerm || !rightTerm)
         return state.exhausted ? "budget-exhausted" : null;
     if (state.exhausted)
@@ -1540,7 +1489,7 @@ export class SemanticNbeKernel {
             computeRules: this.computeRules,
             unfolding: new Set()
         };
-        const term = compile(ast, [], [], state, false, options.rigidMetas === true);
+        const term = compile(ast, new ScopeCursor(), [], state, false, options.rigidMetas === true);
         this.definitionSources.set(name, ast);
         if (!term || state.exhausted) {
             this.definitionSourceFingerprints.delete(name);
@@ -1583,7 +1532,7 @@ export class SemanticNbeKernel {
                 computeRules: this.computeRules,
                 unfolding: new Set()
             };
-            const term = compile(ast, [], [], state, false, options.rigidMetas === true);
+            const term = compile(ast, new ScopeCursor(), [], state, false, options.rigidMetas === true);
             if (term && !state.exhausted)
                 compiled.set(name, term);
         }

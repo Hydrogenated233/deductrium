@@ -4,6 +4,20 @@ import { Proof } from "./proof.js";
 import { ASTParser } from "./astparser.js";
 import { TR } from "../lang.js";
 import { ConstrainSolver, RuleParser } from "./metarule.js";
+import { InferencePageStore } from "./inference-pages.js";
+/**
+ * Reserved marker used by a proposition whose proof-assistant recipe is kept
+ * directly on the step.  It is deliberately a single virtual name rather than
+ * one generated `__assist_N` deduction per proof.  The marker is a compatibility
+ * entry only; each step still carries its own recipe and expansion installs a
+ * transient virtual deduction for the duration of the operation.
+ */
+export const DEFERRED_ASSISTANT_STEP = "__assistant";
+let deferredAssistantMaterializer;
+/** Register the proof-assistant replay hook without introducing a module cycle. */
+export function registerDeferredAssistantMaterializer(materializer) {
+    deferredAssistantMaterializer = materializer;
+}
 const astmgr = new ASTMgr;
 const assert = new AssertionSystem;
 const parser = new ASTParser;
@@ -23,7 +37,14 @@ export class FormalSystem {
     consts = new Set();
     fns = new Set();
     verbs = new Set();
-    propositions = [];
+    /** Page-local proposition workspaces. Rules and constants remain shared. */
+    inferencePages = new InferencePageStore();
+    get propositions() {
+        return this.inferencePages.active.propositions;
+    }
+    set propositions(value) {
+        this.inferencePages.active.propositions = value;
+    }
     assert = assert;
     constructor() {
         this.assert.fns = this.fns;
@@ -100,9 +121,11 @@ export class FormalSystem {
                 }
             }
         }
-        for (const [n, p] of this.propositions.entries()) {
-            if (this.getdependency(name, p.from?.deductionIdx)) {
-                throw TR("无法删除规则 ") + name + TR("，请先删除对其有依赖的定理 p") + n;
+        for (const page of this.inferencePages.pages) {
+            for (const [n, p] of page.propositions.entries()) {
+                if (this.getdependency(name, p.from?.deductionIdx)) {
+                    throw TR("无法删除规则 ") + name + TR("，请先删除对其有依赖的定理 p") + n;
+                }
             }
         }
         if (name.startsWith("dc")) {
@@ -150,14 +173,16 @@ export class FormalSystem {
                 }
             }
         }
-        for (const [n, p] of this.propositions.entries()) {
-            const s = p.from;
-            if (!s)
-                continue;
-            if (this.getdependency(oldname, s.deductionIdx)) {
-                const tr = this.getDeductionTokens(s.deductionIdx);
-                ruleparser.replaceNameByName(tr, oldname, newname);
-                s.deductionIdx = ruleparser.stringify(tr);
+        for (const page of this.inferencePages.pages) {
+            for (const p of page.propositions) {
+                const s = p.from;
+                if (!s)
+                    continue;
+                if (this.getdependency(oldname, s.deductionIdx)) {
+                    const tr = this.getDeductionTokens(s.deductionIdx);
+                    ruleparser.replaceNameByName(tr, oldname, newname);
+                    s.deductionIdx = ruleparser.stringify(tr);
+                }
             }
         }
         for (const d of composedDs) {
@@ -175,6 +200,32 @@ export class FormalSystem {
             throw TR("规则名称 ") + name + TR(" 已存在");
         this.deductions[name] = deduction;
         return name;
+    }
+    /**
+     * Validate a user-created deduction name using the same reservation rules
+     * as the legacy `m` command.  Keeping this at the model boundary makes
+     * proof-assistant APIs and command-driven macros agree.
+     */
+    validateNewDeductionName(name) {
+        if (typeof name !== "string" || !name || /\s/.test(name)) {
+            return TR("推理规则名称中禁止出现空格或由系统保留的“:”或“,”符号，请重新命名");
+        }
+        if (name === DEFERRED_ASSISTANT_STEP) {
+            return TR("证明助手内部步骤名称由系统保留，请重新命名");
+        }
+        if (name.match(/^[0-9<>acdempuv#\.]/)) {
+            return TR("以.<>acdempuv#或数字开头的推理规则名称由系统保留，请重新命名");
+        }
+        if (name.match(/^\$\$/)) {
+            return TR("以$$开头的推理规则名称由系统保留，请重新命名");
+        }
+        if (name.includes(",") || name.includes(":")) {
+            return TR("推理规则名称中禁止出现空格或由系统保留的“:”或“,”符号，请重新命名");
+        }
+        if (this.deductions[name]) {
+            return TR(`推理规则名称`) + name + TR(`已存在或被系统保留，请重新命名`);
+        }
+        return null;
     }
     addMetaRule(name, m, conditionDeductionIdxs, replaceNames, from) {
         const metaRule = this.ast2metaRule(m);
@@ -325,7 +376,7 @@ export class FormalSystem {
             }
         }
     }
-    addMacro(name, from) {
+    compileMacroFromPropositions() {
         const propositionIdx = this.propositions.length - 1;
         let hypothesisAmount = this.propositions.findIndex(e => e.from);
         if (hypothesisAmount == -1)
@@ -360,15 +411,151 @@ export class FormalSystem {
                     // this.replaceTempVar(newv, subTempvars);
                     return newv;
                 }),
-                deductionIdx: step.deductionIdx
+                deductionIdx: step.deductionIdx,
+                ...(step.assistant ? { assistant: this.cloneDeferredAssistantPayload(step.assistant) } : {})
             });
         }
-        return this.addDeduction(name, {
+        return {
+            value: {
+                type: "meta", name: "⊢", nodes: [
+                    { type: "fn", name: "#array", nodes: conditions },
+                    { type: "fn", name: "#array", nodes: [conclusion] },
+                ]
+            },
+            steps: macro
+        };
+    }
+    cloneDeferredAssistantPayload(payload) {
+        return {
+            kind: "assistant",
+            version: 1,
+            pageId: payload.pageId,
+            theorem: astmgr.clone(payload.theorem),
+            history: [...payload.history],
+            ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
+            premises: payload.premises.map(premise => ({
+                ...(premise.pageId ? { pageId: premise.pageId } : {}),
+                index: premise.index,
+                value: astmgr.clone(premise.value)
+            }))
+        };
+    }
+    createInferencePage(name, init = {}) {
+        return this.inferencePages.create(name, init);
+    }
+    activateInferencePage(idOrName) {
+        return this.inferencePages.activate(idOrName);
+    }
+    deleteInferencePage(idOrName) {
+        return this.inferencePages.delete(idOrName);
+    }
+    reorderInferencePage(idOrName, beforeIdOrName = null) {
+        return this.inferencePages.reorder(idOrName, beforeIdOrName);
+    }
+    serializeInferencePages() {
+        return this.inferencePages.serialize();
+    }
+    restoreInferencePages(serialized) {
+        this.inferencePages = InferencePageStore.deserialize(serialized);
+    }
+    addMacro(name, from) {
+        const { value, steps } = this.compileMacroFromPropositions();
+        return this.addDeduction(name, value, from, steps);
+    }
+    materializeDeferredDeduction(deductionIdx) {
+        const deduction = this.deductions[deductionIdx];
+        if (!deduction || !deduction.deferredKind || deduction.steps)
+            return deduction;
+        if (deduction.deferredKind === "assistant") {
+            if (!deferredAssistantMaterializer) {
+                throw TR("证明助手延迟步骤暂不可展开");
+            }
+            deferredAssistantMaterializer(this, deduction);
+            return this.deductions[deductionIdx] ?? deduction;
+        }
+        const propositions = this.propositions;
+        const existingDeductions = new Set(Object.keys(this.deductions));
+        try {
+            this.propositions = [];
+            new Proof(this).prove(astmgr.clone(deduction.conclusion));
+            const { steps } = this.compileMacroFromPropositions();
+            const tempvars = this.findLocalNamesInDeductionStep(steps);
+            deduction.steps = steps;
+            deduction.tempvars = tempvars;
+        }
+        catch (e) {
+            for (const name of Object.keys(this.deductions)) {
+                if (!existingDeductions.has(name))
+                    delete this.deductions[name];
+            }
+            throw e;
+        }
+        finally {
+            this.propositions = propositions;
+        }
+        return deduction;
+    }
+    /**
+     * Run an operation with a lazy proof-assistant step exposed as one virtual
+     * deduction.  Bare `qed` rows keep their recipe on `DeductionStep` instead
+     * of allocating a permanent `__assist_N` entry.  Existing code paths such
+     * as `deduct()` still expect to resolve a deduction by name, so install a
+     * private shared entry for the duration of the expansion and always remove
+     * it afterwards.
+     */
+    withDeferredAssistantStep(step, operation, materialize = true) {
+        const payload = step.assistant;
+        if (!payload)
+            throw TR("证明助手步骤缺少操作序列");
+        const previous = this.deductions[DEFERRED_ASSISTANT_STEP];
+        if (previous && previous.deferredKind !== "assistant") {
+            throw TR("系统保留的证明助手步骤名称发生冲突");
+        }
+        const value = {
             type: "meta", name: "⊢", nodes: [
-                { type: "fn", name: "#array", nodes: conditions },
-                { type: "fn", name: "#array", nodes: [conclusion] },
+                {
+                    type: "fn", name: "#array",
+                    nodes: payload.premises.map(premise => astmgr.clone(premise.value))
+                },
+                {
+                    type: "fn", name: "#array",
+                    nodes: [astmgr.clone(payload.theorem)]
+                }
             ]
-        }, from, macro);
+        };
+        // The theorem is already instantiated in the row.  `$` variables that
+        // occur only in its conclusion are therefore fixed syntax, not missing
+        // replacement arguments for this virtual step.
+        const virtual = {
+            ...this.ast2deduction(value),
+            from: "证明助手录制*",
+            replaceNames: [],
+            tempvars: new Set(),
+            deferredKind: "assistant",
+            deferredPayload: payload
+        };
+        this.deductions[DEFERRED_ASSISTANT_STEP] = virtual;
+        try {
+            const active = materialize
+                ? (this.materializeDeferredDeduction(DEFERRED_ASSISTANT_STEP) ?? virtual)
+                : virtual;
+            return operation(active);
+        }
+        finally {
+            if (previous) {
+                // Keep the shared compatibility marker's expansion cache for
+                // callers that inspect it, while preserving the step-local
+                // payload as the authoritative recipe for the next expansion.
+                const current = this.deductions[DEFERRED_ASSISTANT_STEP];
+                if (materialize) {
+                    previous.steps = current?.steps ?? virtual.steps;
+                    previous.tempvars = new Set(current?.tempvars ?? virtual.tempvars ?? []);
+                }
+                this.deductions[DEFERRED_ASSISTANT_STEP] = previous;
+            }
+            else
+                delete this.deductions[DEFERRED_ASSISTANT_STEP];
+        }
     }
     removePropositions(amount) {
         if (!isFinite(amount)) {
@@ -457,14 +644,16 @@ export class FormalSystem {
                 return TR(`定义符号失败：`) + ` ${idx} : ` + e;
             }
         }
-        for (const [idx, p] of this.propositions.entries()) {
-            try {
-                assert.checkGrammer(p.value, "p");
-                assert.getReplVarsType(p.value, {}, false);
-            }
-            catch (e) {
-                this.consts.delete(name);
-                return TR(`定义符号失败：`) + ` p${idx} : ` + e;
+        for (const page of this.inferencePages.pages) {
+            for (const [idx, p] of page.propositions.entries()) {
+                try {
+                    assert.checkGrammer(p.value, "p");
+                    assert.getReplVarsType(p.value, {}, false);
+                }
+                catch (e) {
+                    this.consts.delete(name);
+                    return TR(`定义符号失败：`) + ` p${idx} : ` + e;
+                }
             }
         }
         this.consts.delete(name);
@@ -480,13 +669,15 @@ export class FormalSystem {
                 throw TR(`定义符号失败：`) + ` ${idx} : ` + e;
             }
         }
-        for (const [idx, p] of this.propositions.entries()) {
-            try {
-                assert.checkGrammer(p.value, "p");
-                assert.getReplVarsType(p.value, {}, false);
-            }
-            catch (e) {
-                throw TR(`定义符号失败：`) + ` p${idx} : ` + e;
+        for (const page of this.inferencePages.pages) {
+            for (const [idx, p] of page.propositions.entries()) {
+                try {
+                    assert.checkGrammer(p.value, "p");
+                    assert.getReplVarsType(p.value, {}, false);
+                }
+                catch (e) {
+                    throw TR(`定义符号失败：`) + ` p${idx} : ` + e;
+                }
             }
         }
         return true;
@@ -797,12 +988,33 @@ export class FormalSystem {
         return this.addDeduction(name, parser.parse(`⊢${num}r = {x@Q|x<=${num}&~x=${num}}`), "算数符号定义");
     }
     deduct(step, inlineMode, partialTest) {
+        if (step.assistant) {
+            // A compiled macro may contain a proof-assistant step. Keep it
+            // atomic when the caller only applies the macro; materialize it
+            // for explicit `entr`/`inln` inlining paths.
+            return this.withDeferredAssistantStep(step, () => {
+                const plainStep = {
+                    deductionIdx: step.deductionIdx,
+                    conditionIdxs: [...step.conditionIdxs],
+                    replaceValues: step.replaceValues.map(value => astmgr.clone(value))
+                };
+                const result = this.deduct(plainStep, inlineMode, partialTest);
+                if (!partialTest && !inlineMode && Number.isInteger(result)) {
+                    const proposition = this.propositions[result];
+                    if (proposition?.from) {
+                        proposition.from.assistant = this.cloneDeferredAssistantPayload(step.assistant);
+                        proposition.deferredKind = "assistant";
+                    }
+                }
+                return result;
+            }, !!inlineMode);
+        }
         const { conditionIdxs, deductionIdx, replaceValues } = step;
         const deduction = this.generateDeduction(deductionIdx);
         const errorMsg = TR(`规则 `) + deductionIdx + TR(` 推理失败:`);
         if (!deduction)
             throw errorMsg + TR("规则不存在");
-        const { conditions, conclusion, replaceNames, steps, replaceTypes } = deduction;
+        const { conditions, conclusion, replaceNames, replaceTypes } = deduction;
         // firstly, match condition, get matchtable ( partial initially provided by users)
         let replacedVarTypeTable = {};
         let matchTable = partialTest ? {} : Object.fromEntries(replaceNames.map((replname, idx) => (assert.getReplVarsType(replaceValues[idx], replacedVarTypeTable, replaceTypes[replname]),
@@ -882,8 +1094,16 @@ export class FormalSystem {
         let netInlineMode = inlineMode;
         if (typeof netInlineMode === "function")
             netInlineMode = netInlineMode(step, replacedConclusion);
+        if (netInlineMode && deduction.deferredKind && !deduction.steps) {
+            this.materializeDeferredDeduction(deductionIdx);
+        }
+        const steps = deduction.steps;
         if (!steps?.length || !netInlineMode) {
-            return this.propositions.push({ value: replacedConclusion, from: step }) - 1;
+            return this.propositions.push({
+                value: replacedConclusion,
+                from: step,
+                ...(deduction.deferredKind ? { deferredKind: deduction.deferredKind } : {})
+            }) - 1;
         }
         // if it is macro and inline, expand substeps 
         let startPropositions = this.propositions.length;
@@ -929,14 +1149,22 @@ export class FormalSystem {
         return propLength - 1;
     }
     expandMacroWithProp(propositionIdx) {
+        const proposition = this.propositions[propositionIdx];
+        if (proposition?.from?.assistant) {
+            return this.withDeferredAssistantStep(proposition.from, () => this.expandMacroWithPropInternal(propositionIdx));
+        }
+        return this.expandMacroWithPropInternal(propositionIdx);
+    }
+    expandMacroWithPropInternal(propositionIdx) {
         const p = this.propositions[propositionIdx];
         if (!p.from)
             throw TR("该定理为假设，无推理步骤可展开");
         const { deductionIdx, conditionIdxs, replaceValues } = p.from;
         if (!this.deductions[deductionIdx])
             this.deductions[deductionIdx] = this.generateDeduction(deductionIdx);
-        const from = this.deductions[deductionIdx].from;
-        if (!this.deductions[deductionIdx].steps)
+        const deduction = this.materializeDeferredDeduction(deductionIdx);
+        const from = deduction.from;
+        if (!deduction.steps)
             throw TR(`该定理由来自<`) + TR(deductionIdx[0] === "v" ? TR("一阶逻辑公理模式") : from) + TR(`>的原子推理规则得到，无子步骤`);
         const hyps = conditionIdxs.map(c => this.propositions[c].value);
         this.removePropositions();
@@ -947,14 +1175,22 @@ export class FormalSystem {
         }, "inline");
     }
     inlineMacroInProp(propositionIdx) {
+        const proposition = this.propositions[propositionIdx];
+        if (proposition?.from?.assistant) {
+            return this.withDeferredAssistantStep(proposition.from, () => this.inlineMacroInPropInternal(propositionIdx));
+        }
+        return this.inlineMacroInPropInternal(propositionIdx);
+    }
+    inlineMacroInPropInternal(propositionIdx) {
         const p = this.propositions[propositionIdx];
         if (!p.from)
             throw TR("该定理为假设，无推理步骤可展开");
         const { deductionIdx, conditionIdxs, replaceValues } = p.from;
         if (!this.deductions[deductionIdx])
             this.deductions[deductionIdx] = this.generateDeduction(deductionIdx);
-        if (!this.deductions[deductionIdx].steps)
-            throw TR(`该定理由来自<`) + TR(this.deductions[deductionIdx].from) + TR(`>的原子推理规则得到，无子步骤`);
+        const deduction = this.materializeDeferredDeduction(deductionIdx);
+        if (!deduction.steps)
+            throw TR(`该定理由来自<`) + TR(deduction.from) + TR(`>的原子推理规则得到，无子步骤`);
         const suivant = [];
         while (true) {
             const p1 = this.propositions.pop();
@@ -980,9 +1216,10 @@ export class FormalSystem {
         }
     }
     expandMacroWithDefaultValue(deductionIdx, inlineMode = "inline", expandAxiom) {
-        const d = this.deductions[deductionIdx] || this.generateDeduction(deductionIdx);
+        let d = this.deductions[deductionIdx] || this.generateDeduction(deductionIdx);
         if (!d)
             throw TR(`推理规则 `) + deductionIdx + TR(` 不存在`);
+        d = this.materializeDeferredDeduction(deductionIdx) || d;
         if (!expandAxiom && !d.steps)
             throw TR(`无法展开原子推理规则`);
         this.removePropositions();
@@ -1019,6 +1256,7 @@ export class FormalSystem {
         const d = this.generateDeduction(deductionIdx);
         if (!d)
             throw TR(`推理规则 `) + deductionIdx + TR(` 不存在`);
+        this.materializeDeferredDeduction(deductionIdx);
         if (d.conditions?.length)
             throw TR("无法匹配带条件的推理规则");
         if (d.steps?.length)
@@ -1091,6 +1329,7 @@ export class FormalSystem {
             return "v" + idx;
         }
         const d = this.generateDeduction(idx);
+        this.materializeDeferredDeduction(idx);
         const s = this._findNewReplName(idx);
         const SmatchTable = { [s.name]: { type: "replvar", name: "#" + s.name } };
         // axiom
@@ -1153,6 +1392,7 @@ export class FormalSystem {
         if (this.deductions["u" + idx])
             return "u" + idx;
         const d = this.generateDeduction(idx);
+        this.materializeDeferredDeduction(idx);
         if (!d)
             throw TR("条件中的推理规则不存在");
         if (!d.conditions.length) {
@@ -1447,6 +1687,30 @@ export class FormalSystem {
         if (this.deductions["c" + idx])
             return "c" + idx;
         const d = this.generateDeduction(idx);
+        this.materializeDeferredDeduction(idx);
+        // A user may provide an equivalent conditional axiom directly rather
+        // than as a macro with recorded substeps.  The recursive construction
+        // below needs d.steps, so synthesize the semantic conditional rule
+        // directly for this atomic case: (s>C_i) ... |- (s>D).
+        if (d?.conditions?.length && !d.steps?.length) {
+            const s = this._findNewReplName(idx);
+            const wrapImplication = (condition) => ({
+                type: "sym",
+                name: ">",
+                nodes: [astmgr.clone(s), astmgr.clone(condition)]
+            });
+            const conditions = d.conditions.map(wrapImplication);
+            const conclusion = wrapImplication(d.conclusion);
+            const conditionalRule = {
+                type: "meta",
+                name: "⊢",
+                nodes: [
+                    { type: "fn", name: "#array", nodes: conditions },
+                    { type: "fn", name: "#array", nodes: [conclusion] }
+                ]
+            };
+            return this.addDeduction("c" + idx, conditionalRule, from);
+        }
         const s = this._findNewReplName(idx);
         const fastrule = this.fastmetarules;
         this.fastmetarules += "<";
@@ -1532,6 +1796,7 @@ export class FormalSystem {
         if (this.deductions[">" + idx])
             return ">" + idx;
         const d = this.generateDeduction(idx);
+        this.materializeDeferredDeduction(idx);
         const fastrule = this.fastmetarules;
         // mp, axiom, |- A : error
         if (!d.conditions.length) {
@@ -1653,18 +1918,14 @@ export class FormalSystem {
         }
     }
     metaCompleteTheorem(ast, name, from) {
-        const proof = new Proof(this);
-        const p = this.propositions;
-        try {
-            this.propositions = [];
-            proof.prove(ast);
-            this.addMacro(name, from);
-            this.propositions = p;
-        }
-        catch (e) {
-            this.propositions = p;
-            throw e;
-        }
+        new Proof(this).assertTautology(ast);
+        this.addDeduction(name, {
+            type: "meta", name: "⊢", nodes: [
+                { type: "fn", name: "#array", nodes: [] },
+                { type: "fn", name: "#array", nodes: [astmgr.clone(ast)] },
+            ]
+        }, from);
+        this.deductions[name].deferredKind = "cpt";
         return name;
     }
     metaCombineTheorem(idx1s, idx2, from) {

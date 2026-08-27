@@ -225,6 +225,8 @@
                 <div class="list" id="deduct-list">
                 </div>
             </div>
+            <div id="inference-page-tabs" class="inference-page-tabs" role="tablist" aria-label="推理表">
+            </div>
             <label class="before-list-wrapper">[P]定理：</label>
             <div class="list-wrapper">
                 <div class="list" id="prop-list">
@@ -246,6 +248,56 @@
                         <button>添加元宏(mm)</button>
                     </span>
                 </span>
+            </div>
+            <div id="fs-proof-assistant" class="proof-assistant fs-proof-assistant">
+                <div class="proof-assistant-header fs-proof-header">
+                    <label for="fs-proof-target">推理层证明助手：</label>
+                    <input id="fs-proof-target" type="text" autocomplete="off" placeholder="输入待证命题" />
+                    <button id="fs-proof-begin" type="button" class="inhabitat-modify" title="启动推理层证明助手">+</button>
+                    <button id="fs-proof-text-toggle" type="button" class="inhabitat-modify" title="切换文本策略编辑器">文本</button>
+                    <span id="fs-proof-target-label"></span>
+                </div>
+                <div id="fs-proof-session" class="proof-assistant-session hide">
+                    <div class="proof-assistant-toolbar fs-proof-toolbar">
+                        <button id="fs-proof-undo" type="button" class="inhabitat-modify" title="撤回上一条证明策略">↶</button>
+                        <button id="fs-proof-close" type="button" class="inhabitat-modify" title="关闭证明助手">×</button>
+                    </div>
+                    <div id="fs-proof-history" class="fs-proof-history"></div>
+                    <div id="fs-proof-state" class="proof-assistant-state fs-proof-state"></div>
+                    <div id="fs-proof-errmsg" class="proof-assistant-error fs-proof-errmsg"></div>
+                    <div class="proof-assistant-input-row fs-proof-input-row">
+                        <textarea id="fs-proof-input" class="hide" rows="1" autocomplete="off" placeholder="输入证明策略"></textarea>
+                        <button id="fs-proof-apply" type="button">执行</button>
+                        <input id="fs-proof-name" type="text" autocomplete="off" placeholder="宏名（可选）" />
+                        <button id="fs-proof-qed" type="button" title="完成证明；填写宏名后同时录制宏">qed</button>
+                    </div>
+                    <div id="fs-proof-commands" class="proof-assistant-recommendations fs-proof-recommendations"
+                        aria-label="推荐证明策略"></div>
+                </div>
+                <div id="fs-proof-text-mode" class="proof-assistant-text-mode proof-text-mode hide">
+                    <div class="proof-text-editor">
+                        <textarea id="fs-proof-script" rows="12" spellcheck="false"
+                            placeholder="每行输入一条证明策略"></textarea>
+                        <div class="proof-text-actions">
+                            <button id="fs-proof-script-run" type="button" title="重新执行策略序列">执行</button>
+                            <div id="fs-proof-script-recommendations" class="proof-text-recommendations"
+                                aria-label="推荐证明策略"></div>
+                        </div>
+                    </div>
+                    <div id="fs-proof-script-output" class="proof-text-output">
+                        <div id="fs-proof-script-error" class="proof-assistant-error fs-proof-errmsg"></div>
+                        <div id="fs-proof-script-state" class="proof-assistant-state fs-proof-state"></div>
+                    </div>
+                    <details id="fs-proof-help" class="fs-proof-help">
+                    <summary>策略介绍</summary>
+                    <div class="fs-proof-help-content">
+                        <p><code>intro</code> 展开蕴含或全称前提；<code>exact h</code> 用假设、定理或无前件规则完成目标；<code>apply h</code> 应用来源并生成前件目标。</p>
+                        <p><code>assumption</code> 自动使用与当前目标相同的局部假设；<code>constructor</code> 构造合取 <code>A&amp;B</code> 或等价 <code>A&lt;&gt;B</code>；<code>symm</code> 交换等式/等价两端。</p>
+                        <p><code>contradiction</code> 使用同时存在的 <code>P</code> 与 <code>~P</code>；<code>have h : P</code> 声明待证明事实，<code>have h := f a b</code> 实例化全称命题。依赖的内置规则未解锁时，系统只会使用当前作用域中结构等价的用户规则。</p>
+                        <p><code>tauto</code> 在完备性规则已解锁时自动证明纯命题目标；完成所有目标后使用 <code>qed</code>。</p>
+                    </div>
+                </details>
+                </div>
             </div>
             <div class="hide" id="copygateD-wrapper"><label>待证命题：</label><span id="copygateD"></span></div>
             <p>&nbsp;</p>
@@ -277,31 +329,72 @@
                         <button class="inhabitat-modify" id="add-btn">+</button>
                     </div>
                 </div>
-                <div id="timeout"><label>单条定理判定的默认等待时间：</label>
-                    <select id="timeSelect">
-                        <option value="10">10s</option>
-                        <option value="60">60s</option>
-                        <option value="300">300s</option>
-                        <option value="1e10">∞</option>
-                    </select>
+                <div class="tt-engine-settings" aria-label="类型论引擎设置">
+                    <label id="timeout" class="tt-engine-setting" for="timeSelect">
+                        <span>单条定理判定等待时间</span>
+                        <select id="timeSelect">
+                            <option value="10">10s</option>
+                            <option value="60">60s</option>
+                            <option value="300">300s</option>
+                            <option value="1e10">∞</option>
+                        </select>
+                    </label>
+                    <label id="semantic-resource-limit" class="tt-engine-setting" for="semanticResourceScale">
+                        <span>类型推断资源上限</span>
+                        <span class="tt-resource-scale">
+                            <input id="semanticResourceScale" type="number" min="1" max="64" step="1" value="1"
+                                title="提高后可检查更大的证明项，但会占用更多时间和内存" />
+                            <span aria-hidden="true">×</span>
+                        </span>
+                    </label>
                 </div>
-                <div id="semantic-resource-limit"><label>类型推断资源上限：</label>
-                    <input id="semanticResourceScale" type="number" min="1" max="64" step="1" value="1"
-                        style="width: 4em;" title="提高后可检查更大的证明项，但会占用更多时间和内存" />×
-                </div>
-                <div id="tactic-div" class="hide">
+                <div id="tactic-div" class="proof-assistant hide">
+                    <div class="tt-proof-pagebar">
+                        <div id="tactic-session-tabs" class="proof-session-tabs" role="tablist"
+                            aria-label="类型论证明页">
+                            <button id="tactic-session-add" class="proof-session-add" type="button"
+                                title="新建证明页">+</button>
+                        </div>
+                        <div class="proof-assistant-toolbar tt-proof-toolbar">
+                            <button class="inhabitat-modify hide" id="tactic-clear" type="button"
+                                title="清空当前证明页">×</button>
+                            <button class="inhabitat-modify" id="tactic-text-toggle" type="button"
+                                title="切换文本策略编辑器">文本</button>
+                            <label id="tactic-scope-label" class="hide">引用文件夹：<select id="tactic-scope"></select></label>
+                        </div>
+                    </div>
                     <div id="copygate"></div>
-                    <label>证明策略：</label><button class="inhabitat-modify hide" id="tactic-clear">x</button><span
-                        id="tactic-hint"></span><br>
-                    <label id="tactic-scope-label" class="hide">引用文件夹：<select id="tactic-scope"></select></label>
-                    <div class="list-wrapper tactic-assist-wrapper">
+                    <div class="proof-assistant-header">
+                        <label>证明策略：</label>
+                        <span id="tactic-hint"></span>
+                    </div>
+                    <div class="proof-assistant-session">
                         <div id="tactic-list">
-                            <div id="tactic-state"></div>
-                            <button class="inhabitat-modify hide" id="tactic-remove">-</button><button
-                                class="inhabitat-modify" id="tactic-begin">+</button><textarea id="tactic-input"
-                                class="hide" rows="1"></textarea>
-                            <div id="tactic-errmsg"></div>
-                            <div id="tactic-autofill"></div>
+                            <div id="tactic-state" class="proof-assistant-state"></div>
+                            <div class="proof-assistant-input-row">
+                                <textarea id="tactic-input" class="hide" rows="1"></textarea>
+                                <button class="inhabitat-modify hide" id="tactic-begin" type="button"
+                                    title="执行证明策略">↵</button>
+                                <button class="inhabitat-modify hide" id="tactic-remove" type="button"
+                                    title="撤回上一条证明策略">↶</button>
+                            </div>
+                            <div id="tactic-errmsg" class="proof-assistant-error"></div>
+                            <div id="tactic-autofill" class="proof-assistant-recommendations"></div>
+                        </div>
+                    </div>
+                    <div id="tactic-text-mode" class="proof-text-mode hide">
+                        <div class="proof-text-editor">
+                            <textarea id="tactic-script" rows="12" spellcheck="false"
+                                placeholder="每行输入一条证明策略"></textarea>
+                            <div class="proof-text-actions">
+                                <button id="tactic-script-run" type="button" title="重新执行策略序列">执行</button>
+                                <div id="tactic-script-recommendations" class="proof-text-recommendations"
+                                    aria-label="推荐证明策略"></div>
+                            </div>
+                        </div>
+                        <div id="tactic-script-output" class="proof-text-output">
+                            <div id="tactic-script-error" class="proof-assistant-error fs-proof-errmsg"></div>
+                            <div id="tactic-script-state" class="proof-assistant-state fs-proof-state"></div>
                         </div>
                     </div>
                 </div>
@@ -309,6 +402,15 @@
                     <button id="tt-add-theorem">新定理</button>
                     <button id="tt-add-folder">新文件夹</button>
                 </div>
+                <details id="tactic-help" class="tactic-help">
+                        <summary>策略介绍</summary>
+                        <div class="tactic-help-content">
+                            <p><code>intro</code> 引入 Π/蕴含的前提；<code>exact</code> 用证明项完成目标；<code>apply</code> 应用定理并为参数生成目标。</p>
+                            <p><code>destruct</code> 解构归纳类型、和类型或等式；<code>ex</code>、<code>case</code>、<code>left</code>/<code>right</code> 构造相应数据。</p>
+                            <p><code>rw</code>/<code>rwb</code> 改写，<code>simpl</code> 化简，<code>rfl</code> 证明定义相等，<code>expand</code> 展开定义；参数中的 <code>_</code> 由系统尝试填充。</p>
+                            <p><code>fnext</code> 处理函数外延，<code>eq</code> 使用等式推荐，<code>sup</code> 构造 W 类型；所有目标完成后使用 <code>qed</code>。</p>
+                        </div>
+                    </details>
             </div>
         </div>
     </div>

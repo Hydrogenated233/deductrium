@@ -1,10 +1,12 @@
 import { ASTMgr } from "./astmgr.js";
 import { FSCmd } from "./cmd.js";
 import { iniSysFnList, initFormalSystem } from "./initial.js";
-import { FormalSystem } from "./formalsystem.js";
+import { DEFERRED_ASSISTANT_STEP, FormalSystem } from "./formalsystem.js";
 import { TR } from "../lang.js";
 import { ListDragger } from "./itemdragger.js";
+import { InferenceProofAssistant } from "./proof-assistant.js";
 const astmgr = new ASTMgr();
+const inferenceProofTextModeStorageKey = "deductrium-fs-proof-text-mode";
 export class FSGui {
     skipRendering = true;
     formalSystem = new FormalSystem();
@@ -13,6 +15,10 @@ export class FSGui {
     omitNfFn = false;
     italicItem = false;
     propositionList;
+    pageTabs = null;
+    /** Page state is owned by the formal-system model; the GUI only renders it. */
+    get pageStore() { return this.formalSystem.inferencePages; }
+    set pageStore(value) { this.formalSystem.inferencePages = value; }
     deductionList;
     metaRuleList;
     sysFnList;
@@ -28,6 +34,16 @@ export class FSGui {
     unlockedFolder = false;
     unlockedSysRulePanel = false;
     enableMIFFT_RP = false;
+    /** The deduction-layer assistant is intentionally separate from TT tactics. */
+    inferenceProofAssistant = null;
+    inferenceProofSnapshot = null;
+    inferenceProofPageId = null;
+    inferenceProofBusy = false;
+    inferenceProofTextMode = false;
+    inferenceProofTextModePreference = false;
+    inferenceProofScript = "";
+    inferenceProofScriptDirty = false;
+    inferenceProofTextReplayTimer = null;
     onStateChange = () => { };
     onchangeOmitNF = () => { };
     draggerD = new ListDragger(document.getElementById("deduct-list"));
@@ -38,6 +54,7 @@ export class FSGui {
     constructor(propositionList, deductionList, metaRuleList, sysFnList, actionInput, hintText, displayPLayerSelect, cmdBtns, creative, skipRendering) {
         this.skipRendering = skipRendering;
         this.propositionList = propositionList;
+        this.pageTabs = document.getElementById("inference-page-tabs");
         this.metaRuleList = metaRuleList;
         this.deductionList = deductionList;
         this.sysFnList = sysFnList;
@@ -47,8 +64,14 @@ export class FSGui {
         this.cmd = new FSCmd(this);
         const { fs, arrD } = initFormalSystem(creative);
         this.formalSystem = fs;
+        try {
+            this.inferenceProofTextModePreference = window.localStorage.getItem(inferenceProofTextModeStorageKey) === "1";
+        }
+        catch { }
+        this.inferenceProofTextMode = this.inferenceProofTextModePreference;
         this.deductions = arrD;
         this.sysfns = iniSysFnList();
+        this.initInferenceProofAssistant();
         cmdBtns.forEach(btn => {
             btn.addEventListener("click", () => {
                 if (this.cmd.cmdBuffer.length)
@@ -178,6 +201,7 @@ export class FSGui {
                 this.hintText.innerText = e;
             }
         };
+        this.initInferencePages();
         if (creative) {
             this.initCreative();
         }
@@ -185,6 +209,333 @@ export class FSGui {
         this.updateDeductionList();
         this.updateSysFnList();
         onchangeOmitNF();
+    }
+    /** Persist the active page before changing pages or leaving the UI state. */
+    saveActiveInferencePage() {
+        const page = this.pageStore.active;
+        if (this.inferenceProofAssistant && this.inferenceProofPageId === page.id) {
+            this.persistInferenceProofDraft();
+        }
+        // `entr` temporarily swaps the engine list while retaining the
+        // persistent page in cmdBuffer[2].  Never persist that temporary
+        // expansion as the page's actual theorem list.
+        const persistentProps = this.cmd.cmdBuffer[0] === "entr" && Array.isArray(this.cmd.cmdBuffer[2])
+            ? this.cmd.cmdBuffer[2]
+            : this.formalSystem.propositions;
+        page.propositions = persistentProps;
+        const previousState = (page.command.state && typeof page.command.state === "object")
+            ? page.command.state
+            : {};
+        this.pageStore.setCommandSnapshot({
+            input: this.actionInput.value,
+            buffer: this.cmd.cmdBuffer.slice(),
+            state: {
+                ...previousState,
+                escClear: this.cmd.escClear,
+                lastDeduction: this.cmd.lastDeduction,
+                hint: this.hintText.innerHTML
+            }
+        });
+    }
+    restoreInferencePage(page) {
+        this.formalSystem.propositions = page.propositions;
+        this.cmd.cmdBuffer = page.command.buffer.slice();
+        this.actionInput.value = page.command.input;
+        const state = page.command.state;
+        if (state) {
+            if (typeof state.escClear === "boolean")
+                this.cmd.escClear = state.escClear;
+            if (state.lastDeduction !== undefined)
+                this.cmd.lastDeduction = state.lastDeduction;
+            if (state.hint !== undefined)
+                this.hintText.innerHTML = state.hint;
+        }
+        this.cmd.pListMasked = false;
+        this.renderInferencePages();
+        this.updatePropositionList(true);
+        this.updateDeductionList();
+        this.restoreInferenceProofDraft(page);
+    }
+    /** Store the active assistant draft in the selected page's command state. */
+    persistInferenceProofDraft() {
+        if (!this.inferenceProofAssistant || !this.inferenceProofPageId)
+            return;
+        const page = this.pageStore.page(this.inferenceProofPageId);
+        if (!page)
+            return;
+        const state = page.command.state && typeof page.command.state === "object"
+            ? page.command.state
+            : {};
+        const snapshot = this.inferenceProofAssistant.snapshot();
+        page.command.state = {
+            ...state,
+            inferenceProof: {
+                theorem: snapshot.theorem,
+                history: snapshot.history,
+                ...(this.inferenceProofTextMode ? {
+                    script: document.getElementById("fs-proof-script")?.value ?? this.inferenceProofScript
+                } : {}),
+                textMode: this.inferenceProofTextMode
+            }
+        };
+    }
+    /** Remove a persisted draft after an explicit close or successful qed. */
+    clearPersistedInferenceProofDraft(pageId = this.inferenceProofPageId) {
+        if (!pageId)
+            return;
+        const page = this.pageStore.page(pageId);
+        if (!page)
+            return;
+        const state = page.command.state;
+        if (!state || typeof state !== "object")
+            return;
+        const next = { ...state };
+        delete next.inferenceProof;
+        page.command.state = next;
+    }
+    /** Suspend the UI session while retaining a page-local proof draft. */
+    suspendInferenceProofAssistant() {
+        if (!this.inferenceProofAssistant)
+            return;
+        this.persistInferenceProofDraft();
+        this.resetInferenceProofUi();
+    }
+    /** Restore a page-local assistant draft after switching or loading. */
+    restoreInferenceProofDraft(page) {
+        const state = page.command.state;
+        const draft = state && typeof state === "object"
+            ? state.inferenceProof
+            : undefined;
+        if (!draft || !draft.theorem || !Array.isArray(draft.history))
+            return;
+        try {
+            const assistant = new InferenceProofAssistant(this.formalSystem, draft.theorem, {
+                pageId: page.id,
+                history: draft.history,
+                ruleNames: this.deductions
+            });
+            this.inferenceProofAssistant = assistant;
+            this.inferenceProofPageId = page.id;
+            this.inferenceProofSnapshot = assistant.snapshot();
+            this.inferenceProofTextMode = draft.textMode === true;
+            this.inferenceProofScript = typeof draft.script === "string"
+                ? draft.script
+                : draft.history.join("\n");
+            this.inferenceProofScriptDirty = typeof draft.script === "string";
+            this.renderInferenceProofSnapshot(this.inferenceProofSnapshot);
+        }
+        catch (error) {
+            // A stale draft must not prevent the page itself from loading.
+            this.clearPersistedInferenceProofDraft(page.id);
+            this.setInferenceProofError(error);
+        }
+    }
+    /** Replace page state after loading a save, keeping the active engine array in sync. */
+    loadInferencePages(serialized, propositions) {
+        if (this.inferenceProofAssistant)
+            this.closeInferenceProofAssistant();
+        if (serialized)
+            this.formalSystem.restoreInferencePages(serialized);
+        else {
+            this.formalSystem.restoreInferencePages({
+                activeId: "page-1",
+                pages: [{ id: "page-1", name: "主表", propositions: propositions ?? [], command: { input: "", buffer: [] } }]
+            });
+        }
+        this.formalSystem.propositions = this.pageStore.active.propositions;
+        this.cmd.cmdBuffer = this.pageStore.active.command.buffer.slice();
+        this.actionInput.value = this.pageStore.active.command.input;
+        const state = this.pageStore.active.command.state;
+        if (state?.escClear !== undefined)
+            this.cmd.escClear = state.escClear;
+        if (state?.lastDeduction !== undefined)
+            this.cmd.lastDeduction = state.lastDeduction;
+        if (state?.hint !== undefined)
+            this.hintText.innerHTML = state.hint;
+        this.cmd.pListMasked = false;
+        this.renderInferencePages();
+        this.restoreInferenceProofDraft(this.pageStore.active);
+    }
+    initInferencePages() {
+        if (!this.pageTabs)
+            return;
+        this.renderInferencePages();
+    }
+    createInferencePage(name) {
+        const page = this.pageStore.create(name.trim());
+        this.renderInferencePages();
+        return page;
+    }
+    createInferencePageFromPrompt() {
+        const name = window.prompt(TR("请输入新推理表名称"), "");
+        if (name === null)
+            return;
+        try {
+            this.createInferencePage(name);
+            this.onStateChange();
+        }
+        catch (e) {
+            this.hintText.innerText = String(e);
+        }
+    }
+    activateInferencePage(id) {
+        if (id === this.pageStore.activeId)
+            return;
+        const page = this.pageStore.page(id);
+        if (!page) {
+            this.hintText.innerText = TR("推理表不存在：") + id;
+            return;
+        }
+        const previousPageId = this.pageStore.activeId;
+        const previousAssistant = this.inferenceProofAssistant;
+        const previousSnapshot = this.inferenceProofSnapshot;
+        const previousProofPageId = this.inferenceProofPageId;
+        try {
+            // Proof drafts are page-local. Suspend the active draft into the
+            // page command state before switching so it can be restored later.
+            this.suspendInferenceProofAssistant();
+            this.saveActiveInferencePage();
+            const activated = this.pageStore.activate(page.id);
+            this.restoreInferencePage(activated);
+            this.onStateChange();
+        }
+        catch (e) {
+            // Restore the prior page and live assistant if rendering or draft
+            // restoration failed after the page switch began.
+            try {
+                const previousPage = this.pageStore.page(previousPageId);
+                if (previousPage) {
+                    this.pageStore.activate(previousPage.id);
+                    this.formalSystem.propositions = previousPage.propositions;
+                    this.cmd.cmdBuffer = previousPage.command.buffer.slice();
+                    this.actionInput.value = previousPage.command.input;
+                    this.cmd.pListMasked = false;
+                    this.renderInferencePages();
+                    this.updatePropositionList(true);
+                    this.updateDeductionList();
+                }
+                this.inferenceProofAssistant = previousAssistant;
+                this.inferenceProofSnapshot = previousSnapshot;
+                this.inferenceProofPageId = previousProofPageId;
+                if (previousSnapshot)
+                    this.renderInferenceProofSnapshot(previousSnapshot);
+                else if (!previousAssistant)
+                    this.resetInferenceProofUi();
+            }
+            catch {
+                // Keep the original page-switch diagnostic below.
+            }
+            this.hintText.innerText = String(e);
+        }
+    }
+    deleteInferencePage(id) {
+        const page = this.pageStore.page(id);
+        if (!page || this.pageStore.size <= 1) {
+            this.hintText.innerText = TR("至少需要保留一个推理表");
+            return;
+        }
+        if (!window.confirm(TR("确定删除推理表<") + page.name + TR(">吗？")))
+            return;
+        try {
+            if (id === this.inferenceProofPageId)
+                this.suspendInferenceProofAssistant();
+            this.saveActiveInferencePage();
+            const wasActive = page.id === this.pageStore.activeId;
+            this.pageStore.delete(id);
+            if (wasActive)
+                this.restoreInferencePage(this.pageStore.active);
+            else
+                this.renderInferencePages();
+            // Command-driven deletion persists after the command buffer is
+            // cleared by FSCmd; direct tab deletion persists immediately.
+            if (this.cmd.cmdBuffer[0] !== "delpage")
+                this.onStateChange();
+        }
+        catch (e) {
+            this.hintText.innerText = String(e);
+        }
+    }
+    renderInferencePages() {
+        const tabs = this.pageTabs;
+        if (!tabs)
+            return;
+        tabs.replaceChildren();
+        for (const page of this.pageStore.pages) {
+            const tab = document.createElement("div");
+            tab.className = "inference-page-tab" + (page.id === this.pageStore.activeId ? " active" : "");
+            tab.dataset.pageId = page.id;
+            tab.draggable = true;
+            const label = document.createElement("button");
+            label.type = "button";
+            label.className = "inference-page-label";
+            label.textContent = page.name;
+            label.title = TR("切换推理表") + `：${page.name}`;
+            label.addEventListener("click", () => this.activateInferencePage(page.id));
+            tab.appendChild(label);
+            const close = document.createElement("button");
+            close.type = "button";
+            close.className = "inference-page-close";
+            close.textContent = "×";
+            close.title = TR("删除推理表");
+            close.addEventListener("click", e => { e.stopPropagation(); this.deleteInferencePage(page.id); this.onStateChange(); });
+            tab.appendChild(close);
+            tab.addEventListener("dragstart", e => {
+                e.dataTransfer?.setData("text/inference-page", page.id);
+                if (e.dataTransfer)
+                    e.dataTransfer.effectAllowed = "move";
+                tab.classList.add("dragging");
+            });
+            tab.addEventListener("dragend", () => tab.classList.remove("dragging"));
+            tab.addEventListener("dragover", e => { e.preventDefault(); tab.classList.add("drag-over"); });
+            tab.addEventListener("dragleave", () => tab.classList.remove("drag-over"));
+            tab.addEventListener("drop", e => {
+                e.preventDefault();
+                tab.classList.remove("drag-over");
+                const source = e.dataTransfer?.getData("text/inference-page");
+                if (!source || source === page.id)
+                    return;
+                try {
+                    this.saveActiveInferencePage();
+                    this.pageStore.reorder(source, page.id);
+                    this.renderInferencePages();
+                    this.onStateChange();
+                }
+                catch (err) {
+                    this.hintText.innerText = String(err);
+                }
+            });
+            tabs.appendChild(tab);
+        }
+        const add = document.createElement("button");
+        add.type = "button";
+        add.className = "inference-page-add";
+        add.textContent = "+";
+        add.title = TR("新建推理表");
+        add.addEventListener("click", () => this.createInferencePageFromPrompt());
+        tabs.appendChild(add);
+        // Dropping on the empty strip or the plus button appends the page.
+        tabs.ondragover = e => {
+            if (e.target.closest(".inference-page-tab"))
+                return;
+            e.preventDefault();
+        };
+        tabs.ondrop = e => {
+            if (e.target.closest(".inference-page-tab"))
+                return;
+            e.preventDefault();
+            const source = e.dataTransfer?.getData("text/inference-page");
+            if (!source)
+                return;
+            try {
+                this.saveActiveInferencePage();
+                this.pageStore.reorder(source, null);
+                this.renderInferencePages();
+                this.onStateChange();
+            }
+            catch (err) {
+                this.hintText.innerText = String(err);
+            }
+        };
     }
     reload() {
         this.formalSystem.fastmetarules = "";
@@ -547,14 +898,557 @@ export class FSGui {
         list.scroll({ top: list.scrollHeight });
     }
     showWaitingAst(ast) {
-        document.getElementById("copygateD").innerText = "";
-        document.getElementById("copygateD").appendChild(this.ast2HTML("p", ast, false));
+        const target = document.getElementById("copygateD");
+        if (!target)
+            return;
+        target.replaceChildren();
+        target.appendChild(this.ast2HTML("-", ast, false));
+        const begin = document.createElement("button");
+        begin.type = "button";
+        begin.className = "inhabitat-modify fs-proof-gate-begin";
+        begin.textContent = "+";
+        begin.title = TR("用推理层证明助手证明此命题");
+        begin.addEventListener("click", () => this.startInferenceProofAssistant(ast));
+        target.appendChild(begin);
+        const input = document.getElementById("fs-proof-target");
+        if (input)
+            input.value = this.cmd.astparser.stringifyTight(ast);
+    }
+    /** Wire the deduction-layer assistant without sharing TT tactic controls. */
+    initInferenceProofAssistant() {
+        const begin = document.getElementById("fs-proof-begin");
+        const target = document.getElementById("fs-proof-target");
+        const input = document.getElementById("fs-proof-input");
+        const apply = document.getElementById("fs-proof-apply");
+        const undo = document.getElementById("fs-proof-undo");
+        const close = document.getElementById("fs-proof-close");
+        const qed = document.getElementById("fs-proof-qed");
+        if (!begin || !target || !input || !apply || !undo || !close || !qed)
+            return;
+        begin.addEventListener("click", () => this.startInferenceProofFromInput());
+        target.addEventListener("keydown", event => {
+            if (event.key !== "Enter")
+                return;
+            event.preventDefault();
+            this.startInferenceProofFromInput();
+        });
+        input.addEventListener("keydown", event => {
+            if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                this.applyInferenceProofCommand();
+            }
+            else if (event.key === "Escape") {
+                event.preventDefault();
+                input.value = "";
+            }
+        });
+        apply.addEventListener("click", () => this.applyInferenceProofCommand());
+        undo.addEventListener("click", () => this.undoInferenceProof());
+        close.addEventListener("click", () => this.closeInferenceProofAssistant());
+        qed.addEventListener("click", () => {
+            const name = document.getElementById("fs-proof-name")?.value.trim();
+            this.finishInferenceProof(name || undefined);
+        });
+        document.getElementById("fs-proof-text-toggle")?.addEventListener("click", () => {
+            this.toggleInferenceProofTextMode();
+        });
+        const script = document.getElementById("fs-proof-script");
+        script?.addEventListener("input", () => {
+            this.inferenceProofScript = script.value;
+            this.inferenceProofScriptDirty = true;
+            this.persistInferenceProofDraft();
+            this.scheduleInferenceProofTextReplay();
+        });
+        script?.addEventListener("keydown", event => {
+            if (event.key === "Enter" && event.ctrlKey) {
+                event.preventDefault();
+                this.replayInferenceProofText(true);
+            }
+        });
+        document.getElementById("fs-proof-script-run")?.addEventListener("click", () => {
+            this.replayInferenceProofText(true);
+        });
+    }
+    renderInferenceProofRecommendations() {
+        const container = document.getElementById("fs-proof-commands");
+        if (!container)
+            return;
+        container.replaceChildren();
+        if (!this.inferenceProofAssistant)
+            return;
+        const commands = this.inferenceProofAssistant.recommendations({
+            ruleNames: this.deductions,
+            canTauto: this.metarules.includes("cpt")
+        });
+        for (const command of commands) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "fs-proof-command";
+            button.textContent = command;
+            button.title = TR("执行推荐策略") + `：${command}`;
+            button.addEventListener("click", () => {
+                const input = document.getElementById("fs-proof-input");
+                if (!input)
+                    return;
+                input.value = command;
+                input.focus();
+                this.applyInferenceProofCommand();
+            });
+            container.appendChild(button);
+        }
+    }
+    renderInferenceProofTextRecommendations() {
+        const container = document.getElementById("fs-proof-script-recommendations");
+        if (!container)
+            return;
+        container.replaceChildren();
+        if (!this.inferenceProofAssistant)
+            return;
+        const commands = this.inferenceProofAssistant.recommendations({
+            ruleNames: this.deductions,
+            canTauto: this.metarules.includes("cpt")
+        });
+        if (!commands.length)
+            return;
+        container.appendChild(document.createTextNode(TR("推荐：")));
+        commands.forEach((command, index) => {
+            if (index)
+                container.appendChild(document.createTextNode("  |  "));
+            const code = document.createElement("code");
+            code.textContent = command;
+            container.appendChild(code);
+        });
+    }
+    /** Start a page-local deduction proof.  The page itself is not mutated. */
+    startInferenceProofAssistant(target, pageId) {
+        const page = this.pageStore.page(pageId ?? this.pageStore.activeId);
+        if (!page) {
+            this.setInferenceProofError(TR("推理表不存在"));
+            return null;
+        }
+        let assistant;
+        let snapshot;
+        try {
+            // Construct the replacement session first.  A malformed target
+            // must leave the currently edited proof untouched.
+            assistant = new InferenceProofAssistant(this.formalSystem, target, {
+                pageId: page.id,
+                ruleNames: this.deductions
+            });
+            snapshot = assistant.snapshot();
+        }
+        catch (error) {
+            this.setInferenceProofError(error);
+            return null;
+        }
+        try {
+            const previousPageId = this.inferenceProofPageId;
+            if (previousPageId)
+                this.clearPersistedInferenceProofDraft(previousPageId);
+            this.resetInferenceProofUi();
+            this.inferenceProofAssistant = assistant;
+            this.inferenceProofPageId = page.id;
+            this.inferenceProofSnapshot = snapshot;
+            const targetInput = document.getElementById("fs-proof-target");
+            if (targetInput)
+                targetInput.value = this.cmd.astparser.stringifyTight(snapshot.theorem);
+            this.renderInferenceProofSnapshot(snapshot);
+            this.persistInferenceProofDraft();
+            this.onStateChange();
+            return this.inferenceProofSnapshot;
+        }
+        catch (error) {
+            this.setInferenceProofError(error);
+            return null;
+        }
+    }
+    /** Start from the assistant target field, falling back to the command input. */
+    startInferenceProofFromInput() {
+        const targetInput = document.getElementById("fs-proof-target");
+        const target = targetInput?.value.trim() || this.actionInput.value.trim();
+        if (!target) {
+            this.setInferenceProofError(TR("请输入待证命题"));
+            return null;
+        }
+        return this.startInferenceProofAssistant(target);
+    }
+    renderInferenceProofSnapshot(snapshot) {
+        if (this.inferenceProofTextMode) {
+            this.renderInferenceProofTextSnapshot(snapshot);
+            return;
+        }
+        const session = document.getElementById("fs-proof-session");
+        const state = document.getElementById("fs-proof-state");
+        const history = document.getElementById("fs-proof-history");
+        const error = document.getElementById("fs-proof-errmsg");
+        if (!session || !state || !history || !error)
+            return;
+        session.classList.remove("hide");
+        error.innerText = "";
+        history.replaceChildren();
+        for (const command of snapshot.history) {
+            const row = document.createElement("div");
+            row.className = "fs-proof-history-row";
+            row.textContent = command;
+            history.appendChild(row);
+        }
+        state.replaceChildren();
+        if (!snapshot.goals.length) {
+            const done = document.createElement("div");
+            done.className = "fs-proof-complete";
+            done.textContent = TR("无目标，请输入qed结束");
+            state.appendChild(done);
+        }
+        for (let index = snapshot.goals.length - 1; index >= 0; index--) {
+            const goal = snapshot.goals[index];
+            const block = document.createElement("div");
+            block.className = "fs-proof-goal" + (index ? " fs-proof-goal-secondary" : "");
+            const title = document.createElement("div");
+            title.className = "fs-proof-goal-title";
+            title.textContent = index ? `${TR("目标")}${index}：` : TR("当前目标：");
+            block.appendChild(title);
+            for (const hypothesis of goal.hypotheses) {
+                const row = document.createElement("div");
+                row.className = "fs-proof-hypothesis";
+                row.appendChild(document.createTextNode(`${hypothesis.name}${hypothesis.proposition ? " : " : ""}`));
+                if (hypothesis.proposition)
+                    row.appendChild(this.ast2HTML("-", hypothesis.proposition, false));
+                block.appendChild(row);
+            }
+            const target = document.createElement("div");
+            target.className = "fs-proof-goal-target";
+            target.appendChild(this.ast2HTML("-", goal.target, false));
+            block.appendChild(target);
+            state.appendChild(block);
+        }
+        const targetLabel = document.getElementById("fs-proof-target-label");
+        if (targetLabel) {
+            targetLabel.replaceChildren(document.createTextNode(TR("目标：")));
+            targetLabel.appendChild(this.ast2HTML("-", snapshot.theorem, false));
+        }
+        this.renderInferenceProofTextRecommendations();
+        const input = document.getElementById("fs-proof-input");
+        input?.classList.remove("hide");
+        document.getElementById("fs-proof-begin")?.classList.add("hide");
+        this.renderInferenceProofRecommendations();
+        input?.focus();
+    }
+    parseInferenceProofScript(text) {
+        return text.split(/\r?\n/).map((raw, index) => {
+            let command = raw.trim();
+            command = command.replace(/\s+\.$/, "").trim();
+            return { command, lineNumber: index + 1 };
+        }).filter(entry => !!entry.command);
+    }
+    renderInferenceProofTextSnapshot(snapshot, error = "", errorLine = null, terminal = false) {
+        const mode = document.getElementById("fs-proof-text-mode");
+        const state = document.getElementById("fs-proof-script-state");
+        const errorDiv = document.getElementById("fs-proof-script-error");
+        const script = document.getElementById("fs-proof-script");
+        if (!mode || !state || !errorDiv || !script)
+            return;
+        this.inferenceProofSnapshot = snapshot;
+        mode.classList?.remove?.("hide");
+        document.getElementById("fs-proof-session")?.classList.add("hide");
+        document.getElementById("fs-proof-begin")?.classList.add("hide");
+        if (script.value !== this.inferenceProofScript)
+            script.value = this.inferenceProofScript;
+        errorDiv.replaceChildren();
+        if (error) {
+            const line = document.createElement("div");
+            line.className = "proof-text-line-error";
+            line.textContent = errorLine === null
+                ? String(error).replace(/^Error:\s*/, "")
+                : `第 ${errorLine} 行：${String(error).replace(/^Error:\s*/, "")}`;
+            errorDiv.appendChild(line);
+        }
+        else if (terminal) {
+            const status = document.createElement("div");
+            status.className = "proof-text-status";
+            status.textContent = "qed 已就绪，按 Ctrl+Enter 或执行按钮提交";
+            errorDiv.appendChild(status);
+        }
+        state.replaceChildren();
+        if (!snapshot.goals.length) {
+            const done = document.createElement("div");
+            done.className = "fs-proof-complete";
+            done.textContent = TR("无目标，请输入qed结束");
+            state.appendChild(done);
+        }
+        for (let index = snapshot.goals.length - 1; index >= 0; index--) {
+            const goal = snapshot.goals[index];
+            const block = document.createElement("div");
+            block.className = "fs-proof-goal" + (index ? " fs-proof-goal-secondary" : "");
+            const title = document.createElement("div");
+            title.className = "fs-proof-goal-title";
+            title.textContent = index ? `${TR("目标")}${index}：` : TR("当前目标：");
+            block.appendChild(title);
+            for (const hypothesis of goal.hypotheses) {
+                const row = document.createElement("div");
+                row.className = "fs-proof-hypothesis";
+                row.appendChild(document.createTextNode(`${hypothesis.name}${hypothesis.proposition ? " : " : ""}`));
+                if (hypothesis.proposition)
+                    row.appendChild(this.ast2HTML("-", hypothesis.proposition, false));
+                block.appendChild(row);
+            }
+            const target = document.createElement("div");
+            target.className = "fs-proof-goal-target";
+            target.appendChild(this.ast2HTML("-", goal.target, false));
+            block.appendChild(target);
+            state.appendChild(block);
+        }
+        const targetLabel = document.getElementById("fs-proof-target-label");
+        if (targetLabel) {
+            targetLabel.replaceChildren(document.createTextNode(TR("目标：")));
+            targetLabel.appendChild(this.ast2HTML("-", snapshot.theorem, false));
+        }
+        this.renderInferenceProofTextRecommendations();
+    }
+    toggleInferenceProofTextMode() {
+        if (!this.inferenceProofAssistant || !this.inferenceProofSnapshot) {
+            this.setInferenceProofError(TR("请先启动证明助手"));
+            return;
+        }
+        this.inferenceProofTextMode = !this.inferenceProofTextMode;
+        this.inferenceProofTextModePreference = this.inferenceProofTextMode;
+        try {
+            window.localStorage.setItem(inferenceProofTextModeStorageKey, this.inferenceProofTextMode ? "1" : "0");
+        }
+        catch { }
+        const textMode = document.getElementById("fs-proof-text-mode");
+        const buttonMode = document.getElementById("fs-proof-session");
+        const script = document.getElementById("fs-proof-script");
+        if (this.inferenceProofTextMode) {
+            if (!this.inferenceProofScriptDirty) {
+                this.inferenceProofScript = this.inferenceProofSnapshot.history.join("\n");
+            }
+            if (script)
+                script.value = this.inferenceProofScript;
+            textMode?.classList?.remove?.("hide");
+            buttonMode?.classList?.add?.("hide");
+            this.renderInferenceProofTextSnapshot(this.inferenceProofSnapshot);
+            script?.focus();
+        }
+        else {
+            textMode?.classList?.add?.("hide");
+            buttonMode?.classList?.remove?.("hide");
+            this.renderInferenceProofSnapshot(this.inferenceProofSnapshot);
+        }
+    }
+    scheduleInferenceProofTextReplay() {
+        if (!this.inferenceProofTextMode || !this.inferenceProofAssistant)
+            return;
+        if (this.inferenceProofTextReplayTimer !== null)
+            window.clearTimeout(this.inferenceProofTextReplayTimer);
+        this.inferenceProofTextReplayTimer = window.setTimeout(() => {
+            this.inferenceProofTextReplayTimer = null;
+            this.replayInferenceProofText(false);
+        }, 300);
+    }
+    replayInferenceProofText(explicitRun) {
+        if (!this.inferenceProofTextMode || !this.inferenceProofAssistant)
+            return;
+        const script = document.getElementById("fs-proof-script");
+        if (script)
+            this.inferenceProofScript = script.value;
+        const entries = this.parseInferenceProofScript(this.inferenceProofScript);
+        const theorem = this.inferenceProofSnapshot?.theorem ?? this.inferenceProofAssistant.theorem;
+        const pageId = this.inferenceProofPageId ?? this.pageStore.activeId;
+        let assistant;
+        let snapshot;
+        let errorLine = null;
+        let terminal = false;
+        try {
+            assistant = new InferenceProofAssistant(this.formalSystem, theorem, {
+                pageId,
+                ruleNames: this.deductions
+            });
+            snapshot = assistant.snapshot();
+            for (let index = 0; index < entries.length; index++) {
+                const entry = entries[index];
+                errorLine = entry.lineNumber;
+                const qed = /^qed(?:\s+([^\s]+))?$/.exec(entry.command);
+                if (qed) {
+                    if (index !== entries.length - 1)
+                        throw new Error("qed 必须是策略序列的最后一行");
+                    terminal = true;
+                    if (explicitRun) {
+                        this.inferenceProofAssistant = assistant;
+                        this.inferenceProofSnapshot = snapshot;
+                        const result = this.finishInferenceProof(qed[1] || undefined);
+                        if (!result && this.inferenceProofAssistant) {
+                            const message = (document.getElementById("fs-proof-errmsg")?.textContent || "qed 执行失败").trim();
+                            this.renderInferenceProofTextSnapshot(snapshot, message, errorLine, terminal);
+                        }
+                        return;
+                    }
+                    break;
+                }
+                snapshot = assistant.apply(entry.command);
+            }
+            this.inferenceProofAssistant = assistant;
+            this.inferenceProofSnapshot = snapshot;
+            this.renderInferenceProofTextSnapshot(snapshot, "", null, terminal);
+            this.persistInferenceProofDraft();
+            this.onStateChange();
+        }
+        catch (error) {
+            if (snapshot) {
+                this.inferenceProofAssistant = assistant;
+                this.inferenceProofSnapshot = snapshot;
+                this.renderInferenceProofTextSnapshot(snapshot, String(error), errorLine);
+            }
+            else {
+                this.setInferenceProofError(error);
+            }
+        }
+    }
+    setInferenceProofError(error) {
+        const target = document.getElementById("fs-proof-errmsg");
+        if (target)
+            target.innerText = String(error).replace(/^Error:\s*/, "");
+    }
+    applyInferenceProofCommand(command) {
+        if (!this.inferenceProofAssistant || this.inferenceProofBusy)
+            return this.inferenceProofSnapshot;
+        const input = document.getElementById("fs-proof-input");
+        const value = String(command ?? input?.value ?? "").trim();
+        if (!value) {
+            this.setInferenceProofError(TR("请输入证明策略"));
+            return this.inferenceProofSnapshot;
+        }
+        // `qed` is a UI action rather than a draft command in the model.  A
+        // typed `qed`/`qed name` follows the same transaction as the button.
+        const qedCommand = /^qed(?:\s+([^\s]+))?$/.exec(value);
+        if (qedCommand) {
+            const result = this.finishInferenceProof(qedCommand[1] || undefined);
+            // Keep a failed qed command editable so the user can correct a
+            // missing goal or macro-name collision without retyping it.
+            if (result && input && command === undefined)
+                input.value = "";
+            return this.inferenceProofSnapshot;
+        }
+        this.inferenceProofBusy = true;
+        try {
+            this.inferenceProofSnapshot = this.inferenceProofAssistant.apply(value);
+            if (input && command === undefined)
+                input.value = "";
+            this.renderInferenceProofSnapshot(this.inferenceProofSnapshot);
+            this.persistInferenceProofDraft();
+            this.onStateChange();
+            return this.inferenceProofSnapshot;
+        }
+        catch (error) {
+            // InferenceProofAssistant.apply is transactional.  Keep the input
+            // and history intact so a failed command can be corrected in place.
+            this.setInferenceProofError(error);
+            return this.inferenceProofSnapshot;
+        }
+        finally {
+            this.inferenceProofBusy = false;
+        }
+    }
+    undoInferenceProof() {
+        if (!this.inferenceProofAssistant || this.inferenceProofBusy)
+            return this.inferenceProofSnapshot;
+        this.inferenceProofBusy = true;
+        try {
+            this.inferenceProofSnapshot = this.inferenceProofAssistant.undo();
+            this.renderInferenceProofSnapshot(this.inferenceProofSnapshot);
+            this.persistInferenceProofDraft();
+            this.onStateChange();
+            return this.inferenceProofSnapshot;
+        }
+        catch (error) {
+            this.setInferenceProofError(error);
+            return this.inferenceProofSnapshot;
+        }
+        finally {
+            this.inferenceProofBusy = false;
+        }
+    }
+    finishInferenceProof(name) {
+        if (!this.inferenceProofAssistant || this.inferenceProofBusy)
+            return null;
+        if (this.inferenceProofPageId !== this.pageStore.activeId) {
+            this.setInferenceProofError(TR("证明助手只能写入启动时的推理表"));
+            return null;
+        }
+        this.inferenceProofBusy = true;
+        try {
+            const result = this.inferenceProofAssistant.qed(name);
+            if (result.macroName && !this.deductions.includes(result.macroName)) {
+                this.addToDeductions(result.macroName);
+            }
+            this.updatePropositionList(true);
+            this.updateDeductionList();
+            this.clearPersistedInferenceProofDraft();
+            this.closeInferenceProofAssistant();
+            this.hintText.innerText = result.macroName
+                ? TR("证明完成，已录制宏：") + result.macroName
+                : TR("证明完成");
+            this.onStateChange();
+            return result;
+        }
+        catch (error) {
+            this.setInferenceProofError(error);
+            return null;
+        }
+        finally {
+            this.inferenceProofBusy = false;
+        }
+    }
+    closeInferenceProofAssistant() {
+        this.clearPersistedInferenceProofDraft();
+        this.resetInferenceProofUi();
+    }
+    resetInferenceProofUi() {
+        if (this.inferenceProofTextReplayTimer !== null) {
+            window.clearTimeout(this.inferenceProofTextReplayTimer);
+            this.inferenceProofTextReplayTimer = null;
+        }
+        this.inferenceProofAssistant = null;
+        this.inferenceProofSnapshot = null;
+        this.inferenceProofPageId = null;
+        this.inferenceProofBusy = false;
+        this.inferenceProofScript = "";
+        this.inferenceProofScriptDirty = false;
+        document.getElementById("fs-proof-session")?.classList.add("hide");
+        document.getElementById("fs-proof-text-mode")?.classList.add("hide");
+        document.getElementById("fs-proof-begin")?.classList.remove("hide");
+        const input = document.getElementById("fs-proof-input");
+        if (input)
+            input.value = "";
+        const script = document.getElementById("fs-proof-script");
+        if (script)
+            script.value = "";
+        const name = document.getElementById("fs-proof-name");
+        if (name)
+            name.value = "";
+        const state = document.getElementById("fs-proof-state");
+        const history = document.getElementById("fs-proof-history");
+        if (state)
+            state.replaceChildren();
+        if (history)
+            history.replaceChildren();
+        this.renderInferenceProofRecommendations();
+        this.setInferenceProofError("");
     }
     clearPListMasked() {
         this.propositionList.querySelectorAll("div.p-match-failed").forEach(e => e.classList.remove("p-match-failed"));
     }
     getProps() {
         return this.cmd.cmdBuffer[0] === "entr" ? this.cmd.cmdBuffer[2] ?? this.formalSystem.propositions : this.formalSystem.propositions;
+    }
+    /** Gate matching may inspect every persistent inference page, not only the active one. */
+    hasPropositionForGate(ast) {
+        for (const page of this.pageStore.pages) {
+            if (!page.propositions[0]?.from)
+                continue;
+            if (page.propositions.some(p => astmgr.equal(p.value, ast)))
+                return true;
+        }
+        return false;
     }
     updateSysFnList() {
         if (this.skipRendering)
@@ -602,11 +1496,15 @@ export class FSGui {
                 else if (this.cmd.cmdBuffer[0] !== "entr")
                     return;
                 const from = p.from;
-                const cmd = (from ?
-                    ["d", from.deductionIdx, ...from.conditionIdxs,
-                        ...from.replaceValues.map(v => this.cmd.astparser.stringifyTight(v))
-                    ].join(" ")
-                    : ("hyp " + this.cmd.astparser.stringifyTight(p.value)));
+                const cmd = (from?.assistant ?
+                    // Assistant proofs carry their recipe on the step and do
+                    // not have a rule name that can be entered with `d`.
+                    `entr ${pname}`
+                    : from ?
+                        ["d", from.deductionIdx, ...from.conditionIdxs,
+                            ...from.replaceValues.map(v => this.cmd.astparser.stringifyTight(v))
+                        ].join(" ")
+                        : ("hyp " + this.cmd.astparser.stringifyTight(p.value)));
                 this.cmd.replaceActionInputFromClick(cmd);
             });
             if (!p.from) {
@@ -698,7 +1596,7 @@ export class FSGui {
         });
         const from = this.deductionList.offsetHeight;
         this.drawDeductionList(ds, this.deductionList, (p, itInfo, it) => {
-            itInfo[0].innerText = TR(p.from).replace(/s$/, "").replaceAll("<", "&lt;").replaceAll(">", "&gt;") + (p.steps?.length ? TR("[宏]") : "");
+            itInfo[0].innerText = TR(p.from).replace(/s$/, "").replaceAll("<", "&lt;").replaceAll(">", "&gt;") + (p.steps?.length || p.deferredKind === "cpt" || p.deferredKind === "assistant" ? TR("[宏]") : "");
         }, this.deductions);
         const to = this.deductionList.offsetHeight;
         if (to > from) {
@@ -713,6 +1611,7 @@ export class FSGui {
             this.deductionList.addEventListener('transitionend', reset);
         }
         this.draggerD.attachIdxListener();
+        this.renderInferenceProofRecommendations();
     }
     updateMetaRuleList(refresh) {
         if (this.skipRendering)
@@ -721,6 +1620,7 @@ export class FSGui {
             itInfo[0].innerHTML = TR(p.from).replaceAll("<", "&lt;").replaceAll(">", "&gt;");
         }, refresh, this.metarules.map(e => "m" + e));
         this.draggerM.attachIdxListener();
+        this.renderInferenceProofRecommendations();
     }
     scanDeductionFolderScope(targets) {
         const fStack = [];
@@ -935,11 +1835,19 @@ export class FSGui {
         return span;
     }
     stringifyDeductionStep(dom, step) {
-        if (!dom)
-            return `&nbsp;${step.deductionIdx} ${step.conditionIdxs.join(",")}`;
+        if (!dom) {
+            const name = step.assistant || step.deductionIdx === DEFERRED_ASSISTANT_STEP
+                ? TR("证明助手") : step.deductionIdx;
+            return `&nbsp;${name} ${step.conditionIdxs.join(",")}`;
+        }
         const span = this.addSpan(dom, "&nbsp;", true);
-        const didx = this.tree2HTML(this.formalSystem.getDeductionTokens(step.deductionIdx));
-        span.appendChild(didx);
+        if (step.assistant || step.deductionIdx === DEFERRED_ASSISTANT_STEP) {
+            span.appendChild(document.createTextNode(TR("证明助手")));
+        }
+        else {
+            const didx = this.tree2HTML(this.formalSystem.getDeductionTokens(step.deductionIdx));
+            span.appendChild(didx);
+        }
         this.addSpan(span, " ");
         let firstTerm = true;
         for (const p of step.conditionIdxs) {

@@ -1,5 +1,19 @@
 import type { AST } from "./astparser.js";
-import type { Context } from "./core.js";
+import {
+    cloneSyntax,
+    collectFreeBondVarIds,
+    contextWithScope,
+    isBinderNode,
+    lookupScopePosition,
+    lookupScope,
+    prependContext,
+    referencesBoundBinder,
+    ScopeCursor,
+    scopePosition,
+    validBondVarId as validId,
+    type Context,
+    type ScopeBinding
+} from "./scoped-syntax.js";
 import {
     SemanticNbeKernel,
     type NbeEqualOptions,
@@ -176,13 +190,6 @@ type CheckerState = {
     freshBondVarId?: () => number;
 };
 
-type ScopeBinding = {
-    name: string;
-    id: number;
-    sourceId?: number;
-    type?: AST;
-};
-
 type SynthesizedTypeSide = "left" | "right";
 type ConversionResult = NbeEqualityResult;
 
@@ -200,10 +207,6 @@ type InternalResult<T> =
 const success = <T>(value: T): InternalResult<T> => ({ status: "success", value });
 const invalid = (code: NbeTypeErrorCode): NbeTypeFailure => ({ status: "invalid", code });
 const unsupported = (code: NbeTypeErrorCode): NbeTypeFailure => ({ status: "unsupported", code });
-
-function validId(id: number | undefined): id is number {
-    return Number.isFinite(id) && id > 0;
-}
 
 function takeStep(state: CheckerState) {
     state.steps++;
@@ -252,14 +255,6 @@ function isLocalMeta(ast: AST, state: CheckerState) {
     return ast?.type === "var" && state.metas.has(ast.name);
 }
 
-function lookupScope(ast: AST, scope: readonly ScopeBinding[], sourceIdsOnly = false) {
-    if (validId(ast.bondVarId)) {
-        return scope.find(binding => binding.sourceId === ast.bondVarId)
-            ?? (!sourceIdsOnly ? scope.find(binding => binding.id === ast.bondVarId) : undefined);
-    }
-    return scope.find(binding => binding.name === ast.name);
-}
-
 function reserveBondVarId(id: number | undefined, state: CheckerState) {
     if (!validId(id)) return;
     state.usedIds.add(id);
@@ -268,7 +263,7 @@ function reserveBondVarId(id: number | undefined, state: CheckerState) {
 
 function isPreparedAst(
     ast: AST,
-    scope: readonly ScopeBinding[],
+    scope: readonly ScopeBinding[] | ScopeCursor,
     state: CheckerState
 ): boolean {
     if (!ast || typeof ast !== "object") return false;
@@ -278,26 +273,23 @@ function isPreparedAst(
         const binding = lookupScope(ast, scope);
         return !binding || ast.bondVarId === binding.id;
     }
-    if (ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W") {
+    if (isBinderNode(ast)) {
         if (!validId(ast.bondVarId)
             || !isPreparedAst(ast.nodes?.[0], scope, state)) return false;
-        return isPreparedAst(ast.nodes?.[1], [{
+        const binding: ScopeBinding = {
             name: ast.name,
             id: ast.bondVarId,
             sourceId: ast.bondVarId
-        }, ...scope], state);
+        };
+        if (!(scope instanceof ScopeCursor)) {
+            return isPreparedAst(ast.nodes?.[1], [binding, ...scope], state);
+        }
+        scope.push(binding);
+        const prepared = isPreparedAst(ast.nodes?.[1], scope, state);
+        scope.pop();
+        return prepared;
     }
     return (ast.nodes ?? []).every(child => isPreparedAst(child, scope, state));
-}
-
-function scopePosition(ast: AST, scope: readonly ScopeBinding[]) {
-    if (validId(ast.bondVarId)) {
-        return scope.findIndex(binding => binding.id === ast.bondVarId
-            || binding.sourceId === ast.bondVarId);
-    }
-    return scope.findIndex(binding => !validId(binding.id)
-        && !validId(binding.sourceId)
-        && binding.name === ast.name);
 }
 
 function abstractScopeVariable(
@@ -308,8 +300,8 @@ function abstractScopeVariable(
 ): AST | null {
     if (!ast || typeof ast !== "object") return null;
     if (ast.type === "var") {
-        const found = scopePosition(ast, scope);
-        if (found >= 0) return found === position ? cloneSyntax(replacement) : null;
+        const match = lookupScopePosition(ast, scope);
+        if (match) return match.position === position ? cloneSyntax(replacement) : null;
         return cloneSyntax(ast);
     }
     const nodes: AST[] = [];
@@ -337,7 +329,7 @@ function abstractContextVariable(
             ? cloneSyntax(replacement)
             : cloneSyntax(ast);
     }
-    if (ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W") {
+    if (isBinderNode(ast)) {
         return {
             type: ast.type,
             name: ast.name,
@@ -373,9 +365,9 @@ function alignScopeSyntax(
 ): AST | null {
     if (!ast || typeof ast !== "object") return null;
     if (ast.type === "var") {
-        const position = scopePosition(ast, sourceScope);
-        if (position < 0) return cloneSyntax(ast);
-        const target = targetScope[position];
+        const match = lookupScopePosition(ast, sourceScope);
+        if (!match) return cloneSyntax(ast);
+        const target = targetScope[match.position];
         return target ? makeVariable(target.name, target.id) : null;
     }
     const nodes: AST[] = [];
@@ -392,26 +384,6 @@ function alignScopeSyntax(
     };
 }
 
-const scopedContextCache = new WeakMap<Context, WeakMap<readonly ScopeBinding[], Context>>();
-
-function contextWithScope(scope: readonly ScopeBinding[], context: Context): Context {
-    if (!scope.length) return context;
-    let byScope = scopedContextCache.get(context);
-    if (!byScope) {
-        byScope = new WeakMap;
-        scopedContextCache.set(context, byScope);
-    }
-    const cached = byScope.get(scope);
-    if (cached) return cached;
-    const scoped: Context = [];
-    for (const binding of scope) {
-        if (binding.type) scoped.push([binding.name, binding.type, binding.id]);
-    }
-    const merged = scoped.length ? [...scoped, ...context] : context;
-    byScope.set(scope, merged);
-    return merged;
-}
-
 function reserveBondVarIds(ast: AST, state: CheckerState) {
     if (!ast || typeof ast !== "object") return;
     reserveBondVarId(ast.bondVarId, state);
@@ -420,7 +392,7 @@ function reserveBondVarIds(ast: AST, state: CheckerState) {
 
 function prepareAst(
     ast: AST,
-    scope: readonly ScopeBinding[],
+    scope: readonly ScopeBinding[] | ScopeCursor,
     state: CheckerState,
     dropUnboundIds = false,
     freshenBinders = false,
@@ -471,7 +443,7 @@ function prepareAst(
             displayExplicitAt: ast.displayExplicitAt
         };
     }
-    if (ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W") {
+    if (isBinderNode(ast)) {
         const domain = prepareAst(
             ast.nodes?.[0],
             scope,
@@ -483,14 +455,29 @@ function prepareAst(
         const sourceId = validId(ast.bondVarId) ? ast.bondVarId : undefined;
         const id = !freshenBinders && sourceId ? sourceId : allocateId(state);
         state.nextId = Math.max(state.nextId, id + 1);
-        const body = prepareAst(
-            ast.nodes?.[1],
-            [{ name: ast.name, id, sourceId }, ...scope],
-            state,
-            dropUnboundIds,
-            freshenBinders,
-            metaRenames
-        );
+        const binding: ScopeBinding = { name: ast.name, id, sourceId };
+        let body: AST;
+        if (!(scope instanceof ScopeCursor)) {
+            body = prepareAst(
+                ast.nodes?.[1],
+                [binding, ...scope],
+                state,
+                dropUnboundIds,
+                freshenBinders,
+                metaRenames
+            );
+        } else {
+            scope.push(binding);
+            body = prepareAst(
+                ast.nodes?.[1],
+                scope,
+                state,
+                dropUnboundIds,
+                freshenBinders,
+                metaRenames
+            );
+            scope.pop();
+        }
         return { type: ast.type, name: ast.name, nodes: [domain, body], bondVarId: id };
     }
     return {
@@ -507,16 +494,6 @@ function prepareAst(
     };
 }
 
-function cloneSyntax(ast: AST): AST {
-    return {
-        type: ast.type,
-        name: ast.name,
-        bondVarId: ast.bondVarId,
-        nodes: ast.nodes?.map(cloneSyntax),
-        displayExplicitAt: ast.displayExplicitAt
-    };
-}
-
 /**
  * A metavariable solution may be inserted more than once into the same term.
  * Reusing its binder ids would make the copies capture one another during a
@@ -529,20 +506,19 @@ function freshenMetaSolution(ast: AST, state: CheckerState): AST {
         while (stack.length) {
             const node = stack.pop();
             if (!node) continue;
-            if (node.type === "L" || node.type === "P"
-                || node.type === "S" || node.type === "W") return true;
+            if (isBinderNode(node)) return true;
             for (const child of node.nodes ?? []) stack.push(child);
         }
         return false;
     };
     if (!hasBinder(ast)) return cloneSyntax(ast);
 
-    const visit = (node: AST, scope: readonly ScopeBinding[]): AST => {
+    const scope = new ScopeCursor();
+    const visit = (node: AST): AST => {
         if (node.type === "var") {
             const binding = validId(node.bondVarId)
-                ? scope.find(candidate => candidate.sourceId === node.bondVarId)
-                : scope.find(candidate => !validId(candidate.sourceId)
-                    && candidate.name === node.name);
+                ? scope.findBySourceId(node.bondVarId)
+                : scope.findByUnmarkedSourceName(node.name);
             return {
                 type: "var",
                 name: binding?.name ?? node.name,
@@ -550,9 +526,8 @@ function freshenMetaSolution(ast: AST, state: CheckerState): AST {
                 displayExplicitAt: node.displayExplicitAt
             };
         }
-        if (node.type === "L" || node.type === "P"
-            || node.type === "S" || node.type === "W") {
-            const domain = visit(node.nodes?.[0], scope);
+        if (isBinderNode(node)) {
+            const domain = visit(node.nodes?.[0]);
             const id = allocateId(state);
             const binding: ScopeBinding = {
                 name: node.name,
@@ -560,11 +535,14 @@ function freshenMetaSolution(ast: AST, state: CheckerState): AST {
                 sourceId: validId(node.bondVarId) ? node.bondVarId : undefined,
                 type: domain
             };
+            scope.push(binding);
+            const body = visit(node.nodes?.[1]);
+            scope.pop();
             return {
                 type: node.type,
                 name: node.name,
                 bondVarId: id,
-                nodes: [domain, visit(node.nodes?.[1], [binding, ...scope])],
+                nodes: [domain, body],
                 displayExplicitAt: node.displayExplicitAt
             };
         }
@@ -572,11 +550,11 @@ function freshenMetaSolution(ast: AST, state: CheckerState): AST {
             type: node.type,
             name: node.name,
             bondVarId: node.bondVarId,
-            nodes: node.nodes?.map(child => visit(child, scope)),
+            nodes: node.nodes?.map(visit),
             displayExplicitAt: node.displayExplicitAt
         };
     };
-    return visit(ast, []);
+    return visit(ast);
 }
 
 function exactSyntaxEqual(left: AST, right: AST): boolean {
@@ -1004,26 +982,6 @@ function containsFiniteBondVarId(ast: AST): boolean {
     if (!ast || typeof ast !== "object") return false;
     if (validId(ast.bondVarId)) return true;
     return (ast.nodes ?? []).some(containsFiniteBondVarId);
-}
-
-function collectFreeBondVarIds(
-    ast: AST,
-    result = new Set<number>(),
-    scope = new Set<number>()
-) {
-    if (!ast || typeof ast !== "object") return result;
-    if (ast.type === "var" && validId(ast.bondVarId) && !scope.has(ast.bondVarId)) {
-        result.add(ast.bondVarId);
-        return result;
-    }
-    const binder = ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W";
-    for (const [index, child] of (ast.nodes ?? []).entries()) {
-        const childScope = binder && index === 1 && validId(ast.bondVarId)
-            ? new Set(scope).add(ast.bondVarId)
-            : scope;
-        collectFreeBondVarIds(child, result, childScope);
-    }
-    return result;
 }
 
 function normalizeMetaName(name: string) {
@@ -2022,7 +1980,7 @@ export class SemanticNbeTypeChecker {
         }
         if (!state.elaborateMetas && !state.annotateTerm) {
             let reusable = true;
-            let reusableScope: ScopeBinding[] = [];
+            const reusableScope = new ScopeCursor();
             for (let index = context.length - 1; index >= 0; index--) {
                 const [name, type, sourceId] = context[index];
                 const sentinel = sourceId === Infinity;
@@ -2032,14 +1990,14 @@ export class SemanticNbeTypeChecker {
                     reusable = false;
                     break;
                 }
-                reusableScope = [{
+                reusableScope.push({
                     name,
                     id: sourceId,
                     sourceId
-                }, ...reusableScope];
+                });
             }
             if (reusable && isPreparedAst(ast, reusableScope, state)) {
-                return success({ ast, context, scope: reusableScope, state });
+                return success({ ast, context, scope: reusableScope.toArray(), state });
             }
             state.usedIds.clear();
             state.nextId = 1;
@@ -2050,18 +2008,18 @@ export class SemanticNbeTypeChecker {
             if (type) reserveBondVarIds(type, state);
         }
         const preparedContext: Context = [];
-        let scope: ScopeBinding[] = [];
+        const scope = new ScopeCursor();
         for (let index = context.length - 1; index >= 0; index--) {
             const [name, type, sourceId] = context[index];
             const sentinel = sourceId === Infinity;
             const id = sentinel ? Infinity : validId(sourceId) ? sourceId : allocateId(state);
             const preparedType = type ? prepareAst(type, scope, state) : null;
             preparedContext.unshift([name, preparedType, id] as Context[number]);
-            scope = [{
+            scope.push({
                 name,
                 id,
                 sourceId: sentinel || validId(sourceId) ? sourceId : undefined
-            }, ...scope];
+            });
         }
         const preparedAst = prepareAst(ast, scope, state);
         if (containsForeignMetavariable(preparedAst, state)
@@ -2069,7 +2027,12 @@ export class SemanticNbeTypeChecker {
                 && preparedContext.some(([, type]) => type && containsForeignMetavariable(type, state)))) {
             return unsupported("metavariable");
         }
-        return success({ ast: preparedAst, context: preparedContext, scope, state });
+        return success({
+            ast: preparedAst,
+            context: preparedContext,
+            scope: scope.toArray(),
+            state
+        });
     }
 
     private synthesize(ast: AST, context: Context, state: CheckerState): InternalResult<AST> {
@@ -2112,7 +2075,7 @@ export class SemanticNbeTypeChecker {
             && referencesConstant(definition, definitionName)) return null;
         const preparedDefinition = prepareAst(
             definition,
-            [],
+            new ScopeCursor(),
             state,
             true,
             true,
@@ -2172,7 +2135,7 @@ export class SemanticNbeTypeChecker {
         reserveBondVarIds(constantType.type, state);
         const preparedType = prepareAst(
             constantType.type,
-            [],
+            new ScopeCursor(),
             state,
             true,
             true,
@@ -2202,7 +2165,7 @@ export class SemanticNbeTypeChecker {
             metaRenames.set(`?${meta.sourceName}`, localName);
             metaRenames.set(`?${meta.sourceName}:`, localName);
         }
-        const body = prepareAst(scheme.body, [], state, true, true, metaRenames);
+        const body = prepareAst(scheme.body, new ScopeCursor(), state, true, true, metaRenames);
         if (containsForeignMetavariable(body, state)) return unsupported("metavariable");
         const allowedContextIds = new Set(
             context.map(([, , id]) => id).filter(validId)
@@ -2213,7 +2176,7 @@ export class SemanticNbeTypeChecker {
             if (meta.expectedType) {
                 const expectedType = prepareAst(
                     meta.expectedType,
-                    [],
+                    new ScopeCursor(),
                     state,
                     true,
                     true,
@@ -2227,7 +2190,14 @@ export class SemanticNbeTypeChecker {
             if (!meta.preset) continue;
             const localName = localNames.get(meta.sourceName);
             if (!localName) return unsupported("metavariable");
-            const preset = prepareAst(meta.preset, [], state, true, true, metaRenames);
+            const preset = prepareAst(
+                meta.preset,
+                new ScopeCursor(),
+                state,
+                true,
+                true,
+                metaRenames
+            );
             const bound = this.bindMeta(localName, preset, context, state);
             if (bound === "budget-exhausted") return unsupported("budget-exhausted");
             if (bound !== "equal") return unsupported("metavariable");
@@ -2251,11 +2221,18 @@ export class SemanticNbeTypeChecker {
         const domainLevel = this.expectUniverse(domainType.value, context, state);
         if (domainLevel.status !== "success") return domainLevel;
         const resolvedDomain = restoreResolvedSyntax(ast.nodes?.[0], surfaceDomain, state);
-        const subcontext: Context = [
-            [ast.name, cloneSyntax(resolvedDomain), ast.bondVarId],
-            ...context
-        ];
         const body = ast.nodes?.[1];
+        // A closed non-dependent binder cannot affect synthesis of its body.
+        // Avoid materializing another nearest-first context array for the
+        // common telescope case, but keep the binder visible whenever a hole
+        // could still be solved with it.
+        const subcontext = !state.metas.size
+            && !referencesBoundBinder(body, ast.bondVarId)
+            ? context
+            : prependContext(
+                [ast.name, cloneSyntax(resolvedDomain), ast.bondVarId],
+                context
+            );
         const inferredBodyType = ast.type !== "L" && isLocalMeta(body, state)
             ? ensureLocalMetaIsType(body, subcontext, state)
             : null;
@@ -3133,8 +3110,9 @@ export class SemanticNbeTypeChecker {
         // Let ordinary direct-meta binding record `?m := ?F x`; once either
         // side becomes concrete this pattern branch can abstract it safely.
         if (isLocalMeta(other, state)) return null;
-        const position = scopePosition(args[0], termScope);
-        const sourceBinding = position >= 0 ? termScope[position] : undefined;
+        const scopeMatch = lookupScopePosition(args[0], termScope);
+        const position = scopeMatch?.position ?? -1;
+        const sourceBinding = scopeMatch?.binding;
         if (sourceBinding?.type && otherScope[position]) {
             const binderId = allocateId(state);
             const binderVariable = makeVariable(sourceBinding.name, binderId);

@@ -155,6 +155,38 @@ try {
     }
 
     {
+        const options = {
+            disableMultipleApply: false,
+            disableDestructConds: false,
+            disableDestructEq: false
+        };
+        const retainedSuffix = [
+            null,
+            ["later", parser.parse("True")]
+        ];
+        const rewound = await rpc(first, "assist", {
+            kind: "configure",
+            config: minimalTTConfig,
+            definitions: retainedSuffix,
+            loadedThrough: 1
+        });
+        assert.equal(rewound.body?.ok, true, server.output());
+        const hidden = await rpc(first, "assist", { kind: "start", target: "later", options });
+        assert.equal(hidden.body?.ok, false,
+            "the assistant process exposed a definition retained beyond loadedThrough");
+
+        const reloaded = await rpc(first, "assist", {
+            kind: "configure",
+            config: minimalTTConfig,
+            definitions: retainedSuffix,
+            loadedThrough: 2
+        });
+        assert.equal(reloaded.body?.ok, true, server.output());
+        const visible = await rpc(first, "assist", { kind: "start", target: "later", options });
+        assert.equal(visible.body?.ok, true, visible.body?.error ?? server.output());
+    }
+
+    {
         const config = {
             ...minimalTTConfig,
             unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))]

@@ -10,6 +10,37 @@ export class Proof {
     constructor(fs: FormalSystem) {
         this.fs = fs;
     }
+    assertTautology(ast: AST) {
+        assert.checkGrammer(ast, "p");
+        const varTable = assert.getReplVarsType(ast, {}, false);
+        if (Object.values(varTable).includes(true)) throw TR("无法对非命题逻辑符号进行真值指派");
+        const vars = Object.keys(varTable);
+        // The old proof generator uses 32-bit shifts. Reject inputs beyond the
+        // representable exhaustive-search range instead of silently accepting
+        // an under-enumerated formula when the shift overflows.
+        if (vars.length > 30) throw TR("命题变量过多，无法进行重言式测试");
+        const hypEnums = 1n << BigInt(vars.length);
+        for (let i = 0n; i < hypEnums; i++) {
+            if (this.enumTruth(ast, vars, i)) continue;
+            throw TR("条件重言式测试失败：真值指派") + vars.map((v, idx) => (v + TR(`为`) + (((i >> BigInt(idx)) & 1n) ? TR("真") : TR("假")))).join(TR("、")) + TR("时命题为假");
+        }
+    }
+    private enumTruth(ast: AST, vars: string[], hyps: bigint): boolean {
+        if (ast.type === "replvar") {
+            const idx = vars.indexOf(ast.name);
+            return idx >= 0 && ((hyps >> BigInt(idx)) & 1n) === 1n;
+        }
+        if (ast.type === "sym") {
+            switch (ast.name) {
+                case "~": return !this.enumTruth(ast.nodes[0], vars, hyps);
+                case ">": return !this.enumTruth(ast.nodes[0], vars, hyps) || this.enumTruth(ast.nodes[1], vars, hyps);
+                case "<>": return this.enumTruth(ast.nodes[0], vars, hyps) === this.enumTruth(ast.nodes[1], vars, hyps);
+                case "|": return this.enumTruth(ast.nodes[0], vars, hyps) || this.enumTruth(ast.nodes[1], vars, hyps);
+                case "&": return this.enumTruth(ast.nodes[0], vars, hyps) && this.enumTruth(ast.nodes[1], vars, hyps);
+            }
+        }
+        throw TR("无法对非命题逻辑符号进行真值指派");
+    }
     prove(ast: AST) {
         const varTable = assert.getReplVarsType(ast, {}, false);
         if (Object.values(varTable).includes(true)) throw TR("无法对非命题逻辑符号进行真值指派");

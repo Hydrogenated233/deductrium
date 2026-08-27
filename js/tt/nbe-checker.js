@@ -1,9 +1,7 @@
+import { cloneSyntax, collectFreeBondVarIds, contextWithScope, isBinderNode, lookupScopePosition, lookupScope, prependContext, referencesBoundBinder, ScopeCursor, scopePosition, validBondVarId as validId } from "./scoped-syntax.js";
 const success = (value) => ({ status: "success", value });
 const invalid = (code) => ({ status: "invalid", code });
 const unsupported = (code) => ({ status: "unsupported", code });
-function validId(id) {
-    return Number.isFinite(id) && id > 0;
-}
 function takeStep(state) {
     state.steps++;
     return state.steps <= state.maxSteps
@@ -48,13 +46,6 @@ function allocateMeta(state) {
 function isLocalMeta(ast, state) {
     return ast?.type === "var" && state.metas.has(ast.name);
 }
-function lookupScope(ast, scope, sourceIdsOnly = false) {
-    if (validId(ast.bondVarId)) {
-        return scope.find(binding => binding.sourceId === ast.bondVarId)
-            ?? (!sourceIdsOnly ? scope.find(binding => binding.id === ast.bondVarId) : undefined);
-    }
-    return scope.find(binding => binding.name === ast.name);
-}
 function reserveBondVarId(id, state) {
     if (!validId(id))
         return;
@@ -71,34 +62,32 @@ function isPreparedAst(ast, scope, state) {
         const binding = lookupScope(ast, scope);
         return !binding || ast.bondVarId === binding.id;
     }
-    if (ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W") {
+    if (isBinderNode(ast)) {
         if (!validId(ast.bondVarId)
             || !isPreparedAst(ast.nodes?.[0], scope, state))
             return false;
-        return isPreparedAst(ast.nodes?.[1], [{
-                name: ast.name,
-                id: ast.bondVarId,
-                sourceId: ast.bondVarId
-            }, ...scope], state);
+        const binding = {
+            name: ast.name,
+            id: ast.bondVarId,
+            sourceId: ast.bondVarId
+        };
+        if (!(scope instanceof ScopeCursor)) {
+            return isPreparedAst(ast.nodes?.[1], [binding, ...scope], state);
+        }
+        scope.push(binding);
+        const prepared = isPreparedAst(ast.nodes?.[1], scope, state);
+        scope.pop();
+        return prepared;
     }
     return (ast.nodes ?? []).every(child => isPreparedAst(child, scope, state));
-}
-function scopePosition(ast, scope) {
-    if (validId(ast.bondVarId)) {
-        return scope.findIndex(binding => binding.id === ast.bondVarId
-            || binding.sourceId === ast.bondVarId);
-    }
-    return scope.findIndex(binding => !validId(binding.id)
-        && !validId(binding.sourceId)
-        && binding.name === ast.name);
 }
 function abstractScopeVariable(ast, scope, position, replacement) {
     if (!ast || typeof ast !== "object")
         return null;
     if (ast.type === "var") {
-        const found = scopePosition(ast, scope);
-        if (found >= 0)
-            return found === position ? cloneSyntax(replacement) : null;
+        const match = lookupScopePosition(ast, scope);
+        if (match)
+            return match.position === position ? cloneSyntax(replacement) : null;
         return cloneSyntax(ast);
     }
     const nodes = [];
@@ -121,7 +110,7 @@ function abstractContextVariable(ast, targetId, replacement, shadowed = false) {
             ? cloneSyntax(replacement)
             : cloneSyntax(ast);
     }
-    if (ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W") {
+    if (isBinderNode(ast)) {
         return {
             type: ast.type,
             name: ast.name,
@@ -147,10 +136,10 @@ function alignScopeSyntax(ast, sourceScope, targetScope) {
     if (!ast || typeof ast !== "object")
         return null;
     if (ast.type === "var") {
-        const position = scopePosition(ast, sourceScope);
-        if (position < 0)
+        const match = lookupScopePosition(ast, sourceScope);
+        if (!match)
             return cloneSyntax(ast);
-        const target = targetScope[position];
+        const target = targetScope[match.position];
         return target ? makeVariable(target.name, target.id) : null;
     }
     const nodes = [];
@@ -166,27 +155,6 @@ function alignScopeSyntax(ast, sourceScope, targetScope) {
         bondVarId: ast.bondVarId,
         ...(ast.nodes ? { nodes } : {})
     };
-}
-const scopedContextCache = new WeakMap();
-function contextWithScope(scope, context) {
-    if (!scope.length)
-        return context;
-    let byScope = scopedContextCache.get(context);
-    if (!byScope) {
-        byScope = new WeakMap;
-        scopedContextCache.set(context, byScope);
-    }
-    const cached = byScope.get(scope);
-    if (cached)
-        return cached;
-    const scoped = [];
-    for (const binding of scope) {
-        if (binding.type)
-            scoped.push([binding.name, binding.type, binding.id]);
-    }
-    const merged = scoped.length ? [...scoped, ...context] : context;
-    byScope.set(scope, merged);
-    return merged;
 }
 function reserveBondVarIds(ast, state) {
     if (!ast || typeof ast !== "object")
@@ -245,27 +213,27 @@ function prepareAst(ast, scope, state, dropUnboundIds = false, freshenBinders = 
             displayExplicitAt: ast.displayExplicitAt
         };
     }
-    if (ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W") {
+    if (isBinderNode(ast)) {
         const domain = prepareAst(ast.nodes?.[0], scope, state, dropUnboundIds, freshenBinders, metaRenames);
         const sourceId = validId(ast.bondVarId) ? ast.bondVarId : undefined;
         const id = !freshenBinders && sourceId ? sourceId : allocateId(state);
         state.nextId = Math.max(state.nextId, id + 1);
-        const body = prepareAst(ast.nodes?.[1], [{ name: ast.name, id, sourceId }, ...scope], state, dropUnboundIds, freshenBinders, metaRenames);
+        const binding = { name: ast.name, id, sourceId };
+        let body;
+        if (!(scope instanceof ScopeCursor)) {
+            body = prepareAst(ast.nodes?.[1], [binding, ...scope], state, dropUnboundIds, freshenBinders, metaRenames);
+        }
+        else {
+            scope.push(binding);
+            body = prepareAst(ast.nodes?.[1], scope, state, dropUnboundIds, freshenBinders, metaRenames);
+            scope.pop();
+        }
         return { type: ast.type, name: ast.name, nodes: [domain, body], bondVarId: id };
     }
     return {
         type: ast.type,
         name: ast.name,
         nodes: ast.nodes?.map(child => prepareAst(child, scope, state, dropUnboundIds, freshenBinders, metaRenames))
-    };
-}
-function cloneSyntax(ast) {
-    return {
-        type: ast.type,
-        name: ast.name,
-        bondVarId: ast.bondVarId,
-        nodes: ast.nodes?.map(cloneSyntax),
-        displayExplicitAt: ast.displayExplicitAt
     };
 }
 /**
@@ -281,8 +249,7 @@ function freshenMetaSolution(ast, state) {
             const node = stack.pop();
             if (!node)
                 continue;
-            if (node.type === "L" || node.type === "P"
-                || node.type === "S" || node.type === "W")
+            if (isBinderNode(node))
                 return true;
             for (const child of node.nodes ?? [])
                 stack.push(child);
@@ -291,12 +258,12 @@ function freshenMetaSolution(ast, state) {
     };
     if (!hasBinder(ast))
         return cloneSyntax(ast);
-    const visit = (node, scope) => {
+    const scope = new ScopeCursor();
+    const visit = (node) => {
         if (node.type === "var") {
             const binding = validId(node.bondVarId)
-                ? scope.find(candidate => candidate.sourceId === node.bondVarId)
-                : scope.find(candidate => !validId(candidate.sourceId)
-                    && candidate.name === node.name);
+                ? scope.findBySourceId(node.bondVarId)
+                : scope.findByUnmarkedSourceName(node.name);
             return {
                 type: "var",
                 name: binding?.name ?? node.name,
@@ -304,9 +271,8 @@ function freshenMetaSolution(ast, state) {
                 displayExplicitAt: node.displayExplicitAt
             };
         }
-        if (node.type === "L" || node.type === "P"
-            || node.type === "S" || node.type === "W") {
-            const domain = visit(node.nodes?.[0], scope);
+        if (isBinderNode(node)) {
+            const domain = visit(node.nodes?.[0]);
             const id = allocateId(state);
             const binding = {
                 name: node.name,
@@ -314,11 +280,14 @@ function freshenMetaSolution(ast, state) {
                 sourceId: validId(node.bondVarId) ? node.bondVarId : undefined,
                 type: domain
             };
+            scope.push(binding);
+            const body = visit(node.nodes?.[1]);
+            scope.pop();
             return {
                 type: node.type,
                 name: node.name,
                 bondVarId: id,
-                nodes: [domain, visit(node.nodes?.[1], [binding, ...scope])],
+                nodes: [domain, body],
                 displayExplicitAt: node.displayExplicitAt
             };
         }
@@ -326,11 +295,11 @@ function freshenMetaSolution(ast, state) {
             type: node.type,
             name: node.name,
             bondVarId: node.bondVarId,
-            nodes: node.nodes?.map(child => visit(child, scope)),
+            nodes: node.nodes?.map(visit),
             displayExplicitAt: node.displayExplicitAt
         };
     };
-    return visit(ast, []);
+    return visit(ast);
 }
 function exactSyntaxEqual(left, right) {
     if (left === right)
@@ -735,22 +704,6 @@ function containsFiniteBondVarId(ast) {
     if (validId(ast.bondVarId))
         return true;
     return (ast.nodes ?? []).some(containsFiniteBondVarId);
-}
-function collectFreeBondVarIds(ast, result = new Set(), scope = new Set()) {
-    if (!ast || typeof ast !== "object")
-        return result;
-    if (ast.type === "var" && validId(ast.bondVarId) && !scope.has(ast.bondVarId)) {
-        result.add(ast.bondVarId);
-        return result;
-    }
-    const binder = ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W";
-    for (const [index, child] of (ast.nodes ?? []).entries()) {
-        const childScope = binder && index === 1 && validId(ast.bondVarId)
-            ? new Set(scope).add(ast.bondVarId)
-            : scope;
-        collectFreeBondVarIds(child, result, childScope);
-    }
-    return result;
 }
 function normalizeMetaName(name) {
     return name.replace(/^\?/, "").replace(/:+$/, "");
@@ -1610,7 +1563,7 @@ export class SemanticNbeTypeChecker {
         }
         if (!state.elaborateMetas && !state.annotateTerm) {
             let reusable = true;
-            let reusableScope = [];
+            const reusableScope = new ScopeCursor();
             for (let index = context.length - 1; index >= 0; index--) {
                 const [name, type, sourceId] = context[index];
                 const sentinel = sourceId === Infinity;
@@ -1620,14 +1573,14 @@ export class SemanticNbeTypeChecker {
                     reusable = false;
                     break;
                 }
-                reusableScope = [{
-                        name,
-                        id: sourceId,
-                        sourceId
-                    }, ...reusableScope];
+                reusableScope.push({
+                    name,
+                    id: sourceId,
+                    sourceId
+                });
             }
             if (reusable && isPreparedAst(ast, reusableScope, state)) {
-                return success({ ast, context, scope: reusableScope, state });
+                return success({ ast, context, scope: reusableScope.toArray(), state });
             }
             state.usedIds.clear();
             state.nextId = 1;
@@ -1639,18 +1592,18 @@ export class SemanticNbeTypeChecker {
                 reserveBondVarIds(type, state);
         }
         const preparedContext = [];
-        let scope = [];
+        const scope = new ScopeCursor();
         for (let index = context.length - 1; index >= 0; index--) {
             const [name, type, sourceId] = context[index];
             const sentinel = sourceId === Infinity;
             const id = sentinel ? Infinity : validId(sourceId) ? sourceId : allocateId(state);
             const preparedType = type ? prepareAst(type, scope, state) : null;
             preparedContext.unshift([name, preparedType, id]);
-            scope = [{
-                    name,
-                    id,
-                    sourceId: sentinel || validId(sourceId) ? sourceId : undefined
-                }, ...scope];
+            scope.push({
+                name,
+                id,
+                sourceId: sentinel || validId(sourceId) ? sourceId : undefined
+            });
         }
         const preparedAst = prepareAst(ast, scope, state);
         if (containsForeignMetavariable(preparedAst, state)
@@ -1658,7 +1611,12 @@ export class SemanticNbeTypeChecker {
                 && preparedContext.some(([, type]) => type && containsForeignMetavariable(type, state)))) {
             return unsupported("metavariable");
         }
-        return success({ ast: preparedAst, context: preparedContext, scope, state });
+        return success({
+            ast: preparedAst,
+            context: preparedContext,
+            scope: scope.toArray(),
+            state
+        });
     }
     synthesize(ast, context, state) {
         if (!takeStep(state))
@@ -1706,7 +1664,7 @@ export class SemanticNbeTypeChecker {
         if (state.expandingDefinitions.has(definitionName)
             && referencesConstant(definition, definitionName))
             return null;
-        const preparedDefinition = prepareAst(definition, [], state, true, true, new Map);
+        const preparedDefinition = prepareAst(definition, new ScopeCursor(), state, true, true, new Map);
         const expanded = makeApplication(preparedDefinition, ...args.map(argument => cloneSyntax(argument)));
         assignSyntax(ast, expanded);
         state.hadElaborationChanges = true;
@@ -1761,7 +1719,7 @@ export class SemanticNbeTypeChecker {
             return this.instantiateScheme(constantType.scheme, context, state);
         }
         reserveBondVarIds(constantType.type, state);
-        const preparedType = prepareAst(constantType.type, [], state, true, true, state.elaborateMetas ? new Map : undefined);
+        const preparedType = prepareAst(constantType.type, new ScopeCursor(), state, true, true, state.elaborateMetas ? new Map : undefined);
         return containsForeignMetavariable(preparedType, state)
             ? unsupported("metavariable")
             : success(preparedType);
@@ -1783,7 +1741,7 @@ export class SemanticNbeTypeChecker {
             metaRenames.set(`?${meta.sourceName}`, localName);
             metaRenames.set(`?${meta.sourceName}:`, localName);
         }
-        const body = prepareAst(scheme.body, [], state, true, true, metaRenames);
+        const body = prepareAst(scheme.body, new ScopeCursor(), state, true, true, metaRenames);
         if (containsForeignMetavariable(body, state))
             return unsupported("metavariable");
         const allowedContextIds = new Set(context.map(([, , id]) => id).filter(validId));
@@ -1792,7 +1750,7 @@ export class SemanticNbeTypeChecker {
             if (!localName)
                 return unsupported("metavariable");
             if (meta.expectedType) {
-                const expectedType = prepareAst(meta.expectedType, [], state, true, true, metaRenames);
+                const expectedType = prepareAst(meta.expectedType, new ScopeCursor(), state, true, true, metaRenames);
                 recordMetaExpectedType(localName, expectedType, state);
             }
             state.metaAllowedContextIds.set(localName, new Set(allowedContextIds));
@@ -1803,7 +1761,7 @@ export class SemanticNbeTypeChecker {
             const localName = localNames.get(meta.sourceName);
             if (!localName)
                 return unsupported("metavariable");
-            const preset = prepareAst(meta.preset, [], state, true, true, metaRenames);
+            const preset = prepareAst(meta.preset, new ScopeCursor(), state, true, true, metaRenames);
             const bound = this.bindMeta(localName, preset, context, state);
             if (bound === "budget-exhausted")
                 return unsupported("budget-exhausted");
@@ -1831,11 +1789,15 @@ export class SemanticNbeTypeChecker {
         if (domainLevel.status !== "success")
             return domainLevel;
         const resolvedDomain = restoreResolvedSyntax(ast.nodes?.[0], surfaceDomain, state);
-        const subcontext = [
-            [ast.name, cloneSyntax(resolvedDomain), ast.bondVarId],
-            ...context
-        ];
         const body = ast.nodes?.[1];
+        // A closed non-dependent binder cannot affect synthesis of its body.
+        // Avoid materializing another nearest-first context array for the
+        // common telescope case, but keep the binder visible whenever a hole
+        // could still be solved with it.
+        const subcontext = !state.metas.size
+            && !referencesBoundBinder(body, ast.bondVarId)
+            ? context
+            : prependContext([ast.name, cloneSyntax(resolvedDomain), ast.bondVarId], context);
         const inferredBodyType = ast.type !== "L" && isLocalMeta(body, state)
             ? ensureLocalMetaIsType(body, subcontext, state)
             : null;
@@ -2473,8 +2435,9 @@ export class SemanticNbeTypeChecker {
         // side becomes concrete this pattern branch can abstract it safely.
         if (isLocalMeta(other, state))
             return null;
-        const position = scopePosition(args[0], termScope);
-        const sourceBinding = position >= 0 ? termScope[position] : undefined;
+        const scopeMatch = lookupScopePosition(args[0], termScope);
+        const position = scopeMatch?.position ?? -1;
+        const sourceBinding = scopeMatch?.binding;
         if (sourceBinding?.type && otherScope[position]) {
             const binderId = allocateId(state);
             const binderVariable = makeVariable(sourceBinding.name, binderId);

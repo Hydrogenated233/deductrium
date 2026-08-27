@@ -28,10 +28,10 @@ assert.match(gui, /theorem\.input\.value = String\(item\.value \?\? ""\)/,
     "save restore must put long proof terms back into the wrapping theorem editor");
 assert.match(gui, /input\.addEventListener\("focus", \(\) => \{[\s\S]*?resizeTheoremInput\(\)/,
     "a restored long proof term must resize when the user opens it for editing");
-assert.match(html, /class="list-wrapper tactic-assist-wrapper"[\s\S]*?<textarea id="tactic-input"[^>]*rows="1"/,
+assert.match(html, /<textarea id="tactic-input"[^>]*rows="1"/,
     "the active proof command must use a selectable wrapping textarea");
-assert.match(css, /\.tactic-assist-wrapper\s*\{[^}]*user-select:\s*text/,
-    "proof-assistant history must remain selectable despite generic list controls");
+assert.doesNotMatch(html, /class="[^"]*list-wrapper[^"]*tactic-assist-wrapper[^"]*"/,
+    "proof-assistant controls must not add the black list-wrapper frame");
 assert.match(css, /#tactic-state \.blocked\s*\{[^}]*white-space:\s*pre-wrap[^}]*overflow-wrap:\s*anywhere/,
     "historical proof commands must wrap while preserving their command text");
 assert.match(gui, /input\.addEventListener\("input", \(\) => this\.resizeTacticInput\(\)\)/,

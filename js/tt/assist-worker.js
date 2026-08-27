@@ -7,7 +7,7 @@ globalThis.addEventListener("message", (event) => {
     try {
         let result;
         if (request.kind === "configure") {
-            definitions.configure(request.config, request.definitions);
+            definitions.configure(request.config, request.definitions, request.loadedThrough);
             engine.clear();
         }
         else if (request.kind === "truncate") {

@@ -1,3 +1,10 @@
+import {
+    cloneTTCoreSessionSnapshot,
+    cloneTTDefinitionSlot,
+    createTTCoreSessionSnapshot,
+    type TTCoreSessionSnapshot
+} from "./core-session-snapshot.js";
+
 export type TTProcessChannel = "core" | "assist";
 
 type TTProcessSessionResponse = {
@@ -21,9 +28,14 @@ type TTProcessRpcResponse<T> = {
 type TTProcessMode = "undecided" | "process" | "worker";
 
 type TTProcessConfiguration = {
-    request: string;
+    /**
+     * The core portion of recovery state. It is kept as an owned session
+     * snapshot rather than a config JSON string plus a second definitions
+     * array, so restores cannot accidentally replay stale embedded configs.
+     */
+    snapshot: TTCoreSessionSnapshot;
     generation: number | null;
-    definitions: Array<string | null>;
+    /** Proof tactics are intentionally separate from the shared definition state. */
     assistStart: string | null;
     revision: number;
 };
@@ -115,14 +127,15 @@ export class TTProcessTransport {
         const target = Math.max(0, Math.floor(index));
         const stored = definition === null || definition === undefined
             ? null
-            : JSON.stringify(definition);
-        const previous = state.definitions[target];
+            : cloneTTDefinitionSlot(definition as TTCoreSessionSnapshot["definitions"][number]);
+        const previous = state.snapshot.definitions[target];
         if (forceTruncate || stored !== null || previous !== null && previous !== undefined) {
-            state.definitions.length = target + 1;
-        } else if (state.definitions.length <= target) {
-            state.definitions.length = target + 1;
+            state.snapshot.definitions.length = target + 1;
+        } else if (state.snapshot.definitions.length <= target) {
+            state.snapshot.definitions.length = target + 1;
         }
-        state.definitions[target] = stored;
+        state.snapshot.definitions[target] = stored;
+        state.snapshot.loadedThrough = target + 1;
         state.revision++;
     }
 
@@ -178,6 +191,13 @@ export class TTProcessTransport {
                 this.rememberSuccessfulRequest(channel, request, result);
                 return result;
             } catch (error) {
+                // A request timeout deliberately resets the remote process so
+                // later queued work is cancelled. The request which caused
+                // that reset must still surface its timeout to the UI; calling
+                // assertCurrent first would replace it with queue-cancelled.
+                if (error instanceof TTProcessExecutionError && error.code === "TT_PROCESS_TIMEOUT") {
+                    throw error;
+                }
                 assertCurrent();
                 if (recovered || !this.shouldRecover(error)) throw error;
                 recovered = true;
@@ -356,10 +376,13 @@ export class TTProcessTransport {
             for (const [channel, state] of pending) {
                 assertCurrent();
                 const revision = state.revision;
-                const configuration = parseReplayRequest(state.request) as { definitions?: unknown[] };
-                configuration.definitions = state.definitions.map(definition =>
-                    definition === null ? null : JSON.parse(definition)
-                );
+                const snapshot = cloneTTCoreSessionSnapshot(state.snapshot);
+                const configuration = {
+                    kind: "configure",
+                    config: snapshot.config,
+                    definitions: snapshot.definitions,
+                    loadedThrough: snapshot.loadedThrough
+                };
                 await this.requestOnce(channel, configuration);
                 assertCurrent();
                 if (channel === "assist" && state.assistStart) {
@@ -385,17 +408,21 @@ export class TTProcessTransport {
     private rememberSuccessfulRequest(channel: TTProcessChannel, request: object, result: unknown) {
         const kind = requestKind(request);
         if (kind === "configure") {
-            const configuration = request as { definitions?: unknown[] };
+            const configuration = request as {
+                config: TTCoreSessionSnapshot["config"];
+                definitions?: TTCoreSessionSnapshot["definitions"];
+                loadedThrough?: unknown;
+            };
             const definitions = Array.isArray(configuration.definitions)
                 ? configuration.definitions
-                : [];
-            const replayRequest = { ...configuration, definitions: [] };
+                : undefined;
             this.configurations.set(channel, {
-                request: serializeReplayRequest(replayRequest),
-                generation: this.serverGeneration,
-                definitions: definitions.map(definition =>
-                    definition === null || definition === undefined ? null : JSON.stringify(definition)
+                snapshot: createTTCoreSessionSnapshot(
+                    configuration.config,
+                    definitions,
+                    configuration.loadedThrough as number | undefined
                 ),
+                generation: this.serverGeneration,
                 assistStart: null,
                 revision: 1
             });
@@ -407,7 +434,14 @@ export class TTProcessTransport {
         if (kind === "truncate") {
             const start = Number((request as { startIndex?: unknown }).startIndex);
             if (Number.isFinite(start)) {
-                state.definitions.length = Math.min(state.definitions.length, Math.max(0, Math.floor(start)));
+                state.snapshot.definitions.length = Math.min(
+                    state.snapshot.definitions.length,
+                    Math.max(0, Math.floor(start))
+                );
+                state.snapshot.loadedThrough = Math.min(
+                    state.snapshot.loadedThrough,
+                    state.snapshot.definitions.length
+                );
                 state.revision++;
             }
             return;

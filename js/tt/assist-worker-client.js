@@ -11,8 +11,8 @@ export class TTAssistWorkerClient {
             ? this.workerGeneration
             : this.processTransport.generation;
     }
-    configure(config, definitions = []) {
-        return this.request({ kind: "configure", config, definitions });
+    configure(config, definitions, loadedThrough) {
+        return this.request({ kind: "configure", config, definitions, loadedThrough });
     }
     truncate(startIndex) {
         return this.request({ kind: "truncate", startIndex });

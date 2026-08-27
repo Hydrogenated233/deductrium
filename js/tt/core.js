@@ -3,6 +3,8 @@ import { ASTParser } from "./astparser.js";
 import { SemanticNbeTypeChecker } from "./nbe-checker.js";
 import { SemanticNbeKernel } from "./nbe-kernel.js";
 import { compactImplicitAliasesForDisplay, hasExplicitAtOccurrence } from "./presentation.js";
+import { findContextEntriesBeforeByName, findContextIndexByBondVarId, hasContextName, isBinderNode, markScopedBondVars, prependContext, ScopeCursor, validBondVarId as isPositiveBondVarId } from "./scoped-syntax.js";
+export { findContextByName, findContextEntriesBeforeByName, findContextIndexByBondVarId, findContextIndexByName, hasContextName } from "./scoped-syntax.js";
 const parser = new ASTParser;
 const semanticResourceBaseLimits = Object.freeze({
     nbeMaxNodes: 512,
@@ -121,27 +123,25 @@ export function wrapApply(...terms) {
     }
     return ast;
 }
-function isPositiveBondVarId(id) {
-    return Number.isFinite(id) && id > 0;
-}
 /** Rebind a cloned type pattern without touching Core's mutable checker state. */
 function prepareSemanticTypePattern(ast, context, firstId, collectSourceMetas) {
     let nextId = firstId;
-    const contextScope = [];
-    for (const [name, , sourceId] of context) {
+    const scope = new ScopeCursor();
+    for (let index = context.length - 1; index >= 0; index--) {
+        const [name, , sourceId] = context[index];
         if (!isPositiveBondVarId(sourceId))
             continue;
-        contextScope.push({ name, sourceId, id: sourceId });
+        scope.push({ name, sourceId, id: sourceId });
         nextId = Math.max(nextId, sourceId + 1);
     }
     const metaScopes = new Map();
-    const visit = (node, scope) => {
+    const visit = (node) => {
         if (!node || typeof node !== "object")
             return;
         if (node.type === "var") {
             if (/^\?[^:]+$/.test(node.name)) {
                 if (collectSourceMetas) {
-                    const occurrenceScope = new Set(scope.map(binding => binding.id));
+                    const occurrenceScope = new Set(scope.activeBondVarIds());
                     const allowed = metaScopes.get(node.name);
                     if (!allowed)
                         metaScopes.set(node.name, occurrenceScope);
@@ -157,28 +157,28 @@ function prepareSemanticTypePattern(ast, context, firstId, collectSourceMetas) {
             }
             const sourceId = isPositiveBondVarId(node.bondVarId) ? node.bondVarId : undefined;
             const binding = sourceId !== undefined
-                ? scope.find(candidate => candidate.sourceId === sourceId || candidate.id === sourceId)
-                : scope.find(candidate => candidate.name === node.name);
+                ? scope.findBySourceOrId(sourceId)
+                : scope.findByName(node.name);
             if (binding)
                 node.bondVarId = binding.id;
             else
                 delete node.bondVarId;
             return;
         }
-        const binder = node.type === "L" || node.type === "P"
-            || node.type === "S" || node.type === "W";
-        if (!binder) {
+        if (!isBinderNode(node)) {
             for (const child of node.nodes ?? [])
-                visit(child, scope);
+                visit(child);
             return;
         }
-        visit(node.nodes?.[0], scope);
+        visit(node.nodes?.[0]);
         const sourceId = isPositiveBondVarId(node.bondVarId) ? node.bondVarId : undefined;
         const id = nextId++;
         node.bondVarId = id;
-        visit(node.nodes?.[1], [{ name: node.name, sourceId, id }, ...scope]);
+        scope.push({ name: node.name, sourceId, id });
+        visit(node.nodes?.[1]);
+        scope.pop();
     };
-    visit(ast, contextScope);
+    visit(ast);
     return {
         nextId,
         sourceMetas: Array.from(metaScopes, ([name, allowedBondVarIds]) => ({
@@ -188,73 +188,7 @@ function prepareSemanticTypePattern(ast, context, firstId, collectSourceMetas) {
         }))
     };
 }
-// Context remains a normal array for callers and serialized data. The index is
-// deliberately external so array operations such as slice/map keep working.
-// Contexts are structurally persistent in the checker; the entry snapshot also
-// invalidates the cache when callers mutate an array with unshift/push/replace.
-const contextIndexes = new WeakMap();
-function getContextIndex(context) {
-    const cached = contextIndexes.get(context);
-    // Length plus edge references catch normal push/unshift/slice mutations in
-    // O(1); binder tuple fields are immutable after a checker context is
-    // indexed (checkType clones contexts before assigning IDs/types).
-    if (cached && cached.entries.length === context.length &&
-        (!context.length || (cached.entries[0] === context[0] && cached.entries[context.length - 1] === context[context.length - 1]))) {
-        return cached;
-    }
-    const index = {
-        byName: new Map,
-        byBondVarId: new Map,
-        entries: Array.from(context)
-    };
-    for (let position = 0; position < context.length; position++) {
-        const [name, , bondVarId] = context[position];
-        const namePositions = index.byName.get(name) ?? [];
-        namePositions.push(position);
-        index.byName.set(name, namePositions);
-        const idPositions = index.byBondVarId.get(bondVarId) ?? [];
-        idPositions.push(position);
-        index.byBondVarId.set(bondVarId, idPositions);
-    }
-    contextIndexes.set(context, index);
-    return index;
-}
-/** Return the nearest context binding for a name. */
-export function findContextByName(context, name) {
-    const position = getContextIndex(context).byName.get(name)?.[0];
-    return position === undefined ? undefined : context[position];
-}
-/** Return the nearest context position for a name, or -1 when absent. */
-export function findContextIndexByName(context, name) {
-    return getContextIndex(context).byName.get(name)?.[0] ?? -1;
-}
-/** Check whether a name is bound in the context. */
-export function hasContextName(context, name) {
-    return getContextIndex(context).byName.has(name);
-}
-/**
- * Return the nearest binder equivalent to id. Exact IDs use the index fast
- * path; the fallback preserves alpha-union semantics supplied by the caller.
- */
-export function findContextIndexByBondVarId(context, id, equivalent) {
-    const index = getContextIndex(context);
-    const exact = index.byBondVarId.get(id)?.[0];
-    // An identical binder ID is an exact match even when the caller's
-    // equivalence predicate intentionally treats sentinel IDs (for example 0)
-    // as non-binders.
-    if (exact !== undefined)
-        return exact;
-    for (const [candidate, positions] of index.byBondVarId) {
-        if (candidate !== id && equivalent(candidate, id))
-            return positions[0];
-    }
-    return -1;
-}
-/** Return duplicate-name bindings before a given position, nearest first. */
-export function findContextEntriesBeforeByName(context, name, end) {
-    const positions = getContextIndex(context).byName.get(name) ?? [];
-    return positions.filter(position => position < end).map(position => context[position]);
-}
+/* Context indexing now lives in scoped-syntax.ts. */
 /** Clone AST metadata once while preserving sharing between contexts. */
 function cloneAstMemo(ast, cloneChecked, memo) {
     if (!ast || typeof ast !== "object")
@@ -392,9 +326,7 @@ function isNbeTypeFailure(value) {
 }
 /** return a cloned Context */
 export function assignContext(added, oldContext) {
-    const n = oldContext.slice(0);
-    n.unshift(added);
-    return n;
+    return prependContext(added, oldContext);
 }
 export class Core {
     static timeout = 10_000;
@@ -535,42 +467,7 @@ export class Core {
     }
     // mark bonvar ids for an ast
     markBondVars(ast, context) {
-        const scope = new Map;
-        // Context is stored from innermost to outermost. Populate in reverse so
-        // the nearest binding wins for duplicate names.
-        for (let i = context.length - 1; i >= 0; i--) {
-            scope.set(context[i][0], context[i]);
-        }
-        return this.markBondVarsInScope(ast, scope);
-    }
-    markBondVarsInScope(ast, scope) {
-        if (!ast)
-            return;
-        if (ast.type === "var") {
-            if (ast.bondVarId)
-                return ast;
-            ast.bondVarId = scope.get(ast.name)?.[2];
-        }
-        else if (ast.type === "L" || ast.type === "P" || ast.type === "W" || ast.type === "S") {
-            if (ast.bondVarId)
-                return ast;
-            this.getBondVarId(ast);
-            if (ast.name === "_")
-                ast.name = "*" + ast.bondVarId;
-            this.markBondVarsInScope(ast.nodes[0], scope);
-            const previous = scope.get(ast.name);
-            scope.set(ast.name, [ast.name, ast.nodes[0], ast.bondVarId]);
-            this.markBondVarsInScope(ast.nodes[1], scope);
-            if (previous)
-                scope.set(ast.name, previous);
-            else
-                scope.delete(ast.name);
-        }
-        else if (ast.nodes?.length) {
-            for (const node of ast.nodes)
-                this.markBondVarsInScope(node, scope);
-        }
-        return ast;
+        return markScopedBondVars(ast, context, () => this.state.bondVarId++);
     }
     // we didnt mark bondvar's with id, need do it
     getBondVarId(ast) {
@@ -1619,35 +1516,39 @@ export class Core {
      */
     prepareSemanticProofAssistantNormalizeAst(ast, context) {
         const prepared = Core.clone(ast);
-        const contextScope = context
-            .filter(([, , id]) => isPositiveBondVarId(id))
-            .map(([name, , id]) => ({ name, sourceId: id, id }));
-        const visit = (node, scope) => {
+        const scope = new ScopeCursor();
+        for (let index = context.length - 1; index >= 0; index--) {
+            const [name, , id] = context[index];
+            if (isPositiveBondVarId(id))
+                scope.push({ name, sourceId: id, id });
+        }
+        const visit = (node) => {
             if (!node || typeof node !== "object")
                 return;
             if (node.type === "var") {
                 if (!isPositiveBondVarId(node.bondVarId)
-                    || scope.some(binding => binding.id === node.bondVarId))
+                    || scope.findById(node.bondVarId))
                     return;
-                const replacement = scope.find(binding => binding.name === node.name);
+                const replacement = scope.findByName(node.name);
                 if (replacement)
                     node.bondVarId = replacement.id;
                 return;
             }
-            const binder = node.type === "L" || node.type === "P"
-                || node.type === "S" || node.type === "W";
-            if (!binder) {
+            if (!isBinderNode(node)) {
                 for (const child of node.nodes ?? [])
-                    visit(child, scope);
+                    visit(child);
                 return;
             }
-            visit(node.nodes?.[0], scope);
-            const bodyScope = isPositiveBondVarId(node.bondVarId)
-                ? [{ name: node.name, sourceId: node.bondVarId, id: node.bondVarId }, ...scope]
-                : scope;
-            visit(node.nodes?.[1], bodyScope);
+            visit(node.nodes?.[0]);
+            if (!isPositiveBondVarId(node.bondVarId)) {
+                visit(node.nodes?.[1]);
+                return;
+            }
+            scope.push({ name: node.name, sourceId: node.bondVarId, id: node.bondVarId });
+            visit(node.nodes?.[1]);
+            scope.pop();
         };
-        visit(prepared, contextScope);
+        visit(prepared);
         return prepared;
     }
     trySemanticProofAssistantNormalize(ast, context) {

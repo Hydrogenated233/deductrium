@@ -30,8 +30,8 @@ export class TTAssistWorkerClient {
             : this.processTransport.generation;
     }
 
-    configure(config: TTCoreConfig, definitions: TTDefinitionSlot[] = []) {
-        return this.request<void>({ kind: "configure", config, definitions });
+    configure(config: TTCoreConfig, definitions?: TTDefinitionSlot[], loadedThrough?: number) {
+        return this.request<void>({ kind: "configure", config, definitions, loadedThrough });
     }
 
     truncate(startIndex: number) {

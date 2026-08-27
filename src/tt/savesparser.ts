@@ -1,16 +1,25 @@
-import { TTGui, TTTheoremSaveItem } from "./gui.js";
+import type { TTGui, TTTheoremSaveItem } from "./gui.js";
 
 export class SavesParser {
 
     serialize(gui: TTGui) {
-        return JSON.stringify({ version: 2, items: gui.serializeTheoremItems() });
+        return JSON.stringify({
+            version: 3,
+            items: gui.serializeTheoremItems(),
+            proofSessions: gui.serializeProofSessions()
+        });
     }
     deserialize(gui: TTGui, s: string) {
         const saved = JSON.parse(s);
         const items: TTTheoremSaveItem[] = Array.isArray(saved)
             ? saved.map(value => ({ kind: "theorem", value }))
             : saved?.items;
+        const proofSessions = !Array.isArray(saved) && saved?.version === 3
+            ? saved.proofSessions
+            : undefined;
+        gui.resetProofAssistantForSaveLoad();
         gui.restoreTheoremItems(Array.isArray(items) ? items : []);
+        gui.queueProofSessionsRestore(proofSessions);
         // gui.updateAfterUnlock();
         // gui.getInhabitatArray()[0]?.onblur({} as any);
     }

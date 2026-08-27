@@ -275,12 +275,55 @@ async function pageHideCancelsSessionCreationInFlight() {
         "a session created after pagehide was not disposed");
 }
 
+async function timeoutPreservesTheInitiatingError() {
+    let resetStarted;
+    const resetSeen = new Promise(resolve => { resetStarted = resolve; });
+    globalThis.fetch = async (url, init = {}) => {
+        if (url === "/api/tt/session") {
+            return jsonResponse({
+                ok: true,
+                sessionId: "timeout-session",
+                generation: 1,
+                protocolVersion: 1
+            }, 201);
+        }
+        if (url === "/api/tt/reset") {
+            resetStarted();
+            return jsonResponse({ ok: true, generation: 2, restarted: true });
+        }
+
+        assert.equal(url, "/api/tt/rpc");
+        const body = JSON.parse(init.body);
+        if (body.request.kind === "configure") {
+            return jsonResponse({ ok: true, generation: 1 });
+        }
+        return new Promise((resolve, reject) => {
+            const signal = init.signal;
+            if (signal?.aborted) {
+                reject(signal.reason);
+                return;
+            }
+            signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+    };
+
+    const transport = new TTProcessTransport();
+    await transport.request("core", { kind: "configure", config: {}, definitions: [] });
+    const error = await transport.request("core", { kind: "check", input: "slow" }, 1)
+        .then(() => null, reason => reason);
+    assert.ok(error instanceof TTProcessExecutionError);
+    assert.equal(error.code, "TT_PROCESS_TIMEOUT",
+        "the request which timed out was overwritten by queue-cancelled");
+    await resetSeen;
+}
+
 try {
     await preservesPerChannelCallOrder();
     await resetCancelsQueuedMutations();
     await pageHideCancelsQueuedMutations();
     await resetCancelsMutationAlreadyWaitingForReset();
     await pageHideCancelsSessionCreationInFlight();
+    await timeoutPreservesTheInitiatingError();
 } finally {
     globalThis.fetch = originalFetch;
 }
