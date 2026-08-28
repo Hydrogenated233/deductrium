@@ -2508,6 +2508,39 @@ export class InferenceProofAssistant {
         let materializationSucceeded = false;
         try {
 
+        // A closed pure-propositional theorem is already within MCPT's exact
+        // domain. Keep it as one lazy node instead of rebuilding a Hilbert
+        // proof from a1/a2/a3/mp during assistant expansion.
+        if (this.isPurePropositionalSyntax(this.theorem)) {
+            const name = this.nextTautoName(this.theorem);
+            try {
+                if (!this.fs.deductions[name]) {
+                    this.fs.metaCompleteTheorem(astmgr.clone(this.theorem), name, "证明助手自动MCPT*");
+                }
+                const step: DeductionStep = {
+                    deductionIdx: name,
+                    conditionIdxs: [],
+                    replaceValues: []
+                };
+                propositions.push({
+                    value: astmgr.clone(this.theorem),
+                    from: step,
+                    deferredKind: "cpt"
+                });
+                steps.push(step);
+                materializationSucceeded = true;
+                return {
+                    propositions,
+                    steps,
+                    basePropositionCount,
+                    pageFingerprint: this.pageFingerprint(page ?? { propositions: [] })
+                };
+            } catch {
+                // Not every syntactically propositional target is a tautology.
+                // Fall back to the user's explicit proof tree in that case.
+            }
+        }
+
         const collectExternalPremises = (node: DraftNode, result = new Map<string, Proposition>()): Map<string, Proposition> => {
             const source = node.kind === "haveApply" ? node.haveSource : node.source;
             if ((node.kind === "exact" || node.kind === "apply" || node.kind === "haveApply")
@@ -2631,10 +2664,9 @@ export class InferenceProofAssistant {
 
                 const conditions = row.from.conditionIdxs.map(transform);
                 const desired = implication(hypothesis, row.value);
-                    const oldActivePage = this.fs.inferencePages.activeId;
-                    this.fs.inferencePages.activate(this.pageId);
-                    const oldPropositions = this.fs.propositions;
-                    const oldFastMetarules = this.fs.fastmetarules;
+                const oldActivePage = this.fs.inferencePages.activeId;
+                this.fs.inferencePages.activate(this.pageId);
+                const oldFastMetarules = this.fs.fastmetarules;
                 try {
                     this.fs.fastmetarules = "cvuqe><:#zZQR";
                     const conditionalRuleName = this.fs.metaConditionTheorem(
@@ -2652,47 +2684,15 @@ export class InferenceProofAssistant {
                         if (!value) throw new Error(TR("无法从intro目标推断条件演绎参数：") + name);
                         return astmgr.clone(value);
                     });
-                    this.fs.propositions = conditions.map(condition => ({
-                        value: astmgr.clone(condition.proposition),
-                        from: null
-                    }));
-                    const temporaryConditionCount = this.fs.propositions.length;
-                    const temporaryResult = this.fs.deduct({
+                    const transformedResult = appendDerived(desired, {
                         deductionIdx: conditionalRuleName,
-                        conditionIdxs: conditions.map((_, index) => index),
+                        conditionIdxs: conditions.map(condition => absolute(condition.index)),
                         replaceValues
-                    }, "deep");
-                    const temporaryRows = this.fs.propositions;
-                    const indexMap = new Map<number, number>();
-                    conditions.forEach((condition, index) => {
-                        indexMap.set(index, absolute(condition.index));
                     });
-                    for (let index = temporaryConditionCount; index < temporaryRows.length; index++) {
-                        const temporary = temporaryRows[index];
-                        if (!temporary.from) throw new Error(TR("条件演绎生成了无来源的中间定理"));
-                        const copiedStep: DeductionStep = {
-                            deductionIdx: temporary.from.deductionIdx,
-                            conditionIdxs: temporary.from.conditionIdxs.map(conditionIndex => {
-                                const mapped = indexMap.get(conditionIndex);
-                                if (mapped === undefined) throw new Error(TR("条件演绎步骤索引无效"));
-                                return mapped;
-                            }),
-                            replaceValues: temporary.from.replaceValues.map(value => astmgr.clone(value))
-                        };
-                        const copied = appendDerived(temporary.value, copiedStep);
-                        indexMap.set(index, absolute(copied.index));
-                    }
-                    const mappedResult = indexMap.get(temporaryResult);
-                    if (mappedResult === undefined) throw new Error(TR("条件演绎未生成结果"));
-                    const transformedResult: EmitResult = {
-                        index: mappedResult - basePropositionCount,
-                        proposition: astmgr.clone(propositionAt(mappedResult).value)
-                    };
                     this.assertSameProposition(transformedResult.proposition, desired);
                     transformed.set(absoluteIndex, transformedResult);
                     return transformedResult;
                 } finally {
-                    this.fs.propositions = oldPropositions;
                     this.fs.fastmetarules = oldFastMetarules;
                     if (oldActivePage !== this.pageId) this.fs.inferencePages.activate(oldActivePage);
                 }

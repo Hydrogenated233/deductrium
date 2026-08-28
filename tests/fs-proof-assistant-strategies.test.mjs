@@ -65,36 +65,27 @@ const lockedRules = ["mp", "a1", "a2"];
 // does not silently use a hidden bundled rule after loading the save.
 {
     const fs = initFormalSystem(false).fs;
-    fs.addDeduction("myAnd", parser.parse("$0,$1⊢$0&$1"), "test");
-    const assistant = new InferenceProofAssistant(fs, "A>(B>(A&B))", {
-        ruleNames: [...lockedRules, "myAnd"]
+    fs.addDeduction("mySymmScoped", parser.parse("$0=$1⊢$1=$0"), "test");
+    const assistant = new InferenceProofAssistant(fs, "(A=B)>(B=A)", {
+        ruleNames: [...lockedRules, "mySymmScoped"]
     });
-    assistant.apply("intro ha");
-    assistant.apply("intro hb");
-    assistant.apply("constructor");
-    assistant.apply("exact ha");
-    assistant.apply("exact hb");
+    assistant.apply("intro h");
+    assistant.apply("apply mySymmScoped");
+    assistant.apply("exact h");
     assistant.qed();
     const row = fs.propositions[0];
     const encoded = new SavesParser(true).serializeProposition(row);
-    assert.deepEqual(encoded[1][3].ruleNames, [...lockedRules, "myAnd"]);
+    assert.deepEqual(encoded[1][3].ruleNames, [...lockedRules, "mySymmScoped"]);
     fs.expandMacroWithProp(0);
-    // Discharging the two intro hypotheses legitimately wraps the atomic
-    // user rule in a generated conditional rule (usually `ccmyAnd`).  The
-    // expansion contract is that the deferred proof can be replayed and
-    // reaches the original theorem, not that a particular helper layer is
-    // preserved as the top-level step.
-    assert.ok(fs.deductions.__assistant.steps?.some(step => step.deductionIdx === "ccmyAnd"));
-    const conditionalRule = fs.deductions.ccmyAnd;
+    assert.ok(fs.deductions.__assistant.steps?.some(step => step.deductionIdx === "cmySymmScoped"));
+    const conditionalRule = fs.deductions.cmySymmScoped;
     assert.ok(conditionalRule, "the conditionalized user rule should be materialized");
-    assert.equal(conditionalRule.conditions.length, 2);
+    assert.equal(conditionalRule.conditions.length, 1);
     assert.equal(conditionalRule.conclusion.type, "sym");
     assert.equal(conditionalRule.conclusion.name, ">");
     assert.equal(conditionalRule.conclusion.nodes[1]?.type, "sym");
-    assert.equal(conditionalRule.conclusion.nodes[1]?.name, ">");
-    assert.equal(conditionalRule.conclusion.nodes[1]?.nodes[1]?.type, "sym");
-    assert.equal(conditionalRule.conclusion.nodes[1]?.nodes[1]?.name, "&");
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A>(B>(A&B))");
+    assert.equal(conditionalRule.conclusion.nodes[1]?.name, "=");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A=B)>(B=A)");
 }
 
 // Equality symmetry also accepts a structurally equivalent user rule when the

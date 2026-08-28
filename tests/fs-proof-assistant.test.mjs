@@ -201,7 +201,7 @@ function makeFs() {
 }
 
 // apply accepts a local implication and creates one goal per premise in
-// left-to-right order.  qed materializes the implication chain through mp.
+// left-to-right order. A closed pure theorem is compacted to MCPT at expansion.
 {
     const fs = makeFs();
     const assistant = new InferenceProofAssistant(fs, "A>(B>((A>(B>C))>C))");
@@ -216,7 +216,9 @@ function makeFs() {
     assert.equal(result.committed, true);
     assert.equal(result.steps.length, 1, "qed emits one atomic step");
     fs.expandMacroWithProp(0);
-    assert.equal(fs.deductions[result.deductionName].steps.filter(step => step.deductionIdx === "mp").length >= 2, true);
+    assert.equal(fs.propositions.length, 1);
+    assert.equal(fs.propositions[0].deferredKind, "cpt");
+    assert.match(fs.propositions[0].from?.deductionIdx ?? "", /^__tauto_/);
 }
 
 // Stop at the earliest implication suffix matching the target. A target which
