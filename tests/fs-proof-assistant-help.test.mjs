@@ -14,6 +14,17 @@ for (const tactic of ["intro", "exact", "apply", "assumption", "constructor", "l
         `inference help should describe ${tactic}`);
 }
 
+const inferenceAssistantStart = html.indexOf('<div id="fs-proof-assistant"');
+const inferenceTextModeStart = html.indexOf('<div id="fs-proof-text-mode"', inferenceAssistantStart);
+const inferenceHelpStart = html.indexOf('<details id="fs-proof-help"', inferenceAssistantStart);
+assert.ok(inferenceAssistantStart >= 0 && inferenceTextModeStart > inferenceAssistantStart && inferenceHelpStart > inferenceTextModeStart,
+    "inference assistant help and text mode must be present in the assistant container");
+const beforeInferenceHelp = html.slice(inferenceTextModeStart, inferenceHelpStart);
+const openedDivs = (beforeInferenceHelp.match(/<div\b/g) || []).length;
+const closedDivs = (beforeInferenceHelp.match(/<\/div>/g) || []).length;
+assert.equal(openedDivs, closedDivs,
+    "inference strategy help must be outside the hidden text-mode container");
+
 const typeHelp = html.match(/<details id="tactic-help"[\s\S]*?<\/details>/);
 assert.ok(typeHelp, "the type-theory proof assistant must expose collapsible help");
 assert.match(typeHelp[0], /<summary>策略介绍<\/summary>/);
