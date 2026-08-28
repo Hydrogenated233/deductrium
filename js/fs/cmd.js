@@ -7,6 +7,8 @@ export class FSCmd {
     escClear = true;
     pListMasked = false;
     autoCompleteIdx = -1;
+    expansionBusy = false;
+    expansionGeneration = 0;
     gui;
     lastDeduction = null;
     savesParser = new SavesParser;
@@ -74,6 +76,8 @@ export class FSCmd {
     }
     actionInputKeydown(e) {
         const actionInput = this.gui.actionInput;
+        if (this.expansionBusy)
+            return false;
         // autoComplete:
         let currentIndex = this.autoCompleteIdx;
         const list = document.getElementById("autocomplete-list");
@@ -231,6 +235,11 @@ export class FSCmd {
         this.showhints(list);
     }
     clearCmdBuffer() {
+        if (this.expansionBusy) {
+            this.expansionGeneration++;
+            this.expansionBusy = false;
+            this.gui.cancelInferenceExpansion();
+        }
         if (this.pListMasked) {
             this.gui.clearPListMasked();
             this.pListMasked = false;
@@ -358,6 +367,11 @@ export class FSCmd {
                     hintText.innerText += TR(`\n要展开推理规则，请先按Esc返回`);
                     return;
                 }
+                if (this.gui.canExpandInferenceOffThread()) {
+                    this.cmdBuffer.push(this.gui.formalSystem.propositions);
+                    this.runExpansionInWorker({ kind: "deduction", name: item });
+                    return;
+                }
                 this.cmdBuffer.push(this.gui.formalSystem.propositions);
                 const fs = this.gui.formalSystem;
                 const fmr = fs.fastmetarules;
@@ -382,6 +396,11 @@ export class FSCmd {
             }
             else if (item.startsWith("p")) {
                 const p = item.slice(1);
+                if (this.gui.canExpandInferenceOffThread()) {
+                    this.cmdBuffer.push(this.gui.formalSystem.propositions);
+                    this.runExpansionInWorker({ kind: "proposition", index: Number(p) });
+                    return;
+                }
                 this.cmdBuffer.push(this.gui.formalSystem.propositions);
                 const fs = this.gui.formalSystem;
                 const fmr = fs.fastmetarules;
@@ -452,6 +471,12 @@ export class FSCmd {
                     throw TR("要展开规则，请确保定理列表为空。");
                 }
                 inlineRule = true;
+            }
+            if (this.gui.canExpandInferenceOffThread()) {
+                this.runInlineExpansionInWorker(inlineRule
+                    ? { kind: "deduction", name: cmdBuffer[1] }
+                    : { kind: "inline-proposition", index: Number(cmdBuffer[1]) });
+                return;
             }
             formalSystem.fastmetarules = "cvuqe><:#zZQR";
             if (inlineRule) {
@@ -934,6 +959,42 @@ export class FSCmd {
         this.gui.formalSystem.removePropositions();
         this.gui.updatePropositionList(true);
         this.clearCmdBuffer();
+    }
+    runExpansionInWorker(target) {
+        const generation = ++this.expansionGeneration;
+        this.expansionBusy = true;
+        void this.gui.expandInferenceOffThread(target).then(() => {
+            if (generation !== this.expansionGeneration)
+                return;
+            this.expansionBusy = false;
+            this.cmdBuffer[this.cmdBuffer.length - 1] = this.gui.formalSystem.propositions;
+            this.execCmdBuffer();
+        }).catch(error => {
+            if (generation !== this.expansionGeneration)
+                return;
+            this.expansionBusy = false;
+            this.cmdBuffer.pop();
+            this.cmdBuffer.pop();
+            this.execCmdBuffer();
+            this.gui.hintText.innerText += "\n" + error;
+        });
+    }
+    runInlineExpansionInWorker(target) {
+        const generation = ++this.expansionGeneration;
+        this.expansionBusy = true;
+        void this.gui.expandInferenceOffThread(target).then(() => {
+            if (generation !== this.expansionGeneration)
+                return;
+            this.expansionBusy = false;
+            this.gui.updatePropositionList(true);
+            this.clearCmdBuffer();
+        }).catch(error => {
+            if (generation !== this.expansionGeneration)
+                return;
+            this.expansionBusy = false;
+            this.clearCmdBuffer();
+            this.gui.hintText.innerText = TR("展开定理出错：") + error;
+        });
     }
     execNewPage() {
         if (this.cmdBuffer.length < 2) {

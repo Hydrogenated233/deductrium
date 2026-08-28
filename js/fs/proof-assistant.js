@@ -1704,6 +1704,108 @@ export class InferenceProofAssistant {
             this.assertGeneratedDeductionMetaRules(step.deductionIdx, existingNames, visited);
         });
     }
+    /** Enumerate a bounded prefix search space without making unlock guesses. */
+    generatedRuleCandidates(baseName, prefixes, maxDepth = 2) {
+        const candidates = [baseName];
+        let frontier = [baseName];
+        const seen = new Set(candidates);
+        for (let depth = 0; depth < maxDepth; depth++) {
+            const next = [];
+            for (const current of frontier) {
+                for (const prefix of prefixes) {
+                    if (!this.canUseFastMetaRule(prefix))
+                        continue;
+                    const candidate = prefix + current;
+                    if (seen.has(candidate))
+                        continue;
+                    seen.add(candidate);
+                    next.push(candidate);
+                    candidates.push(candidate);
+                }
+            }
+            frontier = next;
+            if (!frontier.length)
+                break;
+        }
+        return candidates;
+    }
+    generatedDeductionCost(name, visiting = new Set()) {
+        const deduction = this.fs.deductions[name];
+        if (!deduction)
+            return Number.POSITIVE_INFINITY;
+        if (visiting.has(name))
+            return Number.POSITIVE_INFINITY;
+        if (!deduction.steps?.length)
+            return 1;
+        const next = new Set(visiting);
+        next.add(name);
+        let cost = 1;
+        for (const step of deduction.steps) {
+            const child = this.generatedDeductionCost(step.deductionIdx, next);
+            if (!Number.isFinite(child))
+                return Number.POSITIVE_INFINITY;
+            cost += child;
+        }
+        return cost;
+    }
+    selectGeneratedRule(baseName, target, expectedConditions, prefixes, explicitValues = []) {
+        const oldFastMetaRules = this.fs.fastmetarules;
+        const existingNames = new Set(Object.keys(this.fs.deductions));
+        const candidates = [];
+        try {
+            this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
+            for (const candidateName of this.generatedRuleCandidates(baseName, prefixes)) {
+                let deduction;
+                try {
+                    deduction = this.fs.deductions[candidateName] ?? this.fs.generateDeduction(candidateName);
+                    if (!deduction)
+                        continue;
+                    this.assertGeneratedDeductionMetaRules(candidateName, existingNames);
+                    const match = this.matchConclusion(deduction, target, { positional: explicitValues.map(value => astmgr.clone(value)), named: new Map() }, deduction.conclusion, undefined, undefined, undefined, expectedConditions);
+                    this.assertRuleMatchComplete(match, candidateName);
+                    const instantiate = (value) => {
+                        const result = this.instantiateRuleAst(value, match.context, match.matchTable);
+                        if (this.astContainsFunction(result, "#rp"))
+                            this.fs.assert.expand(result, false);
+                        this.fs.assert.checkGrammer(result, "p");
+                        return result;
+                    };
+                    const conditions = deduction.conditions.map(instantiate);
+                    if (conditions.length !== expectedConditions.length
+                        || conditions.some((condition, index) => {
+                            try {
+                                this.assertSameProposition(condition, expectedConditions[index]);
+                                return false;
+                            }
+                            catch {
+                                return true;
+                            }
+                        }))
+                        continue;
+                    const replaceValues = deduction.replaceNames.map(name => {
+                        const value = match.matchTable[match.context.internalByOriginal.get(name)];
+                        if (!value)
+                            throw new Error(TR("无法从自动生成规则推断参数：") + name);
+                        return astmgr.clone(value);
+                    });
+                    candidates.push({ name: candidateName, deduction, replaceValues });
+                }
+                catch {
+                    // Invalid candidates are expected during bounded search.
+                }
+            }
+        }
+        finally {
+            this.fs.fastmetarules = oldFastMetaRules;
+        }
+        candidates.sort((left, right) => {
+            const cost = this.generatedDeductionCost(left.name) - this.generatedDeductionCost(right.name);
+            if (cost !== 0)
+                return cost;
+            return left.name.length - right.name.length;
+        });
+        return candidates[0];
+    }
     resolveVisibleDeduction(name) {
         let tree;
         try {
@@ -2738,22 +2840,14 @@ export class InferenceProofAssistant {
                     const oldFastMetarules = this.fs.fastmetarules;
                     try {
                         this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
-                        const conditionalRuleName = this.fs.metaConditionTheorem(row.from.deductionIdx, "证明助手intro*");
-                        const conditionalRule = this.requireDeduction(conditionalRuleName);
-                        const match = this.matchConclusion(conditionalRule, desired, {
-                            positional: [], named: new Map()
-                        }, conditionalRule.conclusion, undefined, undefined, undefined, conditions.map(condition => condition.proposition));
-                        this.assertRuleMatchComplete(match, conditionalRuleName);
-                        const replaceValues = conditionalRule.replaceNames.map(name => {
-                            const value = match.matchTable[match.context.internalByOriginal.get(name)];
-                            if (!value)
-                                throw new Error(TR("无法从intro目标推断条件演绎参数：") + name);
-                            return astmgr.clone(value);
-                        });
+                        const expectedConditions = conditions.map(condition => condition.proposition);
+                        const selection = this.selectGeneratedRule(row.from.deductionIdx, desired, expectedConditions, ["c", "<", ">"]);
+                        if (!selection)
+                            throw new Error(TR("无法生成匹配intro目标的最短条件演绎规则"));
                         const transformedResult = appendDerived(desired, {
-                            deductionIdx: conditionalRuleName,
+                            deductionIdx: selection.name,
                             conditionIdxs: conditions.map(condition => absolute(condition.index)),
-                            replaceValues
+                            replaceValues: selection.replaceValues
                         });
                         this.assertSameProposition(transformedResult.proposition, desired);
                         transformed.set(absoluteIndex, transformedResult);
@@ -2823,28 +2917,18 @@ export class InferenceProofAssistant {
                     const oldFastMetarules = this.fs.fastmetarules;
                     try {
                         this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
-                        const quantifiedRuleName = this.fs.metaConditionUniversalTheorem(row.from.deductionIdx, "证明助手全称intro*");
-                        const quantifiedRule = this.requireDeduction(quantifiedRuleName);
                         const originalRule = this.requireDeduction(row.from.deductionIdx);
                         const explicitValues = originalRule.conditions.length ? [] : [
                             astmgr.clone(binder),
                             ...row.from.replaceValues.map(value => this.substituteBound(value, binding.name, binderName))
                         ];
-                        const match = this.matchConclusion(quantifiedRule, desired, {
-                            positional: explicitValues,
-                            named: new Map()
-                        }, quantifiedRule.conclusion, undefined, undefined, undefined, conditions.map(condition => condition.proposition));
-                        this.assertRuleMatchComplete(match, quantifiedRuleName);
-                        const replaceValues = quantifiedRule.replaceNames.map(name => {
-                            const value = match.matchTable[match.context.internalByOriginal.get(name)];
-                            if (!value)
-                                throw new Error(TR("无法从全称化目标推断规则参数：") + name);
-                            return astmgr.clone(value);
-                        });
+                        const selection = this.selectGeneratedRule(row.from.deductionIdx, desired, conditions.map(condition => condition.proposition), ["v", "u", "c", "<", ">"], explicitValues);
+                        if (!selection)
+                            throw new Error(TR("无法生成匹配全称intro目标的最短概括规则"));
                         const quantified = appendDerived(desired, {
-                            deductionIdx: quantifiedRuleName,
+                            deductionIdx: selection.name,
                             conditionIdxs: conditions.map(condition => absolute(condition.index)),
-                            replaceValues
+                            replaceValues: selection.replaceValues
                         });
                         transformed.set(absoluteIndex, quantified);
                         return quantified;

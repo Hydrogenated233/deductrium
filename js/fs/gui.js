@@ -6,10 +6,13 @@ import { TR } from "../lang.js";
 import { ProofScriptEditor, scriptThroughCaret } from "../proof-editor.js";
 import { ListDragger } from "./itemdragger.js";
 import { InferenceProofAssistant } from "./proof-assistant.js";
+import { SavesParser } from "./savesparser.js";
+import { InferenceWorkerClient } from "./inference-worker-client.js";
 const astmgr = new ASTMgr();
 const inferenceProofTextModeStorageKey = "deductrium-fs-proof-text-mode";
 export class FSGui {
     skipRendering = true;
+    creative;
     formalSystem = new FormalSystem();
     actionInput;
     hintText;
@@ -46,6 +49,7 @@ export class FSGui {
     inferenceProofScriptDirty = false;
     inferenceProofScriptEditor = null;
     inferenceProofTextReplayTimer = null;
+    inferenceWorkerClient = null;
     onStateChange = () => { };
     onchangeOmitNF = () => { };
     draggerD = new ListDragger(document.getElementById("deduct-list"));
@@ -54,6 +58,7 @@ export class FSGui {
     isMobile = /Mobi|Android|iPhone/i.test(navigator.userAgent);
     cmd;
     constructor(propositionList, deductionList, metaRuleList, sysFnList, actionInput, hintText, displayPLayerSelect, cmdBtns, creative, skipRendering) {
+        this.creative = creative;
         this.skipRendering = skipRendering;
         this.propositionList = propositionList;
         this.pageTabs = document.getElementById("inference-page-tabs");
@@ -1473,6 +1478,64 @@ export class FSGui {
     }
     clearPListMasked() {
         this.propositionList.querySelectorAll("div.p-match-failed").forEach(e => e.classList.remove("p-match-failed"));
+    }
+    canExpandInferenceOffThread() {
+        return typeof Worker !== "undefined"
+            && this.inferenceProofAssistant === null
+            && this.cmd.cmdBuffer[0] !== "entr";
+    }
+    async expandInferenceOffThread(target) {
+        if (!this.canExpandInferenceOffThread())
+            throw new Error(TR("当前推理状态不能后台展开"));
+        const saves = new SavesParser(this.creative);
+        const before = this.inferenceWorkerFingerprint(saves);
+        const save = this.inferenceWorkerSave(saves);
+        const client = this.inferenceWorkerClient ??= new InferenceWorkerClient();
+        const result = await client.expand({
+            save,
+            creative: this.creative,
+            fastMetaRules: this.formalSystem.fastmetarules,
+            metarules: [...this.metarules],
+            target
+        });
+        if (before !== this.inferenceWorkerFingerprint(saves)) {
+            throw new Error(TR("推理表在后台展开期间发生变化，请重新展开"));
+        }
+        this.applyInferenceWorkerResult(result, saves);
+    }
+    cancelInferenceExpansion() {
+        this.inferenceWorkerClient?.terminate();
+    }
+    inferenceWorkerFingerprint(saves) {
+        const pages = this.pageStore.pages.map(page => ({
+            id: page.id,
+            name: page.name,
+            propositions: page.propositions.map(proposition => saves.serializeProposition(proposition))
+        }));
+        return JSON.stringify({ activeId: this.pageStore.activeId, pages });
+    }
+    inferenceWorkerSave(saves) {
+        const parsed = JSON.parse(saves.serialize(this));
+        const pagePayload = parsed.data?.[7];
+        if (pagePayload?.pages) {
+            for (const page of pagePayload.pages)
+                page.command = { input: "", buffer: [] };
+        }
+        return JSON.stringify(parsed);
+    }
+    applyInferenceWorkerResult(result, saves) {
+        const parsed = JSON.parse(result.save);
+        if (!Array.isArray(parsed.data))
+            throw new Error(TR("推理层 Worker 返回的存档无效"));
+        const restored = saves.deserializeArr(initFormalSystem(this.creative).fs, parsed.data).fs;
+        for (const [name, encoded] of Object.entries(result.deductions)) {
+            delete restored.deductions[name];
+            saves.deserializeDeduction(name, restored, encoded);
+        }
+        const fastMetaRules = this.formalSystem.fastmetarules;
+        this.formalSystem = restored;
+        this.formalSystem.fastmetarules = fastMetaRules;
+        this.pageStore = restored.inferencePages;
     }
     getProps() {
         return this.cmd.cmdBuffer[0] === "entr" ? this.cmd.cmdBuffer[2] ?? this.formalSystem.propositions : this.formalSystem.propositions;

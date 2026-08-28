@@ -33,7 +33,7 @@ for (const path of ["../src/fs/gui.ts", "../js/fs/gui.js"]) {
         `${path}: every inference proof-assistant entry must use the unlocked CPT state`
     );
     const fastMetaCapabilities = gui.match(
-        /fastMetaRules:\s*this\.formalSystem\.fastmetarules/g
+        /fastMetaRules:\s*this\.formalSystem\.fastmetarules,\s*\n\s*allowMcpt:/g
     ) ?? [];
     assert.equal(
         fastMetaCapabilities.length,

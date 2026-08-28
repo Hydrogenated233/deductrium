@@ -159,6 +159,26 @@ const baseRules = ["mp", "a1", "a2"];
     assert.doesNotThrow(() => fs.expandMacroWithProp(1));
 }
 
+// Mixed prefixes are considered when they produce the same semantic rule;
+// the shortest recursive expansion wins over the canonical c-only form.
+{
+    const fs = initFormalSystem(false).fs;
+    const fastMetaRules = "cvuqe><:#zZQR";
+    const assistant = new InferenceProofAssistant(fs, "A>(~A>C)", {
+        ruleNames: [".m", "a1", "a2", "mp"],
+        fastMetaRules,
+        allowMcpt: false
+    });
+    assistant.apply("intro h");
+    assistant.apply("intro nh");
+    assistant.apply("apply .m $0=A $1=C");
+    assistant.apply("exact h");
+    assistant.apply("exact nh");
+    assistant.qed();
+    fs.expandMacroWithProp(0);
+    assert.ok(fs.propositions.some(proposition => proposition.from?.deductionIdx === "cc.m"));
+}
+
 // Strict c/< snapshots still support the automatic implication-intro path;
 // the generated helper is expanded only after the deferred proof is opened.
 {
