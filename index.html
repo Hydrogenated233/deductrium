@@ -254,13 +254,13 @@
                     <label for="fs-proof-target">推理层证明助手：</label>
                     <input id="fs-proof-target" type="text" autocomplete="off" placeholder="输入待证命题" />
                     <button id="fs-proof-begin" type="button" class="inhabitat-modify" title="启动推理层证明助手">+</button>
+                    <button id="fs-proof-close" type="button" class="inhabitat-modify hide" title="退出证明助手">×</button>
                     <button id="fs-proof-text-toggle" type="button" class="inhabitat-modify" title="切换文本策略编辑器">文本</button>
                     <span id="fs-proof-target-label"></span>
                 </div>
                 <div id="fs-proof-session" class="proof-assistant-session hide">
                     <div class="proof-assistant-toolbar fs-proof-toolbar">
                         <button id="fs-proof-undo" type="button" class="inhabitat-modify" title="撤回上一条证明策略">↶</button>
-                        <button id="fs-proof-close" type="button" class="inhabitat-modify" title="关闭证明助手">×</button>
                     </div>
                     <div id="fs-proof-history" class="fs-proof-history"></div>
                     <div id="fs-proof-state" class="proof-assistant-state fs-proof-state"></div>
@@ -274,12 +274,16 @@
                     <div id="fs-proof-commands" class="proof-assistant-recommendations fs-proof-recommendations"
                         aria-label="推荐证明策略"></div>
                 </div>
-                <div id="fs-proof-text-mode" class="proof-assistant-text-mode proof-text-mode hide">
-                    <div class="proof-text-editor">
-                        <textarea id="fs-proof-script" rows="12" spellcheck="false"
-                            placeholder="每行输入一条证明策略"></textarea>
-                        <div class="proof-text-actions">
-                            <button id="fs-proof-script-run" type="button" title="重新执行策略序列">执行</button>
+                    <div id="fs-proof-text-mode" class="proof-assistant-text-mode proof-text-mode hide">
+                        <div class="proof-text-editor">
+                            <div class="proof-code-editor">
+                                <pre id="fs-proof-script-highlight" class="proof-code-highlight" aria-hidden="true"></pre>
+                                <textarea id="fs-proof-script" rows="12" spellcheck="false"
+                                    placeholder="每行输入一条证明策略"></textarea>
+                            </div>
+                            <div class="proof-text-actions">
+                            <button id="fs-proof-script-run-cursor" type="button" title="执行到光标所在行">执行到光标</button>
+                            <button id="fs-proof-script-run" type="button" title="执行全部策略序列">执行全部</button>
                             <div id="fs-proof-script-recommendations" class="proof-text-recommendations"
                                 aria-label="推荐证明策略"></div>
                         </div>
@@ -292,7 +296,7 @@
                 <details id="fs-proof-help" class="fs-proof-help">
                     <summary>策略介绍</summary>
                     <div class="fs-proof-help-content">
-                        <p><code>intro</code> 展开蕴含或全称前提；<code>exact h</code> 用假设、定理或无前件规则完成目标；<code>apply h</code> 应用来源并生成前件目标。</p>
+                        <p><code>intro</code> 展开一个蕴含或全称前提；<code>intros h1 h2</code> 连续展开多个前提，省略名称时自动展开全部前导前提；<code>exact h</code> 用假设、定理或无前件规则完成目标；<code>apply h</code> 应用来源并生成前件目标。</p>
                         <p><code>assumption</code> 自动使用与当前目标相同的局部假设；<code>constructor</code> 构造合取 <code>A&amp;B</code> 或等价 <code>A&lt;&gt;B</code>；<code>left</code>/<code>right</code> 选择析取目标的一侧；<code>symm</code> 交换等式/等价两端；<code>rfl</code> 证明两端定义相同的等式。</p>
                         <p><code>contradiction</code> 使用同时存在的 <code>P</code> 与 <code>~P</code>；<code>by_contra h</code> 加入反设 <code>h:~P</code>；<code>by_cases h : P</code> 建立 <code>h:P</code> 与 <code>h:~P</code> 两个分支；<code>contrapose</code> 把 <code>A&gt;B</code> 改为 <code>~B&gt;~A</code>。</p>
                         <p><code>have h : P</code> 声明待证明事实，<code>have h := f a b</code> 实例化全称命题。依赖的内置规则未解锁时，系统只会使用当前作用域中结构等价的用户规则。</p>
@@ -388,10 +392,14 @@
                     </div>
                     <div id="tactic-text-mode" class="proof-text-mode hide">
                         <div class="proof-text-editor">
-                            <textarea id="tactic-script" rows="12" spellcheck="false"
-                                placeholder="每行输入一条证明策略"></textarea>
+                            <div class="proof-code-editor">
+                                <pre id="tactic-script-highlight" class="proof-code-highlight" aria-hidden="true"></pre>
+                                <textarea id="tactic-script" rows="12" spellcheck="false"
+                                    placeholder="每行输入一条证明策略"></textarea>
+                            </div>
                             <div class="proof-text-actions">
-                                <button id="tactic-script-run" type="button" title="重新执行策略序列">执行</button>
+                                <button id="tactic-script-run-cursor" type="button" title="执行到光标所在行">执行到光标</button>
+                                <button id="tactic-script-run" type="button" title="执行全部策略序列">执行全部</button>
                                 <div id="tactic-script-recommendations" class="proof-text-recommendations"
                                     aria-label="推荐证明策略"></div>
                             </div>

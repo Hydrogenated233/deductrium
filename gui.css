@@ -949,6 +949,82 @@ div.hintbar {
     overflow: auto;
 }
 
+/* Shared syntax-highlighted proof script editor.  The textarea remains the
+   editable/accessibility surface while the pre element mirrors its content. */
+.proof-code-editor {
+    position: relative;
+    min-height: 14em;
+    min-width: 0;
+}
+
+.proof-code-highlight,
+.proof-code-editor textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 14em;
+    margin: 0;
+    padding: 0.45em;
+    border: 1px solid #aaa;
+    font: inherit;
+    line-height: 1.4;
+    tab-size: 2;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.proof-code-highlight {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    color: #333;
+    background: #fff;
+}
+
+.proof-code-editor textarea {
+    position: relative;
+    z-index: 1;
+    display: block;
+    resize: vertical;
+    overflow: auto;
+    color: transparent;
+    caret-color: #222;
+    background: transparent;
+}
+
+.proof-code-editor textarea::selection {
+    background: rgba(120, 160, 220, 0.35);
+}
+
+.proof-code-editor textarea::placeholder {
+    color: #777;
+    opacity: 1;
+}
+
+.proof-token-command {
+    color: #7a3e00;
+    font-weight: 600;
+}
+
+.proof-token-identifier {
+    color: #075985;
+}
+
+.proof-token-hole {
+    color: #8a2c2c;
+    font-weight: 600;
+}
+
+.proof-token-punctuation {
+    color: #555;
+}
+
+.proof-token-comment {
+    color: #777;
+    font-style: italic;
+}
+
 .proof-text-actions {
     display: flex;
     align-items: flex-start;
@@ -1138,6 +1214,17 @@ div.hintbar {
     .proof-text-editor textarea {
         min-height: 11em;
         font-size: 16px;
+        line-height: 1.45;
+    }
+
+    .proof-code-editor,
+    .proof-code-highlight,
+    .proof-code-editor textarea {
+        min-height: 11em;
+    }
+
+    .proof-code-highlight,
+    .proof-code-editor textarea {
         line-height: 1.45;
     }
 

@@ -44,11 +44,11 @@ assert.match(css, /@media\s*\(max-width:\s*700px\)[\s\S]*#fs-proof-target/);
 assert.match(css, /@media\s*\(max-width:\s*700px\)[\s\S]*#tactic-input/);
 assert.doesNotMatch(css, /#9b7bb5|border-left:\s*2px\s+solid/,
     "proof goals must not restore the removed purple guide line");
-assert.match(ttGui, /replayTacticText\(explicitRun: boolean\)/);
+assert.match(ttGui, /replayTacticText\(explicitRun: boolean(?:, toCursor = false)?\)/);
 assert.match(ttGui, /第 \$\{errorLine\} 行/);
 assert.match(ttGui, /event\.key === "Enter" && event\.ctrlKey/);
 assert.match(ttGui, /deductrium-tt-proof-text-mode/);
-assert.match(fsGui, /replayInferenceProofText\(explicitRun: boolean\)/);
+assert.match(fsGui, /replayInferenceProofText\(explicitRun: boolean(?:, toCursor = false)?\)/);
 assert.match(fsGui, /第 \$\{errorLine\} 行/);
 assert.match(fsGui, /event\.key === "Enter" && event\.ctrlKey/);
 assert.match(fsGui, /deductrium-fs-proof-text-mode/);

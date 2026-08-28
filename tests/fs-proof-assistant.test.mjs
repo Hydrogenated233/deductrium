@@ -141,10 +141,41 @@ function makeFs() {
 // universal binders.
 {
     const fs = makeFs();
-    const assistant = new InferenceProofAssistant(fs, "Vx:$0>$0");
+    const assistant = new InferenceProofAssistant(fs, "Vx:($0>$0)");
     assistant.apply("intro");
     assert.equal(assistant.currentGoal.hypotheses[0].name, "h1");
-    assert.equal(assistant.currentGoal.target.name, ">" === assistant.currentGoal.target.name ? ">" : "$0");
+    assert.equal(assistant.currentGoal.hypotheses[0].kind, "variable");
+    assert.equal(assistant.currentGoal.hypotheses[0].proposition, undefined,
+        "a universal binder must not be presented as a proposition hypothesis");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "$0>$0");
+}
+
+// `intros` introduces a named prefix atomically and can also consume every
+// leading implication/universal binder when no names are supplied.
+{
+    const fs = makeFs();
+    const named = new InferenceProofAssistant(fs, "A>(Vx:($0>$0))");
+    named.apply("intros ha x");
+    assert.deepEqual(named.currentGoal.hypotheses.map(h => h.name), ["ha", "x"]);
+    assert.equal(named.currentGoal.hypotheses[1].kind, "variable");
+
+    const automatic = new InferenceProofAssistant(fs, "A>(Vx:($0>$0))");
+    automatic.apply("intros");
+    assert.deepEqual(automatic.currentGoal.hypotheses.map(h => h.name), ["h1", "h2", "h3"]);
+    assert.equal(parser.stringifyTight(automatic.currentGoal.target), "$0");
+}
+
+// Nested universal binders remain variables; only the implication premise is
+// shown as a proposition hypothesis after `intros`.
+{
+    const fs = makeFs();
+    const assistant = new InferenceProofAssistant(fs, "Vx:(Va:(((x=1)&(a=1))>(x=a)))");
+    assistant.apply("intros ha hb hand");
+    assert.deepEqual(assistant.currentGoal.hypotheses.map(h => h.kind), ["variable", "variable", "intro"]);
+    assert.equal(assistant.currentGoal.hypotheses[0].proposition, undefined);
+    assert.equal(assistant.currentGoal.hypotheses[1].proposition, undefined);
+    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses[2].proposition), "(ha=1)&(hb=1)");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "ha=hb");
 }
 
 // exact accepts a proposition's surface expression and resolves it within the

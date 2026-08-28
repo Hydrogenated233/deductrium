@@ -1,0 +1,103 @@
+const PROOF_COMMANDS = new Set([
+    "intro", "intros", "destruct", "ex", "case", "exact", "apply", "rw", "rwb", "nth_rw",
+    "simpl", "simp", "rfl", "expand", "fnext", "eq", "sup", "qed", "have", "obtain",
+    "revert", "assumption", "constructor", "left", "right", "symm", "contradiction", "by_contra",
+    "by_cases", "contrapose", "tauto"
+]);
+function escapeHtml(value) {
+    return value.replace(/[&<>"']/g, character => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+    }[character] ?? character));
+}
+function tokenSpan(className, value) {
+    return `<span class="proof-token-${className}">${escapeHtml(value)}</span>`;
+}
+/** Lightweight highlighting for the shared proof-command surface syntax. */
+export function highlightProofScript(source) {
+    const lines = source.split("\n");
+    return lines.map(line => {
+        let output = "";
+        let offset = 0;
+        let firstToken = true;
+        const tokenPattern = /--.*$|\?\?|[_]|@[A-Za-z_$][\w$]*|\$[A-Za-z0-9_$?]*|[A-Za-z_][\w!?-]*|[()[\]{},.:=|<>~*&+\-/\\▪→≃≡]/gu;
+        for (const match of line.matchAll(tokenPattern)) {
+            const index = match.index ?? 0;
+            output += escapeHtml(line.slice(offset, index));
+            const token = match[0];
+            if (token.startsWith("--")) {
+                output += tokenSpan("comment", line.slice(index));
+                offset = line.length;
+                break;
+            }
+            if (firstToken && PROOF_COMMANDS.has(token)) {
+                output += tokenSpan("command", token);
+            }
+            else if (token === "_" || token === "??" || token.startsWith("$")) {
+                output += tokenSpan("hole", token);
+            }
+            else if (/^[A-Za-z_@]/u.test(token)) {
+                output += tokenSpan("identifier", token);
+            }
+            else if (/^[()[\]{},.:=|<>~*&+\-/\\▪→≃≡]$/u.test(token)) {
+                output += tokenSpan("punctuation", token);
+            }
+            else {
+                output += escapeHtml(token);
+            }
+            if (/\S/u.test(token))
+                firstToken = false;
+            offset = index + token.length;
+        }
+        output += escapeHtml(line.slice(offset));
+        return output;
+    }).join("\n");
+}
+/** Overlay a syntax-highlighted pre over a transparent textarea. */
+export class ProofScriptEditor {
+    textarea;
+    highlight;
+    constructor(textarea) {
+        this.textarea = textarea;
+        const parent = textarea.parentElement;
+        if (!parent) {
+            this.highlight = null;
+            return;
+        }
+        parent.classList.add("proof-code-editor");
+        const existing = parent.querySelector(".proof-code-highlight");
+        this.highlight = existing ?? document.createElement("pre");
+        if (!existing) {
+            this.highlight.className = "proof-code-highlight";
+            this.highlight.setAttribute("aria-hidden", "true");
+            parent.insertBefore(this.highlight, textarea);
+        }
+        textarea.classList.add("proof-code-input");
+        textarea.addEventListener("input", () => this.refresh());
+        textarea.addEventListener("scroll", () => this.syncScroll());
+        this.refresh();
+    }
+    refresh() {
+        if (!this.highlight)
+            return;
+        this.highlight.innerHTML = highlightProofScript(this.textarea.value) || "\u00a0";
+        this.syncScroll();
+    }
+    syncScroll() {
+        if (!this.highlight)
+            return;
+        this.highlight.scrollTop = this.textarea.scrollTop;
+        this.highlight.scrollLeft = this.textarea.scrollLeft;
+    }
+}
+/** Return script text through the complete line containing the caret. */
+export function scriptThroughCaret(textarea) {
+    const source = textarea.value;
+    const caret = Math.max(0, Math.min(source.length, textarea.selectionStart ?? source.length));
+    const lineEnd = source.indexOf("\n", caret);
+    return source.slice(0, lineEnd < 0 ? source.length : lineEnd);
+}
+//# sourceMappingURL=proof-editor.js.map

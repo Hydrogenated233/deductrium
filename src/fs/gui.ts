@@ -3,6 +3,7 @@ import { FSCmd } from "./cmd.js";
 import { iniSysFnList, initFormalSystem } from "./initial.js";
 import { DEFERRED_ASSISTANT_STEP, Deduction, DeductionStep, FormalSystem } from "./formalsystem.js";
 import { TR } from "../lang.js";
+import { ProofScriptEditor, scriptThroughCaret } from "../proof-editor.js";
 import { ListDragger } from "./itemdragger.js";
 import { RuleTree } from "./metarule.js";
 import { InferencePage, SerializedInferencePages } from "./inference-pages.js";
@@ -57,6 +58,7 @@ export class FSGui {
     private inferenceProofTextModePreference = false;
     private inferenceProofScript = "";
     private inferenceProofScriptDirty = false;
+    private inferenceProofScriptEditor: ProofScriptEditor | null = null;
     private inferenceProofTextReplayTimer: number | null = null;
     onStateChange = () => { };
     onchangeOmitNF = () => { };
@@ -891,20 +893,28 @@ export class FSGui {
             this.toggleInferenceProofTextMode();
         });
         const script = document.getElementById("fs-proof-script") as HTMLTextAreaElement | null;
+        if (script) this.inferenceProofScriptEditor = new ProofScriptEditor(script);
         script?.addEventListener("input", () => {
             this.inferenceProofScript = script.value;
             this.inferenceProofScriptDirty = true;
             this.persistInferenceProofDraft();
             this.scheduleInferenceProofTextReplay();
         });
+        const scheduleInferenceCaretReplay = () => this.scheduleInferenceProofTextReplay();
+        script?.addEventListener("selectionchange", scheduleInferenceCaretReplay);
+        script?.addEventListener("click", scheduleInferenceCaretReplay);
+        script?.addEventListener("keyup", scheduleInferenceCaretReplay);
         script?.addEventListener("keydown", event => {
             if (event.key === "Enter" && event.ctrlKey) {
                 event.preventDefault();
-                this.replayInferenceProofText(true);
+                this.replayInferenceProofText(true, true);
             }
         });
+        document.getElementById("fs-proof-script-run-cursor")?.addEventListener("click", () => {
+            this.replayInferenceProofText(true, true);
+        });
         document.getElementById("fs-proof-script-run")?.addEventListener("click", () => {
-            this.replayInferenceProofText(true);
+            this.replayInferenceProofText(true, false);
         });
     }
     private renderInferenceProofRecommendations() {
@@ -1016,6 +1026,7 @@ export class FSGui {
         const error = document.getElementById("fs-proof-errmsg");
         if (!session || !state || !history || !error) return;
         session.classList.remove("hide");
+        document.getElementById("fs-proof-close")?.classList.remove("hide");
         error.innerText = "";
         history.replaceChildren();
         for (const command of snapshot.history) {
@@ -1042,7 +1053,9 @@ export class FSGui {
             for (const hypothesis of goal.hypotheses) {
                 const row = document.createElement("div");
                 row.className = "fs-proof-hypothesis";
-                row.appendChild(document.createTextNode(`${hypothesis.name}${hypothesis.proposition ? " : " : ""}`));
+                row.appendChild(document.createTextNode(hypothesis.proposition
+                    ? `${hypothesis.name} : `
+                    : hypothesis.kind === "variable" ? `${hypothesis.name} : ${TR("量词变量")}` : hypothesis.name));
                 if (hypothesis.proposition) row.appendChild(this.ast2HTML("-", hypothesis.proposition, false));
                 block.appendChild(row);
             }
@@ -1086,7 +1099,11 @@ export class FSGui {
         mode.classList?.remove?.("hide");
         document.getElementById("fs-proof-session")?.classList.add("hide");
         document.getElementById("fs-proof-begin")?.classList.add("hide");
-        if (script.value !== this.inferenceProofScript) script.value = this.inferenceProofScript;
+        document.getElementById("fs-proof-close")?.classList.remove("hide");
+        if (script.value !== this.inferenceProofScript) {
+            script.value = this.inferenceProofScript;
+            this.inferenceProofScriptEditor?.refresh();
+        }
         errorDiv.replaceChildren();
         if (error) {
             const line = document.createElement("div");
@@ -1098,7 +1115,7 @@ export class FSGui {
         } else if (terminal) {
             const status = document.createElement("div");
             status.className = "proof-text-status";
-            status.textContent = "qed 已就绪，按 Ctrl+Enter 或执行按钮提交";
+            status.textContent = "qed 已就绪，Ctrl+Enter/执行到光标提交；执行全部运行整页";
             errorDiv.appendChild(status);
         }
         state.replaceChildren();
@@ -1119,7 +1136,9 @@ export class FSGui {
             for (const hypothesis of goal.hypotheses) {
                 const row = document.createElement("div");
                 row.className = "fs-proof-hypothesis";
-                row.appendChild(document.createTextNode(`${hypothesis.name}${hypothesis.proposition ? " : " : ""}`));
+                row.appendChild(document.createTextNode(hypothesis.proposition
+                    ? `${hypothesis.name} : `
+                    : hypothesis.kind === "variable" ? `${hypothesis.name} : ${TR("量词变量")}` : hypothesis.name));
                 if (hypothesis.proposition) row.appendChild(this.ast2HTML("-", hypothesis.proposition, false));
                 block.appendChild(row);
             }
@@ -1153,7 +1172,10 @@ export class FSGui {
             if (!this.inferenceProofScriptDirty) {
                 this.inferenceProofScript = this.inferenceProofSnapshot.history.join("\n");
             }
-            if (script) script.value = this.inferenceProofScript;
+            if (script) {
+                script.value = this.inferenceProofScript;
+                this.inferenceProofScriptEditor?.refresh();
+            }
             textMode?.classList?.remove?.("hide");
             buttonMode?.classList?.add?.("hide");
             this.renderInferenceProofTextSnapshot(this.inferenceProofSnapshot);
@@ -1169,14 +1191,15 @@ export class FSGui {
         if (this.inferenceProofTextReplayTimer !== null) window.clearTimeout(this.inferenceProofTextReplayTimer);
         this.inferenceProofTextReplayTimer = window.setTimeout(() => {
             this.inferenceProofTextReplayTimer = null;
-            this.replayInferenceProofText(false);
+            this.replayInferenceProofText(false, true);
         }, 300);
     }
-    private replayInferenceProofText(explicitRun: boolean) {
+    private replayInferenceProofText(explicitRun: boolean, toCursor = false) {
         if (!this.inferenceProofTextMode || !this.inferenceProofAssistant) return;
         const script = document.getElementById("fs-proof-script") as HTMLTextAreaElement | null;
         if (script) this.inferenceProofScript = script.value;
-        const entries = this.parseInferenceProofScript(this.inferenceProofScript);
+        const source = toCursor && script ? scriptThroughCaret(script) : this.inferenceProofScript;
+        const entries = this.parseInferenceProofScript(source);
         const theorem = this.inferenceProofSnapshot?.theorem ?? this.inferenceProofAssistant.theorem;
         const pageId = this.inferenceProofPageId ?? this.pageStore.activeId;
         let assistant: InferenceProofAssistant;
@@ -1326,10 +1349,14 @@ export class FSGui {
         document.getElementById("fs-proof-session")?.classList.add("hide");
         document.getElementById("fs-proof-text-mode")?.classList.add("hide");
         document.getElementById("fs-proof-begin")?.classList.remove("hide");
+        document.getElementById("fs-proof-close")?.classList.add("hide");
         const input = document.getElementById("fs-proof-input") as HTMLTextAreaElement | null;
         if (input) input.value = "";
         const script = document.getElementById("fs-proof-script") as HTMLTextAreaElement | null;
-        if (script) script.value = "";
+        if (script) {
+            script.value = "";
+            this.inferenceProofScriptEditor?.refresh();
+        }
         const name = document.getElementById("fs-proof-name") as HTMLInputElement | null;
         if (name) name.value = "";
         const state = document.getElementById("fs-proof-state");

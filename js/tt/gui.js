@@ -8,6 +8,7 @@ import { Assist } from "./assist.js";
 import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { initTypeSystem } from "./initial.js";
+import { ProofScriptEditor, scriptThroughCaret } from "../proof-editor.js";
 import { restoreSemanticMetaNamesForDisplay } from "./presentation.js";
 import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator, typeTheoryValidationTimedOut } from "./theorem-validation.js";
 import { TheoremWorkspace } from "./theorem-workspace.js";
@@ -76,6 +77,7 @@ export class TTGui {
     tacticTextModePreference = false;
     tacticScript = "";
     tacticScriptDirty = false;
+    tacticScriptEditor = null;
     tacticTextReplayTimer = null;
     tacticTextReplayRevision = 0;
     proofSessions = new TTProofSessionStore();
@@ -271,6 +273,8 @@ export class TTGui {
             this.toggleTacticTextMode();
         });
         const scriptInput = document.getElementById("tactic-script");
+        if (scriptInput)
+            this.tacticScriptEditor = new ProofScriptEditor(scriptInput);
         scriptInput?.addEventListener("input", () => {
             this.tacticScript = scriptInput.value;
             this.tacticScriptDirty = true;
@@ -283,14 +287,21 @@ export class TTGui {
             this.onStateChange();
             this.scheduleTacticTextReplay();
         });
+        const scheduleTacticCaretReplay = () => this.scheduleTacticTextReplay();
+        scriptInput?.addEventListener("selectionchange", scheduleTacticCaretReplay);
+        scriptInput?.addEventListener("click", scheduleTacticCaretReplay);
+        scriptInput?.addEventListener("keyup", scheduleTacticCaretReplay);
         scriptInput?.addEventListener("keydown", event => {
             if (event.key === "Enter" && event.ctrlKey) {
                 event.preventDefault();
-                void this.replayTacticText(true);
+                void this.replayTacticText(true, true);
             }
         });
+        document.getElementById("tactic-script-run-cursor")?.addEventListener("click", () => {
+            void this.replayTacticText(true, true);
+        });
         document.getElementById("tactic-script-run")?.addEventListener("click", () => {
-            void this.replayTacticText(true);
+            void this.replayTacticText(true, false);
         });
         document.getElementById('timeSelect').addEventListener('change', function () {
             Core.timeout = Number(this.value) * 1000;
@@ -734,8 +745,10 @@ export class TTGui {
         this.tacticScript = session.script;
         this.tacticScriptDirty = session.script !== session.history.join("\n");
         const scriptInput = document.getElementById("tactic-script");
-        if (scriptInput)
+        if (scriptInput) {
             scriptInput.value = session.script;
+            this.tacticScriptEditor?.refresh();
+        }
         this.mode = [session.target];
         this.renderTacticScopeOptions();
         this.renderTacticSessionTabs();
@@ -836,8 +849,10 @@ export class TTGui {
         mode.classList.remove("hide");
         document.getElementById("tactic-clear")?.classList.remove("hide");
         document.getElementById("tactic-list")?.parentElement?.classList?.add?.("hide");
-        if (script.value !== this.tacticScript)
+        if (script.value !== this.tacticScript) {
             script.value = this.tacticScript;
+            this.tacticScriptEditor?.refresh();
+        }
         errorDiv.replaceChildren();
         if (error) {
             const line = document.createElement("div");
@@ -850,7 +865,7 @@ export class TTGui {
         else if (terminal) {
             const done = document.createElement("div");
             done.className = "proof-text-status";
-            done.textContent = "qed 已就绪，按 Ctrl+Enter 或执行按钮提交";
+            done.textContent = "qed 已就绪，Ctrl+Enter/执行到光标提交；执行全部运行整页";
             errorDiv.appendChild(done);
         }
         state.replaceChildren();
@@ -875,8 +890,10 @@ export class TTGui {
         if (this.tacticTextMode) {
             if (!this.tacticScriptDirty)
                 this.tacticScript = this.mode.slice(1).join("\n");
-            if (script)
+            if (script) {
                 script.value = this.tacticScript;
+                this.tacticScriptEditor?.refresh();
+            }
             textMode?.classList?.remove?.("hide");
             buttonMode?.classList?.add?.("hide");
             if (this.assistSnapshot)
@@ -897,7 +914,7 @@ export class TTGui {
             window.clearTimeout(this.tacticTextReplayTimer);
         this.tacticTextReplayTimer = window.setTimeout(() => {
             this.tacticTextReplayTimer = null;
-            void this.replayTacticText(false);
+            void this.replayTacticText(false, true);
         }, 350);
     }
     async commitTacticQed(qedName) {
@@ -911,7 +928,7 @@ export class TTGui {
         this.resetTacticPage();
         output.blur();
     }
-    async replayTacticText(explicitRun) {
+    async replayTacticText(explicitRun, toCursor = false) {
         if (!this.tacticTextMode || !(this.mode instanceof Array))
             return;
         if (this.tacticBusy) {
@@ -922,7 +939,8 @@ export class TTGui {
         if (script)
             this.tacticScript = script.value;
         const target = this.mode[0];
-        const entries = this.parseTacticScript(this.tacticScript);
+        const source = toCursor && script ? scriptThroughCaret(script) : this.tacticScript;
+        const entries = this.parseTacticScript(source);
         const requestId = ++this.tacticRequestId;
         let accepted = [];
         let snapshot = null;
@@ -1067,8 +1085,10 @@ export class TTGui {
         this.resizeTacticInput();
         input.classList.add("hide");
         const script = document.getElementById("tactic-script");
-        if (script)
+        if (script) {
             script.value = "";
+            this.tacticScriptEditor?.refresh();
+        }
         document.getElementById("tactic-text-mode")?.classList?.add?.("hide");
         document.getElementById("tactic-list")?.parentElement?.classList?.remove?.("hide");
         this.setTacticBusy(false);
@@ -1145,8 +1165,10 @@ export class TTGui {
                 this.tacticScript = snapshot.history.join("\n");
                 this.tacticScriptDirty = false;
                 const script = document.getElementById("tactic-script");
-                if (script)
+                if (script) {
                     script.value = this.tacticScript;
+                    this.tacticScriptEditor?.refresh();
+                }
             }
             if (this.proofSessions.activeId) {
                 this.proofSessions.update(this.proofSessions.activeId, {

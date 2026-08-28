@@ -889,6 +889,7 @@ export class InferenceProofAssistant {
         const args = match[2]?.trim() ?? "";
         switch (name) {
             case "intro": return this.intro(args);
+            case "intros": return this.intros(args);
             case "exact": return this.exact(args);
             case "apply": return this.applyRule(args);
             case "have": return this.have(args);
@@ -916,6 +917,23 @@ export class InferenceProofAssistant {
     private intro(argument: string): void {
         const name = argument.trim();
         this.introNode(this.requireCurrentNode(), name);
+    }
+
+    /** Introduce several leading binders as one atomic assistant command. */
+    private intros(argument: string): void {
+        const value = argument.trim();
+        const names = value ? value.split(/[\s,]+/).filter(Boolean) : [];
+        const node = this.requireCurrentNode();
+        if (!names.length) {
+            let introduced = 0;
+            while (node.target.type === "sym" && [">", "V"].includes(node.target.name)) {
+                this.introNode(node, "");
+                introduced++;
+            }
+            if (!introduced) throw new Error(TR("intros需要至少一个名称或可引入的前提"));
+            return;
+        }
+        for (const name of names) this.introNode(node, name);
     }
 
     private introNode(node: DraftNode, name: string): void {
