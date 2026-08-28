@@ -65,6 +65,24 @@ assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), parser.stringi
     assert.match(pureFs.propositions[0].from?.deductionIdx ?? "", /^__tauto_/);
 }
 
+// Without the MCPT unlock, the same proof falls back to ordinary c-prefixed
+// macro materialization and typed `tauto` is rejected.
+{
+    const fallbackFs = initFormalSystem(true).fs;
+    const fallback = new InferenceProofAssistant(fallbackFs, "A>(B>A)", { allowMcpt: false });
+    fallback.apply("intros ha hb");
+    fallback.apply("exact ha");
+    fallback.qed();
+    assert.equal(fallbackFs.propositions[0].from?.assistant?.allowMcpt, false);
+    fallbackFs.expandMacroWithProp(0);
+    assert.equal(fallbackFs.propositions.some(proposition => proposition.deferredKind === "cpt"), false);
+    assert.ok(fallbackFs.propositions.some(proposition => /^c/.test(proposition.from?.deductionIdx ?? "")));
+    assert.equal(parser.stringifyTight(fallbackFs.propositions.at(-1).value), "A>(B>A)");
+
+    const lockedTauto = new InferenceProofAssistant(initFormalSystem(true).fs, "A>A", { allowMcpt: false });
+    assert.throws(() => lockedTauto.apply("tauto"), /未解锁MCPT/);
+}
+
 // Existing e-prefixed metatheorem rules remain visible as macro steps.
 {
     const existFs = initFormalSystem(true).fs;

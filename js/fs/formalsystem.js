@@ -433,6 +433,7 @@ export class FormalSystem {
             theorem: astmgr.clone(payload.theorem),
             history: [...payload.history],
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
+            ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
                 index: premise.index,

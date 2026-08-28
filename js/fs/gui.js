@@ -314,7 +314,8 @@ export class FSGui {
             const assistant = new InferenceProofAssistant(this.formalSystem, draft.theorem, {
                 pageId: page.id,
                 history: draft.history,
-                ruleNames: this.deductions
+                ruleNames: this.deductions,
+                allowMcpt: this.metarules.includes("cpt")
             });
             this.inferenceProofAssistant = assistant;
             this.inferenceProofPageId = page.id;
@@ -1050,7 +1051,8 @@ export class FSGui {
             // must leave the currently edited proof untouched.
             assistant = new InferenceProofAssistant(this.formalSystem, target, {
                 pageId: page.id,
-                ruleNames: this.deductions
+                ruleNames: this.deductions,
+                allowMcpt: this.metarules.includes("cpt")
             });
             snapshot = assistant.snapshot();
         }
@@ -1289,7 +1291,8 @@ export class FSGui {
         try {
             assistant = new InferenceProofAssistant(this.formalSystem, theorem, {
                 pageId,
-                ruleNames: this.deductions
+                ruleNames: this.deductions,
+                allowMcpt: this.metarules.includes("cpt")
             });
             snapshot = assistant.snapshot();
             for (let index = 0; index < entries.length; index++) {

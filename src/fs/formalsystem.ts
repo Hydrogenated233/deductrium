@@ -31,6 +31,8 @@ export type DeferredAssistantPayload = {
     premises: DeferredAssistantPremise[];
     /** Rules visible in the proof-assistant scope when the recipe was made. */
     ruleNames?: string[];
+    /** Whether the proof context had the MCPT/CPT metarule unlocked. */
+    allowMcpt?: boolean;
 };
 export type DeferredKind = "cpt" | "assistant";
 export type Deduction = {
@@ -449,6 +451,7 @@ export class FormalSystem {
             theorem: astmgr.clone(payload.theorem),
             history: [...payload.history],
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
+            ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
                 index: premise.index,

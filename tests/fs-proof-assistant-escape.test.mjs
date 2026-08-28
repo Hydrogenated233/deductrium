@@ -23,6 +23,15 @@ for (const path of ["../src/fs/gui.ts", "../js/fs/gui.js"]) {
         /recommendations\(\{[\s\S]*?ruleNames:\s*this\.deductions,[\s\S]*?canTauto:\s*this\.metarules\.includes\("cpt"\)/,
         `${path}: recommendations must use visible rules and the unlocked CPT state`
     );
+    const assistantConstructors = gui.match(/new InferenceProofAssistant\(/g) ?? [];
+    const assistantCapabilities = gui.match(
+        /allowMcpt:\s*this\.metarules\.includes\("cpt"\)/g
+    ) ?? [];
+    assert.equal(
+        assistantCapabilities.length,
+        assistantConstructors.length,
+        `${path}: every inference proof-assistant entry must use the unlocked CPT state`
+    );
 }
 
 const html = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");

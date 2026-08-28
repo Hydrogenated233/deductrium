@@ -21,6 +21,7 @@ export class InferenceProofAssistant {
     root;
     history = [];
     availableRuleNames;
+    allowMcpt = true;
     nextNodeId = 1;
     committed = false;
     sessionToken = Symbol("inference-proof-session");
@@ -33,6 +34,7 @@ export class InferenceProofAssistant {
             throw new Error(TR("推理表不存在"));
         this.pageId = page.id;
         this.availableRuleNames = options.ruleNames ? new Set(options.ruleNames) : undefined;
+        this.allowMcpt = options.allowMcpt !== false;
         this.theorem = null;
         this.root = null;
         if (typeof targetOrPage !== "string" || !fs.inferencePages.page(targetOrPage) || options.pageId) {
@@ -487,6 +489,8 @@ export class InferenceProofAssistant {
                 theorem: astmgr.clone(deduction.deferredPayload.theorem),
                 history: [...deduction.deferredPayload.history],
                 ...(deduction.deferredPayload.ruleNames ? { ruleNames: [...deduction.deferredPayload.ruleNames] } : {}),
+                ...(deduction.deferredPayload.allowMcpt !== undefined
+                    ? { allowMcpt: deduction.deferredPayload.allowMcpt } : {}),
                 premises: deduction.deferredPayload.premises.map(premise => ({
                     pageId: premise.pageId,
                     index: premise.index,
@@ -504,6 +508,7 @@ export class InferenceProofAssistant {
             theorem: astmgr.clone(payload.theorem),
             history: [...payload.history],
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
+            ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
                 index: premise.index,
@@ -629,6 +634,7 @@ export class InferenceProofAssistant {
             theorem: astmgr.clone(theorem),
             history: this.history.slice(),
             ...(this.availableRuleNames ? { ruleNames: [...this.availableRuleNames] } : {}),
+            allowMcpt: this.allowMcpt,
             premises: premises.map(premise => ({
                 pageId: premise.pageId,
                 index: premise.index,
@@ -1521,6 +1527,8 @@ export class InferenceProofAssistant {
     tauto(argument) {
         if (argument.trim())
             throw new Error(TR("tauto不接受参数"));
+        if (!this.allowMcpt)
+            throw new Error(TR("尚未解锁MCPT，不能使用tauto"));
         const node = this.requireCurrentNode();
         // Keep MCPT's exhaustive check as the authority.  Do not add a
         // generated rule here: applying a tactic is a draft-only operation and
@@ -2407,7 +2415,7 @@ export class InferenceProofAssistant {
             // A closed pure-propositional theorem is already within MCPT's exact
             // domain. Keep it as one lazy node instead of rebuilding a Hilbert
             // proof from a1/a2/a3/mp during assistant expansion.
-            if (this.isPurePropositionalSyntax(this.theorem)) {
+            if (this.allowMcpt && this.isPurePropositionalSyntax(this.theorem)) {
                 const name = this.nextTautoName(this.theorem);
                 try {
                     if (!this.fs.deductions[name]) {
@@ -3073,7 +3081,8 @@ registerDeferredAssistantMaterializer((fs, deduction) => {
         const assistant = new InferenceProofAssistant(fs, astmgr.clone(payload.theorem), {
             pageId: replayPageId,
             history: replayHistory,
-            ...(payload.ruleNames ? { ruleNames: payload.ruleNames } : {})
+            ...(payload.ruleNames ? { ruleNames: payload.ruleNames } : {}),
+            allowMcpt: payload.allowMcpt !== false
         });
         const replayed = assistant.materializeForDeferred();
         // `materialize()` restores the formal-system snapshot by replacing the
