@@ -805,10 +805,13 @@ export class InferenceProofAssistant {
             throw new Error(TR("intro名称无效"));
         this.assertUniqueHypothesis(node, replacement);
         node.target = this.substituteBound(target.nodes[1], binder.name, replacement);
-        node.hypotheses = [...node.hypotheses, {
-                name: replacement,
-                kind: "variable"
-            }];
+        const hypothesis = {
+            name: replacement,
+            binder: astmgr.clone(binder),
+            kind: "variable"
+        };
+        node.hypotheses = [...node.hypotheses, hypothesis];
+        node.introBindings.push(hypothesis);
     }
     exact(argument) {
         const node = this.requireCurrentNode();
@@ -2242,6 +2245,7 @@ export class InferenceProofAssistant {
         return hypotheses.map(h => ({
             name: h.name,
             proposition: h.proposition ? astmgr.clone(h.proposition) : undefined,
+            binder: h.binder ? astmgr.clone(h.binder) : undefined,
             kind: h.kind,
             sourceNodeId: h.sourceNodeId
         }));
@@ -2592,6 +2596,96 @@ export class InferenceProofAssistant {
                 };
                 return transform(absolute(result.index));
             };
+            /** Generalize a completed proof graph over one introduced universal variable. */
+            const quantifyResult = (result, binding) => {
+                if (!binding.binder)
+                    throw new Error(TR("全称变量缺少原始约束变量"));
+                const binder = astmgr.clone(binding.binder);
+                const binderName = this.fs.assert.getVarName(binder);
+                if (!binderName)
+                    throw new Error(TR("全称量词约束变量无效"));
+                const transformed = new Map();
+                const quantify = (body) => ({
+                    type: "sym",
+                    name: "V",
+                    nodes: [astmgr.clone(binder), this.substituteBound(body, binding.name, binderName)]
+                });
+                const transform = (absoluteIndex) => {
+                    const cached = transformed.get(absoluteIndex);
+                    if (cached)
+                        return cached;
+                    const row = propositionAt(absoluteIndex);
+                    const desired = quantify(row.value);
+                    if (!row.from) {
+                        if (this.containsFreeName(row.value, binding.name)) {
+                            throw new Error(TR("全称变量出现在未解除的外部前提中：") + binding.name);
+                        }
+                        const body = astmgr.clone(row.value);
+                        const implicationTarget = implication(body, desired);
+                        const axiom = this.requireDeduction("a6");
+                        const match = this.matchConclusion(axiom, implicationTarget, {
+                            positional: [],
+                            named: new Map()
+                        }, axiom.conclusion);
+                        this.assertRuleMatchComplete(match, "a6");
+                        const replaceValues = axiom.replaceNames.map(name => {
+                            const value = match.matchTable[match.context.internalByOriginal.get(name)];
+                            if (!value)
+                                throw new Error(TR("无法从全称化目标推断a6参数：") + name);
+                            return astmgr.clone(value);
+                        });
+                        const axiomResult = appendDerived(implicationTarget, {
+                            deductionIdx: "a6",
+                            conditionIdxs: [],
+                            replaceValues
+                        });
+                        const quantified = appendDerived(desired, {
+                            deductionIdx: "mp",
+                            conditionIdxs: [absolute(axiomResult.index), absoluteIndex],
+                            replaceValues: []
+                        });
+                        transformed.set(absoluteIndex, quantified);
+                        return quantified;
+                    }
+                    const conditions = row.from.conditionIdxs.map(transform);
+                    const oldActivePage = this.fs.inferencePages.activeId;
+                    const oldFastMetarules = this.fs.fastmetarules;
+                    try {
+                        this.fs.fastmetarules = "cvuqe><:#zZQR";
+                        const quantifiedRuleName = this.fs.metaConditionUniversalTheorem(row.from.deductionIdx, "证明助手全称intro*");
+                        const quantifiedRule = this.requireDeduction(quantifiedRuleName);
+                        const originalRule = this.requireDeduction(row.from.deductionIdx);
+                        const explicitValues = originalRule.conditions.length ? [] : [
+                            astmgr.clone(binder),
+                            ...row.from.replaceValues.map(value => this.substituteBound(value, binding.name, binderName))
+                        ];
+                        const match = this.matchConclusion(quantifiedRule, desired, {
+                            positional: explicitValues,
+                            named: new Map()
+                        }, quantifiedRule.conclusion, undefined, undefined, undefined, conditions.map(condition => condition.proposition));
+                        this.assertRuleMatchComplete(match, quantifiedRuleName);
+                        const replaceValues = quantifiedRule.replaceNames.map(name => {
+                            const value = match.matchTable[match.context.internalByOriginal.get(name)];
+                            if (!value)
+                                throw new Error(TR("无法从全称化目标推断规则参数：") + name);
+                            return astmgr.clone(value);
+                        });
+                        const quantified = appendDerived(desired, {
+                            deductionIdx: quantifiedRuleName,
+                            conditionIdxs: conditions.map(condition => absolute(condition.index)),
+                            replaceValues
+                        });
+                        transformed.set(absoluteIndex, quantified);
+                        return quantified;
+                    }
+                    finally {
+                        this.fs.fastmetarules = oldFastMetarules;
+                        if (oldActivePage !== this.pageId)
+                            this.fs.inferencePages.activate(oldActivePage);
+                    }
+                };
+                return transform(absolute(result.index));
+            };
             /** Emit a direct `have h := source arg...` specialization. */
             const emitHaveApplication = (node, hypothesisRows) => {
                 if (!node.haveSource || node.haveSource.kind === "rule" || !node.haveProposition) {
@@ -2647,23 +2741,32 @@ export class InferenceProofAssistant {
             let emit;
             const emitBody = (node, incomingRows) => {
                 const hypothesisRows = new Map(incomingRows);
-                const introRows = [];
-                // Each implication intro is a temporary proposition.  Universal
-                // intros only rename the binder in the target and therefore do not
-                // create a row.  Keeping this local map prevents same-named binders
-                // in sibling goals from leaking into one another.
+                const introEntries = [];
+                // Implication intros create temporary proposition rows. Universal
+                // intros carry their original binder so finish() can generalize the
+                // completed proof graph in the exact reverse introduction order.
                 for (const hypothesis of node.introBindings) {
-                    if (!hypothesis.proposition)
-                        continue;
-                    const index = propositions.length;
-                    propositions.push({ value: astmgr.clone(hypothesis.proposition), from: null });
-                    hypothesisRows.set(hypothesis.name, index);
-                    introRows.push({ proposition: astmgr.clone(hypothesis.proposition), index });
+                    if (hypothesis.proposition) {
+                        const index = propositions.length;
+                        propositions.push({ value: astmgr.clone(hypothesis.proposition), from: null });
+                        hypothesisRows.set(hypothesis.name, index);
+                        introEntries.push({ binding: hypothesis, index });
+                    }
+                    else {
+                        introEntries.push({ binding: hypothesis });
+                    }
                 }
                 const finish = (result) => {
-                    for (let index = introRows.length - 1; index >= 0; index--) {
-                        const intro = introRows[index];
-                        result = dischargeHypothesis(result, intro.proposition, intro.index);
+                    for (let index = introEntries.length - 1; index >= 0; index--) {
+                        const intro = introEntries[index];
+                        if (intro.binding.proposition) {
+                            if (intro.index === undefined)
+                                throw new Error(TR("intro临时假设行缺失"));
+                            result = dischargeHypothesis(result, intro.binding.proposition, intro.index);
+                        }
+                        else if (intro.binding.kind === "variable") {
+                            result = quantifyResult(result, intro.binding);
+                        }
                     }
                     return result;
                 };
@@ -2865,14 +2968,18 @@ export class InferenceProofAssistant {
             // back unrelated temporary state.
             const generated = new Map();
             if (materializationSucceeded) {
-                const referenced = new Set(steps.map(step => step.deductionIdx));
-                for (const name of referenced) {
+                const retainGenerated = (name) => {
                     if (materializationSystemSnapshot.deductions[name])
-                        continue;
+                        return;
+                    if (generated.has(name))
+                        return;
                     const deduction = this.fs.deductions[name];
-                    if (deduction)
-                        generated.set(name, this.cloneDeduction(deduction));
-                }
+                    if (!deduction)
+                        return;
+                    generated.set(name, this.cloneDeduction(deduction));
+                    deduction.steps?.forEach(step => retainGenerated(step.deductionIdx));
+                };
+                steps.forEach(step => retainGenerated(step.deductionIdx));
             }
             this.restoreFormalSystemState(materializationSystemSnapshot);
             for (const [name, deduction] of generated) {
