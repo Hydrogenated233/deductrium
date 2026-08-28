@@ -56,7 +56,10 @@ const saves = new SavesParser(true);
 {
     const fs = initFormalSystem(true).fs;
     fs.addHypothese(parser.parse("$0"));
-    const assistant = new InferenceProofAssistant(fs, "~$1>$0", { allowMcpt: false });
+    const assistant = new InferenceProofAssistant(fs, "~$1>$0", {
+        fastMetaRules: "c<",
+        allowMcpt: false
+    });
     assistant.apply("intro");
     assistant.apply("exact p0");
     assistant.qed();
@@ -65,6 +68,7 @@ const saves = new SavesParser(true);
     const restored = saves.deserializeProposition(JSON.parse(JSON.stringify(encoded)));
     assert.equal(restored.from.deductionIdx, DEFERRED_ASSISTANT_STEP);
     assert.deepEqual(restored.from.assistant.history, ["intro", "exact p0"]);
+    assert.equal(restored.from.assistant.fastMetaRules, "c<");
     assert.equal(restored.from.assistant.allowMcpt, false);
     assert.equal(saves.deserializeDeductionStep(["mp", [], []]).assistant, undefined);
 }

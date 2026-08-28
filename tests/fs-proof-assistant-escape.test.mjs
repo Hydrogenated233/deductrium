@@ -32,6 +32,14 @@ for (const path of ["../src/fs/gui.ts", "../js/fs/gui.js"]) {
         assistantConstructors.length,
         `${path}: every inference proof-assistant entry must use the unlocked CPT state`
     );
+    const fastMetaCapabilities = gui.match(
+        /fastMetaRules:\s*this\.formalSystem\.fastmetarules/g
+    ) ?? [];
+    assert.equal(
+        fastMetaCapabilities.length,
+        assistantConstructors.length,
+        `${path}: every inference proof-assistant entry must use the unlocked fast metarules`
+    );
 }
 
 const html = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");

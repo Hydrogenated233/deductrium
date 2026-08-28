@@ -296,7 +296,7 @@
                 <details id="fs-proof-help" class="fs-proof-help">
                     <summary>策略介绍</summary>
                     <div class="fs-proof-help-content">
-                        <p><code>intro</code> 展开一个蕴含或全称前提；<code>intros h1 h2</code> 连续展开多个前提，省略名称时自动展开全部前导前提；<code>exact h</code> 用假设、定理或无前件规则完成目标；<code>apply h</code> 应用来源并生成前件目标。</p>
+                        <p><code>intro</code> 展开一个蕴含或全称前提；蕴含引入要求条件演绎和逆演绎元定理，全称引入要求条件概括元定理。<code>intros h1 h2</code> 连续展开多个前提，省略名称时自动展开全部前导前提；<code>exact h</code> 用假设、定理或无前件规则完成目标；<code>apply h</code> 应用来源并生成前件目标。演绎元定理与逆演绎元定理解锁后，也可使用 <code>apply &gt;rule</code> 或 <code>apply &lt;rule</code>，但底层规则仍须在当前作用域可用；自动生成的子步骤也会检查其中的 <code>&gt;</code>/<code>&lt;</code> 前缀。</p>
                         <p><code>assumption</code> 自动使用与当前目标相同的局部假设；<code>constructor</code> 构造合取 <code>A&amp;B</code> 或等价 <code>A&lt;&gt;B</code>；<code>left</code>/<code>right</code> 选择析取目标的一侧；<code>symm</code> 交换等式/等价两端；<code>rfl</code> 证明两端定义相同的等式。</p>
                         <p><code>contradiction</code> 使用同时存在的 <code>P</code> 与 <code>~P</code>；<code>by_contra h</code> 加入反设 <code>h:~P</code>；<code>by_cases h : P</code> 建立 <code>h:P</code> 与 <code>h:~P</code> 两个分支；<code>contrapose</code> 把 <code>A&gt;B</code> 改为 <code>~B&gt;~A</code>。</p>
                         <p><code>have h : P</code> 声明待证明事实，<code>have h := f a b</code> 实例化全称命题。依赖的内置规则未解锁时，系统只会使用当前作用域中结构等价的用户规则。</p>

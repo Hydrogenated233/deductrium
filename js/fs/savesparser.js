@@ -46,6 +46,7 @@ export class SavesParser {
             theorem: astparser.stringifyTight(payload.theorem),
             history: [...payload.history],
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
+            ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
@@ -60,6 +61,7 @@ export class SavesParser {
             || !Array.isArray(payload.history) || !payload.history.every(v => typeof v === "string")
             || (payload.ruleNames !== undefined
                 && (!Array.isArray(payload.ruleNames) || !payload.ruleNames.every(v => typeof v === "string")))
+            || (payload.fastMetaRules !== undefined && typeof payload.fastMetaRules !== "string")
             || (payload.allowMcpt !== undefined && typeof payload.allowMcpt !== "boolean")
             || !Array.isArray(payload.premises)) {
             throw TR("证明助手延迟步骤存档格式无效");
@@ -83,6 +85,7 @@ export class SavesParser {
                 theorem: astparser.parse(payload.theorem),
                 history: [...payload.history],
                 ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
+                ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
                 ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
                 premises
             };
@@ -168,6 +171,7 @@ export class SavesParser {
                 || !Array.isArray(payload.history) || !payload.history.every(v => typeof v === "string")
                 || (payload.ruleNames !== undefined
                     && (!Array.isArray(payload.ruleNames) || !payload.ruleNames.every(v => typeof v === "string")))
+                || (payload.fastMetaRules !== undefined && typeof payload.fastMetaRules !== "string")
                 || (payload.allowMcpt !== undefined && typeof payload.allowMcpt !== "boolean")
                 || !Array.isArray(payload.premises)) {
                 throw TR("证明助手延迟步骤存档格式无效");
@@ -191,6 +195,7 @@ export class SavesParser {
                     theorem: astparser.parse(payload.theorem),
                     history: [...payload.history],
                     ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
+                    ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
                     ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
                     premises
                 };

@@ -31,6 +31,8 @@ export type DeferredAssistantPayload = {
     premises: DeferredAssistantPremise[];
     /** Rules visible in the proof-assistant scope when the recipe was made. */
     ruleNames?: string[];
+    /** Fast metarule prefixes unlocked when the recipe was made. */
+    fastMetaRules?: string;
     /** Whether the proof context had the MCPT/CPT metarule unlocked. */
     allowMcpt?: boolean;
 };
@@ -451,6 +453,7 @@ export class FormalSystem {
             theorem: astmgr.clone(payload.theorem),
             history: [...payload.history],
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
+            ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),

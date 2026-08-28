@@ -182,6 +182,18 @@ does not support `_` wildcard arguments. `have <proposition> <name>` keeps the
 named intermediate fact in the final derivation chain. Multiple subgoals are
 processed depth-first in rule-condition order.
 
+Metatheorem-backed commands use the unlock snapshot captured when the proof
+page starts. Implication `intro` requires both conditional deduction (`c`) and
+inverse deduction (`<`), while universal `intro` requires conditional universal
+(`v`); branch tactics that introduce hypotheses inherit the implication-intro
+requirements. Generated
+deduction names such as `>rule` and `<rule` are accepted by `apply`/`exact` only
+when that metatheorem prefix is unlocked and every underlying atomic rule is
+visible in the selected proof scope. Newly generated helper deductions are
+audited recursively, so `<`/`>` prefixes in their emitted substeps cannot bypass
+the unlock state. Cached generated rules do not bypass these checks, and the
+snapshot is persisted with deferred assistant steps.
+
 Completed assistant steps are appended to the active page in generation order,
 including temporary hypotheses and the final conclusion. A named `qed` writes
 those rows and then performs `m <name>` as one transaction; a macro-name

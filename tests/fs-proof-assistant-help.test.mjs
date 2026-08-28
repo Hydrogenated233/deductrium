@@ -13,6 +13,10 @@ for (const tactic of ["intro", "intros", "exact", "apply", "assumption", "constr
     assert.match(inferenceHelp[0], new RegExp(`<code>${tactic}(?:</code>|\\s)`),
         `inference help should describe ${tactic}`);
 }
+assert.match(inferenceHelp[0], /apply &gt;rule/,
+    "inference help should describe deduction-metatheorem rule names");
+assert.match(inferenceHelp[0], /底层规则仍须在当前作用域可用/,
+    "inference help should describe generated-rule scope checks");
 
 const inferenceAssistantStart = html.indexOf('<div id="fs-proof-assistant"');
 const inferenceTextModeStart = html.indexOf('<div id="fs-proof-text-mode"', inferenceAssistantStart);

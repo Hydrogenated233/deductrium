@@ -315,6 +315,7 @@ export class FSGui {
                 pageId: page.id,
                 history: draft.history,
                 ruleNames: this.deductions,
+                fastMetaRules: this.formalSystem.fastmetarules,
                 allowMcpt: this.metarules.includes("cpt")
             });
             this.inferenceProofAssistant = assistant;
@@ -1052,6 +1053,7 @@ export class FSGui {
             assistant = new InferenceProofAssistant(this.formalSystem, target, {
                 pageId: page.id,
                 ruleNames: this.deductions,
+                fastMetaRules: this.formalSystem.fastmetarules,
                 allowMcpt: this.metarules.includes("cpt")
             });
             snapshot = assistant.snapshot();
@@ -1292,6 +1294,7 @@ export class FSGui {
             assistant = new InferenceProofAssistant(this.formalSystem, theorem, {
                 pageId,
                 ruleNames: this.deductions,
+                fastMetaRules: this.formalSystem.fastmetarules,
                 allowMcpt: this.metarules.includes("cpt")
             });
             snapshot = assistant.snapshot();

@@ -73,6 +73,8 @@ export interface InferenceProofOptions {
     history?: string[];
     /** Names currently available in the selected proof-assistant scope. */
     ruleNames?: Iterable<string>;
+    /** Fast metarule prefixes currently unlocked; omitted for legacy unrestricted callers. */
+    fastMetaRules?: string;
     /** Whether MCPT may close/materialize pure propositional goals. */
     allowMcpt?: boolean;
 }
@@ -132,6 +134,10 @@ type StrategyRuleResolution = {
     metavariables: Map<string, string>;
 };
 
+type DeductionAccess =
+    | { allowed: true }
+    | { allowed: false; kind: "metarule" | "rule"; name: string };
+
 type RewriteStep = {
     before: AST;
     after: AST;
@@ -190,6 +196,7 @@ export class InferenceProofAssistant {
     private root: DraftNode;
     private history: string[] = [];
     private availableRuleNames?: Set<string>;
+    private availableFastMetaRules?: string;
     private allowMcpt = true;
     private nextNodeId = 1;
     private committed = false;
@@ -203,6 +210,7 @@ export class InferenceProofAssistant {
         if (!page) throw new Error(TR("推理表不存在"));
         this.pageId = page.id;
         this.availableRuleNames = options.ruleNames ? new Set(options.ruleNames) : undefined;
+        this.availableFastMetaRules = options.fastMetaRules;
         this.allowMcpt = options.allowMcpt !== false;
         this.theorem = null;
         this.root = null;
@@ -289,7 +297,7 @@ export class InferenceProofAssistant {
         const add = (command: string) => {
             if (!commands.includes(command)) commands.push(command);
         };
-        if (node.target.type === "sym" && [">", "V"].includes(node.target.name)) add("intro");
+        if (this.canIntroduceTarget(node.target)) add("intro");
 
         const addPropositionSource = (name: string, proposition: AST, allowApply: boolean) => {
             if (this.fixedPropositionMayMatch(proposition, node.target)) add(`exact ${name}`);
@@ -320,6 +328,7 @@ export class InferenceProofAssistant {
                 }
                 if (hypothesis.proposition.type === "sym" && hypothesis.proposition.name === "|"
                     && hypothesis.proposition.nodes?.length === 2
+                    && this.canUseFastMetaRule("c")
                     && this.resolveStrategyRule(".|m", availableRuleNames)) {
                     const names = this.nextHypothesisNames(node, 2);
                     add(`obtain ${names[0]} | ${names[1]} := ${hypothesis.name}`);
@@ -345,8 +354,12 @@ export class InferenceProofAssistant {
         if (this.findContradictionPair(node) && this.resolveStrategyRule(".m", availableRuleNames)) {
             add("contradiction");
         }
-        if (this.resolveStrategyRule(".mn", availableRuleNames)) add("by_contra");
-        if (this.resolveStrategyRule(".m2", availableRuleNames)) add("by_cases h : ??");
+        if (this.canUseFastMetaRule("c") && this.resolveStrategyRule(".mn", availableRuleNames)) {
+            add("by_contra");
+        }
+        if (this.canUseFastMetaRule("c") && this.resolveStrategyRule(".m2", availableRuleNames)) {
+            add("by_cases h : ??");
+        }
         if (node.target.type === "sym" && node.target.name === ">" && node.target.nodes?.length === 2
             && this.resolveStrategyRule("a3", availableRuleNames)) {
             add("contrapose");
@@ -638,6 +651,8 @@ export class InferenceProofAssistant {
                 theorem: astmgr.clone(deduction.deferredPayload.theorem),
                 history: [...deduction.deferredPayload.history],
                 ...(deduction.deferredPayload.ruleNames ? { ruleNames: [...deduction.deferredPayload.ruleNames] } : {}),
+                ...(deduction.deferredPayload.fastMetaRules !== undefined
+                    ? { fastMetaRules: deduction.deferredPayload.fastMetaRules } : {}),
                 ...(deduction.deferredPayload.allowMcpt !== undefined
                     ? { allowMcpt: deduction.deferredPayload.allowMcpt } : {}),
                 premises: deduction.deferredPayload.premises.map(premise => ({
@@ -658,6 +673,7 @@ export class InferenceProofAssistant {
             theorem: astmgr.clone(payload.theorem),
             history: [...payload.history],
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
+            ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
@@ -794,6 +810,7 @@ export class InferenceProofAssistant {
             theorem: astmgr.clone(theorem),
             history: this.history.slice(),
             ...(this.availableRuleNames ? { ruleNames: [...this.availableRuleNames] } : {}),
+            ...(this.availableFastMetaRules !== undefined ? { fastMetaRules: this.availableFastMetaRules } : {}),
             allowMcpt: this.allowMcpt,
             premises: premises.map(premise => ({
                 pageId: premise.pageId,
@@ -929,6 +946,29 @@ export class InferenceProofAssistant {
         this.introNode(this.requireCurrentNode(), name);
     }
 
+    private canUseFastMetaRule(prefix: string): boolean {
+        return this.availableFastMetaRules === undefined || this.availableFastMetaRules.includes(prefix);
+    }
+
+    private canIntroduceTarget(target: AST): boolean {
+        if (target.type !== "sym" || ![">", "V"].includes(target.name)) return false;
+        return target.name === ">"
+            ? this.canUseFastMetaRule("c") && this.canUseFastMetaRule("<")
+            : this.canUseFastMetaRule("v");
+    }
+
+    private assertIntroMetaRule(target: AST): void {
+        if (target.name === ">" && !this.canUseFastMetaRule("c")) {
+            throw new Error(TR("intro需要解锁条件演绎元定理"));
+        }
+        if (target.name === ">" && !this.canUseFastMetaRule("<")) {
+            throw new Error(TR("intro自动生成条件演绎步骤还需要解锁逆演绎元定理"));
+        }
+        if (target.name === "V" && !this.canUseFastMetaRule("v")) {
+            throw new Error(TR("intro需要解锁条件概括元定理"));
+        }
+    }
+
     /** Introduce several leading binders as one atomic assistant command. */
     private intros(argument: string): void {
         const value = argument.trim();
@@ -952,6 +992,7 @@ export class InferenceProofAssistant {
         if (target.type !== "sym" || ![">", "V"].includes(target.name)) {
             throw new Error(TR("intro只能处理蕴含或全称量词"));
         }
+        this.assertIntroMetaRule(target);
         if (target.name === ">") {
             const proposition = astmgr.clone(target.nodes[0]);
             const hypothesis: InferenceProofHypothesis = {
@@ -1694,6 +1735,141 @@ export class InferenceProofAssistant {
         return node.children.some(child => this.hasTautoName(child, name));
     }
 
+    private fastMetaRuleLabel(prefix: string): string {
+        return ({
+            ">": "演绎元定理",
+            "<": "逆演绎元定理",
+            "c": "条件演绎元定理",
+            "v": "条件概括元定理",
+            "u": "概括元定理",
+            "e": "特称元定理",
+            ":": "组合元定理"
+        } as Record<string, string>)[prefix] ?? (TR("元定理") + prefix);
+    }
+
+    private generatedLiteralRuleAvailable(name: string): boolean {
+        const fast = this.availableFastMetaRules ?? this.fs.fastmetarules;
+        const oldFastMetaRules = this.fs.fastmetarules;
+        try {
+            this.fs.fastmetarules = fast;
+            if (name.startsWith(".")) {
+                return !!(
+                    (fast.includes("#")
+                        && (this.fs.generateNatLiteralOp(name) || this.fs.generateNatLiteralIsNat(name)))
+                    || (fast.includes("Z")
+                        && (this.fs.generateZLiteralIsZ(name) || this.fs.generateZLiteralOp(name)))
+                );
+            }
+            if (name.startsWith("a") || name.startsWith("d")) {
+                return !!(
+                    (fast.includes("#") && this.fs.generateNatLiteralDef(name))
+                    || (fast.includes("z") && this.fs.generateZLiteralDef(name))
+                    || (fast.includes("R") && this.fs.generateRLiteralDef(name))
+                    || (fast.includes("Q") && this.fs.generateQLiteralDef(name))
+                );
+            }
+            return false;
+        } finally {
+            this.fs.fastmetarules = oldFastMetaRules;
+        }
+    }
+
+    private deductionTreeAccess(tree: any): DeductionAccess {
+        if (!Array.isArray(tree) || !tree.length) return { allowed: false, kind: "rule", name: "" };
+        if (tree.length === 1) {
+            const name = String(tree[0]);
+            if (name === "#" || !this.availableRuleNames || this.availableRuleNames.has(name)
+                || this.generatedLiteralRuleAvailable(name)) {
+                return { allowed: true };
+            }
+            return { allowed: false, kind: "rule", name };
+        }
+
+        const prefix = String(tree[0]);
+        const unlocked = this.availableFastMetaRules === undefined
+            || this.availableFastMetaRules.includes(prefix)
+            || (prefix === "v" && this.availableFastMetaRules.includes("q"));
+        if (!["<", ">", "c", "e", "v", "u", ":"].includes(prefix) || !unlocked) {
+            return { allowed: false, kind: "metarule", name: prefix };
+        }
+        for (const child of tree.slice(1)) {
+            const access = this.deductionTreeAccess(child);
+            if (!access.allowed) return access;
+        }
+        return { allowed: true };
+    }
+
+    private assertRuleNameMetaPrefixesAvailable(name: string, generated: boolean): void {
+        if (this.availableFastMetaRules === undefined) return;
+        let tree: any;
+        try {
+            tree = this.fs.getDeductionTokens(name);
+        } catch {
+            return;
+        }
+        const visit = (value: any): void => {
+            if (!Array.isArray(value) || value.length <= 1) return;
+            const prefix = String(value[0]);
+            if (["<", ">", "c", "e", "v", "u", ":"].includes(prefix)) {
+                const unlocked = this.availableFastMetaRules!.includes(prefix)
+                    || (prefix === "v" && this.availableFastMetaRules!.includes("q"));
+                if (!unlocked) {
+                    const lead = generated ? TR("自动生成证明步骤需要解锁") : TR("尚未解锁");
+                    throw new Error(lead + this.fastMetaRuleLabel(prefix) + "：" + name);
+                }
+            }
+            value.slice(1).forEach(visit);
+        };
+        visit(tree);
+    }
+
+    private assertGeneratedDeductionMetaRules(name: string, existingNames: Set<string>,
+        visited = new Set<string>()): void {
+        if (this.availableFastMetaRules === undefined || visited.has(name)) return;
+        visited.add(name);
+        this.assertRuleNameMetaPrefixesAvailable(name, true);
+        let generatedExpression = false;
+        try {
+            generatedExpression = this.fs.getDeductionTokens(name)?.length > 1;
+        } catch { }
+        if (existingNames.has(name) && !generatedExpression) return;
+        const deduction = this.fs.deductions[name];
+        deduction?.steps?.forEach(step => {
+            this.assertRuleNameMetaPrefixesAvailable(step.deductionIdx, true);
+            this.assertGeneratedDeductionMetaRules(step.deductionIdx, existingNames, visited);
+        });
+    }
+
+    private resolveVisibleDeduction(name: string): Deduction | undefined {
+        let tree: any;
+        try {
+            tree = this.fs.getDeductionTokens(name);
+        } catch {
+            return undefined;
+        }
+        const access = this.deductionTreeAccess(tree);
+        if ("kind" in access) {
+            if (access.kind === "metarule") {
+                throw new Error(TR("尚未解锁") + this.fastMetaRuleLabel(access.name) + "：" + name);
+            }
+            if (!this.fs.deductions[access.name]) return undefined;
+            throw new Error(TR("推理规则不在当前证明助手作用域：") + access.name);
+        }
+
+        const oldFastMetaRules = this.fs.fastmetarules;
+        const existingNames = new Set(Object.keys(this.fs.deductions));
+        try {
+            if (this.availableFastMetaRules !== undefined) {
+                this.fs.fastmetarules = this.availableFastMetaRules;
+            }
+            const deduction = this.fs.deductions[name] ?? this.fs.generateDeduction(name);
+            if (deduction) this.assertGeneratedDeductionMetaRules(name, existingNames);
+            return deduction;
+        } finally {
+            this.fs.fastmetarules = oldFastMetaRules;
+        }
+    }
+
     private requireCurrentNode(): DraftNode {
         const current = this.openNodes()[0];
         if (!current) throw new Error(TR("无证明目标，请使用qed命令结束证明"));
@@ -1734,7 +1910,7 @@ export class InferenceProofAssistant {
         } catch {
             // Not a proposition expression; continue with shared-rule lookup.
         }
-        const existing = this.fs.deductions[argument] ?? this.fs.generateDeduction(argument);
+        const existing = this.resolveVisibleDeduction(argument);
         if (existing) return { kind: "rule", name: argument, replaceValues: [] };
         throw new Error(TR("未找到证明来源") + argument);
     }
@@ -2677,7 +2853,7 @@ export class InferenceProofAssistant {
                 this.fs.inferencePages.activate(this.pageId);
                 const oldFastMetarules = this.fs.fastmetarules;
                 try {
-                    this.fs.fastmetarules = "cvuqe><:#zZQR";
+                    this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
                     const conditionalRuleName = this.fs.metaConditionTheorem(
                         row.from.deductionIdx,
                         "证明助手intro*"
@@ -2764,7 +2940,7 @@ export class InferenceProofAssistant {
                 const oldActivePage = this.fs.inferencePages.activeId;
                 const oldFastMetarules = this.fs.fastmetarules;
                 try {
-                    this.fs.fastmetarules = "cvuqe><:#zZQR";
+                    this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
                     const quantifiedRuleName = this.fs.metaConditionUniversalTheorem(
                         row.from.deductionIdx,
                         "证明助手全称intro*"
@@ -3059,6 +3235,10 @@ export class InferenceProofAssistant {
         });
         propositions.splice(0, propositions.length, ...compacted);
         steps.splice(0, steps.length, ...compacted.flatMap(proposition => proposition.from ? [proposition.from] : []));
+        const existingDeductionNames = new Set(Object.keys(materializationSystemSnapshot.deductions));
+        for (const step of steps) {
+            this.assertGeneratedDeductionMetaRules(step.deductionIdx, existingDeductionNames);
+        }
         materializationSucceeded = true;
         return {
             propositions,
@@ -3179,6 +3359,7 @@ registerDeferredAssistantMaterializer((fs, deduction) => {
             pageId: replayPageId,
             history: replayHistory,
             ...(payload.ruleNames ? { ruleNames: payload.ruleNames } : {}),
+            ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             allowMcpt: payload.allowMcpt !== false
         });
         const replayed = assistant.materializeForDeferred();
