@@ -11,8 +11,8 @@ const completed = {
     from: { deductionIdx: "proof", conditionIdxs: [], replaceValues: [] }
 };
 
-// A page may begin with hypotheses, but a later completed proposition on the
-// same page must still be visible to #p gate matching.
+// A page that begins with hypotheses is intentionally ineligible for #p gates,
+// even when a later proposition has a completed proof.
 const pageStore = new InferencePageStore([
     { name: "主表", propositions: [hypothesis, completed] },
     { name: "空页", propositions: [] }
@@ -20,14 +20,15 @@ const pageStore = new InferencePageStore([
 const gui = Object.create(FSGui.prototype);
 gui.formalSystem = {};
 gui.pageStore = pageStore;
-assert.equal(gui.hasPropositionForGate(parser.parse("A>B")), true);
+assert.equal(gui.hasPropositionForGate(parser.parse("A>B")), false);
 
-// Hypotheses alone are not completed proofs and must not open a gate.
-pageStore.setPropositions([hypothesis], "空页");
+// A hypothesis-free page with a completed proposition can open the gate.
+pageStore.setPropositions([completed], "空页");
 assert.equal(gui.hasPropositionForGate(parser.parse("A>B")), true,
-    "the completed theorem on 主表 remains available");
+    "a completed theorem on a hypothesis-free page opens the gate");
+pageStore.setPropositions([hypothesis], "空页");
 pageStore.setPropositions([hypothesis], "主表");
 assert.equal(gui.hasPropositionForGate(parser.parse("A>B")), false,
-    "a hypothesis-only page must not satisfy a #p gate");
+    "a page containing hypotheses must not satisfy a #p gate");
 
 console.log("#p gate matching with leading hypotheses regression passed");
