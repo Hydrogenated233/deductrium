@@ -1,6 +1,6 @@
 const PROOF_COMMANDS = new Set([
     "intro", "intros", "destruct", "ex", "case", "exact", "apply", "rw", "rwb", "nth_rw",
-    "simpl", "simp", "rfl", "expand", "fnext", "eq", "sup", "qed", "have", "obtain",
+    "simpl", "simp", "rfl", "expand", "fnext", "eq", "sup", "qed", "have", "use", "obtain",
     "revert", "assumption", "constructor", "left", "right", "symm", "contradiction", "by_contra",
     "by_cases", "contrapose", "tauto"
 ]);
@@ -15,6 +15,15 @@ function escapeHtml(value) {
 }
 function tokenSpan(className, value) {
     return `<span class="proof-token-${className}">${escapeHtml(value)}</span>`;
+}
+/** Return the non-overlay scrollbar gutters occupied by a textarea. */
+export function computeProofEditorGutters(metrics) {
+    const borderHorizontal = metrics.borderHorizontal ?? 0;
+    const borderVertical = metrics.borderVertical ?? 0;
+    return {
+        right: Math.max(0, metrics.offsetWidth - metrics.clientWidth - borderHorizontal),
+        bottom: Math.max(0, metrics.offsetHeight - metrics.clientHeight - borderVertical)
+    };
 }
 /** Lightweight highlighting for the shared proof-command surface syntax. */
 export function highlightProofScript(source) {
@@ -60,11 +69,13 @@ export function highlightProofScript(source) {
 export class ProofScriptEditor {
     textarea;
     highlight;
+    resizeObserver;
     constructor(textarea) {
         this.textarea = textarea;
         const parent = textarea.parentElement;
         if (!parent) {
             this.highlight = null;
+            this.resizeObserver = null;
             return;
         }
         parent.classList.add("proof-code-editor");
@@ -78,6 +89,10 @@ export class ProofScriptEditor {
         textarea.classList.add("proof-code-input");
         textarea.addEventListener("input", () => this.refresh());
         textarea.addEventListener("scroll", () => this.syncScroll());
+        this.resizeObserver = typeof ResizeObserver === "undefined"
+            ? null
+            : new ResizeObserver(() => this.syncLayout());
+        this.resizeObserver?.observe(textarea);
         this.refresh();
     }
     refresh() {
@@ -89,8 +104,25 @@ export class ProofScriptEditor {
     syncScroll() {
         if (!this.highlight)
             return;
+        this.syncLayout();
         this.highlight.scrollTop = this.textarea.scrollTop;
         this.highlight.scrollLeft = this.textarea.scrollLeft;
+    }
+    syncLayout() {
+        if (!this.highlight || typeof getComputedStyle !== "function")
+            return;
+        const style = getComputedStyle(this.textarea);
+        const parsePixels = (value) => Number.parseFloat(value) || 0;
+        const gutters = computeProofEditorGutters({
+            offsetWidth: this.textarea.offsetWidth,
+            clientWidth: this.textarea.clientWidth,
+            offsetHeight: this.textarea.offsetHeight,
+            clientHeight: this.textarea.clientHeight,
+            borderHorizontal: parsePixels(style.borderLeftWidth) + parsePixels(style.borderRightWidth),
+            borderVertical: parsePixels(style.borderTopWidth) + parsePixels(style.borderBottomWidth)
+        });
+        this.highlight.style.right = `${gutters.right}px`;
+        this.highlight.style.bottom = `${gutters.bottom}px`;
     }
 }
 /** Return script text through the complete line containing the caret. */

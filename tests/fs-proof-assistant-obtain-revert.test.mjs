@@ -20,6 +20,68 @@ function addObtainRules(fs) {
         "myOrElim", "myOrLeft", "myOrRight"];
 }
 
+// Existential strategies stay hidden and report the exact prerequisite when
+// their constructor/elimination rules are outside the current unlock scope.
+{
+    const fs = initFormalSystem(false).fs;
+    const useAssistant = new InferenceProofAssistant(fs, "Ex:(x=1)", { ruleNames: lockedRules });
+    assert.equal(useAssistant.recommendations().some(command => command.startsWith("use ")), false);
+    assert.throws(() => useAssistant.apply("use 1"), /\.Erp|存在量词构造规则/);
+
+    const obtainAssistant = new InferenceProofAssistant(fs, "(Ex:(x=1))>(1=1)", { ruleNames: lockedRules });
+    obtainAssistant.apply("intro h");
+    assert.equal(obtainAssistant.recommendations().some(command => command.endsWith(":= h")), false);
+    assert.throws(() => obtainAssistant.apply("obtain <x,hx> := h"), /\.Emp|存在量词消去规则/);
+}
+
+// `use` introduces a concrete witness through the canonical `.Erp` rule and
+// leaves the instantiated predicate as the next goal.
+{
+    const fs = initFormalSystem(false).fs;
+    const assistant = new InferenceProofAssistant(fs, "Ex:(x=1)");
+    assert.ok(assistant.recommendations().includes("use ??"));
+    assistant.apply("use 1");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "1=1");
+    assistant.apply("rfl");
+    assistant.qed();
+    fs.expandMacroWithProp(0);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), parser.stringifyTight(parser.parse("Ex:(x=1)")));
+}
+
+// A hidden canonical `.Erp` may be replaced by a structurally equivalent user
+// rule, just like the other proof-assistant strategies.
+{
+    const fs = initFormalSystem(false).fs;
+    fs.addDeduction("myErp", parser.parse("⊢#rp($1,$0,$2)>(E$0:$1)"), "test");
+    const assistant = new InferenceProofAssistant(fs, "Ex:(x=1)", {
+        ruleNames: ["myErp", "a7"]
+    });
+    assert.ok(assistant.recommendations().includes("use ??"));
+    assistant.apply("use 1");
+    assistant.apply("rfl");
+    assistant.qed();
+    fs.expandMacroWithProp(0);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), parser.stringifyTight(parser.parse("Ex:(x=1)")));
+}
+
+// Existential obtain introduces a scoped witness and proof, consumes the
+// source hypothesis, and materializes through `.Emp` followed by `.Ee`.
+{
+    const fs = initFormalSystem(false).fs;
+    const assistant = new InferenceProofAssistant(fs, "(Ex:(x=1))>(1=1)");
+    assistant.apply("intro h");
+    assert.ok(assistant.recommendations().some(command => command.endsWith(":= h")));
+    assistant.apply("obtain <x,hx> := h");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "1=1");
+    assert.equal(assistant.currentGoal.hypotheses.some(item => item.name === "h"), false);
+    assert.equal(assistant.currentGoal.hypotheses.find(item => item.name === "x")?.kind, "variable");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses.find(item => item.name === "hx").proposition), "x=1");
+    assistant.apply("rfl");
+    assistant.qed();
+    fs.expandMacroWithProp(0);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(Ex:(x=1))>(1=1)");
+}
+
 // Locked elimination rules neither recommend nor execute obtain.
 {
     const fs = initFormalSystem(false).fs;
@@ -69,7 +131,8 @@ function addObtainRules(fs) {
     const fs = initFormalSystem(false).fs;
     const assistant = new InferenceProofAssistant(fs, "A>A", { ruleNames: lockedRules });
     assistant.apply("intro h");
-    assert.ok(assistant.recommendations().includes("revert h"));
+    assert.equal(assistant.recommendations().includes("revert h"), false,
+        "a direct exact/assumption candidate should suppress the fallback revert suggestion");
     assistant.apply("revert h");
     assert.equal(parser.stringifyTight(assistant.currentGoal.target), "A>A");
     assert.equal(assistant.currentGoal.hypotheses.some(item => item.name === "h"), false);
@@ -78,6 +141,16 @@ function addObtainRules(fs) {
     assistant.qed();
     fs.expandMacroWithProp(0);
     assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A>A");
+}
+
+// Revert remains available as a fallback when no direct strategy matches, but
+// it is capped so contexts with many hypotheses do not flood the UI.
+{
+    const fs = initFormalSystem(false).fs;
+    const assistant = new InferenceProofAssistant(fs, "A>(B>(C>goal))", { ruleNames: lockedRules });
+    assistant.apply("intros ha hb hc");
+    const recommendations = assistant.recommendations();
+    assert.deepEqual(recommendations, ["revert ha", "revert hb", "revert hc"]);
 }
 
 // A completed have is reverted through an explicit wrapper node: prove A -> B,

@@ -31,6 +31,38 @@ const parser = new ASTParser();
     assert.equal(assistant.snapshot().complete, true);
 }
 
+// A rule with explicit replacement arguments can be introduced as a local
+// fact.  The argument order is the rule's declared replacement order, and
+// `$`-named expressions remain valid surface terms.
+{
+    const fs = initFormalSystem(true).fs;
+    const target = "(E$0:(E$1:$2))<>~(V$0:(V$1:~$2))";
+    const assistant = new InferenceProofAssistant(fs, target);
+    assistant.apply("have h := .nVVn $0 $1 $2");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses.at(-1).proposition), target);
+    assistant.apply("exact h");
+    assistant.qed();
+    fs.expandMacroWithProp(0);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), target);
+}
+
+// Rules with premises open a normal `have` subgoal and bind the instantiated
+// conclusion only after that subgoal has been solved.
+{
+    const fs = initFormalSystem(false).fs;
+    fs.addDeduction("deriveB", parser.parse("A⊢B"), "test");
+    fs.addHypothese(parser.parse("A"));
+    const assistant = new InferenceProofAssistant(fs, "B");
+    assistant.apply("have h := deriveB");
+    assert.equal(assistant.snapshot().goals.length, 2);
+    assistant.apply("exact p0");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses.at(-1).proposition), "B");
+    assistant.apply("exact h");
+    assistant.qed();
+    fs.expandMacroWithProp(1);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "B");
+}
+
 // The same inferred declaration works for a page proposition and remains
 // expandable after qed's deferred assistant row is materialized.
 {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { InferenceProofAssistant } from "../js/fs/proof-assistant.js";
 import { ASTParser } from "../js/fs/astparser.js";
+import { SavesParser } from "../js/fs/savesparser.js";
 import { initFormalSystem } from "../js/fs/initial.js";
 
 const parser = new ASTParser();
@@ -98,14 +99,17 @@ function makeFs() {
     assert.throws(() => other.commit(preview), /不属于当前证明助手/);
 }
 
-// A tauto helper name occupied by another proof must not silently bind the
-// current proof to the other theorem.
+// Tauto uses the shared atomic assistant marker rather than allocating a
+// per-proof __tauto_N helper.
 {
     const fs = makeFs();
     const assistant = new InferenceProofAssistant(fs, "$0>$0");
     assistant.apply("tauto");
     fs.metaCompleteTheorem(parser.parse("B>B"), "__tauto_1", "test*");
-    assert.throws(() => assistant.qed(), /tauto|冲突/);
+    assert.doesNotThrow(() => assistant.qed());
+    assert.equal(Object.keys(fs.deductions).some(name => name.startsWith("__tauto_")), true,
+        "pre-existing legacy helpers are preserved");
+    assert.equal(fs.propositions[0].from.deductionIdx, "__assistant");
 }
 
 // A materialized preview becomes stale if the selected page changes before it
@@ -135,6 +139,55 @@ function makeFs() {
     assert.equal(qed.propositions[0].deferredKind, "assistant");
     assert.equal(fs.deductions[qed.propositions[0].from.deductionIdx].deferredKind, "assistant");
     assert.equal(fs.deductions[qed.propositions[0].from.deductionIdx].steps, undefined);
+    assert.equal(qed.propositions[0].from.info, "tauto");
+    const encodedTautoStep = new SavesParser(true).serializeDeductionStep(qed.propositions[0].from);
+    assert.equal(encodedTautoStep[4], "tauto");
+    assert.equal(new SavesParser(true).deserializeDeductionStep(encodedTautoStep).info, "tauto");
+}
+
+// MCPT may use a theorem-list proposition as an external premise.  It checks
+// `pN > target`, then stores pN and the checked implication on one atomic
+// assistant step.  Expanding the step computes the inverse proof lazily.
+{
+    const fs = makeFs();
+    fs.fastmetarules = "cvuqe><:#zZQR";
+    fs.addHypothese(parser.parse("~$1"));
+    const assistant = new InferenceProofAssistant(fs, "~($0&$1)", {
+        fastMetaRules: fs.fastmetarules
+    });
+    assert.ok(assistant.recommendations({ canTauto: true }).includes("tauto"));
+    assistant.apply("tauto");
+    assert.equal(assistant.snapshot().complete, true);
+    const result = assistant.qed();
+    assert.deepEqual(result.propositions[0].from.conditionIdxs, [0]);
+    assert.equal(result.propositions[0].from.assistant.premises.length, 1);
+    assert.equal(parser.stringifyTight(result.propositions[0].from.assistant.premises[0].value), "~$1");
+    fs.expandMacroWithProp(1);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "~($0&$1)");
+    assert.equal(fs.propositions.some(proposition => proposition.from?.deductionIdx.startsWith("<__tauto_")), false);
+    const atomicStep = fs.deductions.__assistant.steps?.find(step => step.assistant?.tauto);
+    assert.ok(atomicStep);
+    const savedStep = new SavesParser(true).serializeDeductionStep(atomicStep);
+    assert.ok(new SavesParser(true).deserializeDeductionStep(savedStep).assistant?.tauto);
+}
+
+// Multiple theorem-list propositions become a nested implication before MCPT
+// is run: p0 > (p1 > (p0 & p1)).
+{
+    const fs = makeFs();
+    fs.fastmetarules = "cvuqe><:#zZQR";
+    fs.addHypothese(parser.parse("$0"));
+    fs.addHypothese(parser.parse("$1"));
+    const assistant = new InferenceProofAssistant(fs, "$0&$1", {
+        fastMetaRules: fs.fastmetarules
+    });
+    assistant.apply("tauto");
+    const result = assistant.qed();
+    assert.deepEqual(result.propositions[0].from.conditionIdxs, [0, 1]);
+    assert.equal(result.propositions[0].from.assistant.premises.length, 2);
+    fs.expandMacroWithProp(2);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "$0&$1");
+    assert.ok(fs.deductions.__assistant.steps?.some(step => step.assistant?.tauto));
 }
 
 // Omitted intro names are generated consistently for both implications and
@@ -200,6 +253,26 @@ function makeFs() {
     assert.equal(shown.nodes[1].nodes[0].name, "y");
 }
 
+// exact may close a target after assertion expansion, and should keep the
+// goal's surface AST normalized rather than leaving redundant #nf wrappers.
+{
+    const fs = makeFs();
+    fs.addHypothese(parser.parse("#nf($1,$0)"));
+    const assistant = new InferenceProofAssistant(fs, "#nf(#nf($1,$0),$0)");
+    assistant.apply("exact p0");
+    assert.equal(parser.stringifyTight(assistant.root.target), "$1");
+}
+
+// A rigid #rp source whose replacement variable is absent from the expression
+// should be normalized before exact matching.
+{
+    const fs = makeFs();
+    fs.addHypothese(parser.parse("#rp(($0<>$1),$2,x)"), true);
+    const assistant = new InferenceProofAssistant(fs, "$0<>$1");
+    assistant.apply("exact p0");
+    assert.equal(assistant.snapshot().complete, true);
+}
+
 // apply accepts a local implication and creates one goal per premise in
 // left-to-right order. A closed pure theorem is compacted to MCPT at expansion.
 {
@@ -217,8 +290,9 @@ function makeFs() {
     assert.equal(result.steps.length, 1, "qed emits one atomic step");
     fs.expandMacroWithProp(0);
     assert.equal(fs.propositions.length, 1);
-    assert.equal(fs.propositions[0].deferredKind, "cpt");
-    assert.match(fs.propositions[0].from?.deductionIdx ?? "", /^__tauto_/);
+    assert.equal(fs.propositions[0].deferredKind, "assistant");
+    assert.equal(fs.propositions[0].from?.deductionIdx, "__assistant");
+    assert.equal(Object.keys(fs.deductions).some(name => name.startsWith("__tauto_")), false);
 }
 
 // Stop at the earliest implication suffix matching the target. A target which

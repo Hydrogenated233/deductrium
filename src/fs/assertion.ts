@@ -512,6 +512,11 @@ export class AssertionSystem {
             return res;
         } // matched whole ast one time
         if (eq === U) {
+            // Distinct replacement-variable leaves are different surface
+            // occurrences for rewriting.  They may unify in a later schema
+            // instantiation, but that uncertainty must not discard a known
+            // match in a sibling node such as `$0=$2` when rewriting `$0`.
+            if (ast.type === "replvar" && subAst.type === "replvar") return res;
             // if (nth === -1 && this.astEq(ast, newAst)) return res;
             return false; // unknown
         }
@@ -865,6 +870,48 @@ export class AssertionSystem {
             };
             // else keep #rp
         }
+    }
+    /** Expand assertions after all replacement variables have been fixed. */
+    expandRigid(ast: AST, isItem: boolean, varLists?: ReplvarTypeTable) {
+        this.expand(ast, isItem, varLists);
+        const containsFreeName = (value: AST, name: string, bound = new Set<string>()): boolean => {
+            if (value.type === "replvar") return value.name === name && !bound.has(name);
+            const quant = this.getQuantParams(value);
+            if (quant) {
+                const binderName = this.getVarName(quant[0]);
+                const nextBound = binderName ? new Set([...bound, binderName]) : bound;
+                return containsFreeName(quant[1], name, nextBound);
+            }
+            const nf = this.getNfParams(value);
+            if (nf) return containsFreeName(nf[0], name, bound);
+            const rp = this.getRpParams(value);
+            if (rp) return containsFreeName(rp[0], name, bound);
+            return !!value.nodes?.some(child => containsFreeName(child, name, bound));
+        };
+        const simplify = (value: AST, bound = new Set<string>()): void => {
+            const quant = this.getQuantParams(value);
+            if (quant) {
+                const binderName = this.getVarName(quant[0]);
+                const nextBound = binderName ? new Set([...bound, binderName]) : bound;
+                simplify(quant[1], nextBound);
+                return;
+            }
+            const rp = this.getRpParams(value);
+            if (rp) {
+                const [sub, source, destination] = rp;
+                simplify(sub, bound);
+                if (source.type === "replvar" && !containsFreeName(sub, source.name, bound)) {
+                    astmgr.assign(value, sub);
+                    simplify(value, bound);
+                } else if (astmgr.equal(sub, source)) {
+                    astmgr.assign(value, destination);
+                    simplify(value, bound);
+                }
+                return;
+            }
+            value.nodes?.forEach(child => simplify(child, bound));
+        };
+        simplify(ast);
     }
     equalWithAssertion(ast1: AST, ast2: AST, assertions: ReplvarMatchTable) {
         if (ast1 === ast2) return true;

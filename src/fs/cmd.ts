@@ -249,7 +249,7 @@ export class FSCmd {
         }
     }
     execCmdBuffer() {
-        const cmdBuffer = this.cmdBuffer;
+        let cmdBuffer = this.cmdBuffer;
         const hintText = this.gui.hintText;
         if (!this.gui.isMobile) this.gui.actionInput.focus();
         if (!cmdBuffer.length) return;
@@ -257,6 +257,10 @@ export class FSCmd {
             e.disabled = true;
         });
         try {
+            if (cmdBuffer.length === 1 && typeof cmdBuffer[0] === "string" && /^del\s+/.test(cmdBuffer[0].trim())) {
+                this.cmdBuffer = cmdBuffer[0].trim().split(/\s+/);
+                cmdBuffer = this.cmdBuffer;
+            }
             switch (cmdBuffer[0]) {
                 case "copy": {
                     hintText.innerText = TR("可复制定理内容，按Esc取消");
@@ -793,23 +797,33 @@ export class FSCmd {
         this.clearCmdBuffer();
     }
     execDel() {
-        if (this.cmdBuffer.length === 1) {
+        const names = [...new Set(this.cmdBuffer.slice(1)
+            .flatMap(value => String(value).trim().split(/\s+/))
+            .filter(value => value))];
+        if (!names.length) {
             this.gui.hintText.innerText = TR("请输入要删除的推理规则名称");
             return;
         }
         try {
-            const pos = this.gui.deductions.indexOf(this.cmdBuffer[1]);
-            if (pos === -1) throw TR("列表中无此规则");
-            const toRemove: string[] = [this.cmdBuffer[1]];
-            for (const d of this.gui.deductions) {
-                if (!this.gui.formalSystem.deductions[d] && !d.startsWith("< f >")) {
-                    toRemove.push(d);
+            for (const name of names) {
+                if (!this.gui.deductions.includes(name)) {
+                    if (names.length === 1) throw TR("列表中无此规则");
+                    throw TR("列表中无此规则：") + name;
                 }
             }
-            if (false === this.gui.formalSystem.removeDeduction(this.cmdBuffer[1])) {
-                this.gui.deductions[pos] = "< wait to remove >";
+            const results = this.gui.formalSystem.removeDeductions(names);
+            const toRemove: string[] = names.slice();
+            for (const d of this.gui.deductions) {
+                if (!this.gui.formalSystem.deductions[d] && !d.startsWith("< f >")) {
+                    if (!toRemove.includes(d)) toRemove.push(d);
+                }
             }
             this.gui.removeDeductionFolderCount(toRemove);
+            for (const [name, removed] of results) {
+                if (removed) continue;
+                const pos = this.gui.deductions.indexOf(name);
+                if (pos !== -1) this.gui.deductions[pos] = "< wait to remove >";
+            }
             this.gui.deductions = this.gui.deductions.filter(d => (this.gui.formalSystem.deductions[d] || d.startsWith("< f >")));
             this.gui.updateDeductionList();
             this.gui.updatePropositionList(true);

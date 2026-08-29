@@ -16,6 +16,8 @@ export class Assist {
     static disableMultipleApply = true;
     static disableDestructConds = true;
     static disableDestructEq = true;
+    /** Names explicitly expanded while constructing this proof. */
+    expandedDefinitions = new Set<string>();
     constructor(h: Core, target: AST | string) {
         core = h;
         core.clearSemanticState();
@@ -910,6 +912,12 @@ export class Assist {
         if (this.goal.length) throw TR("证明尚未完成");
         const term = Core.clone(this.elem);
         const theorem = Core.clone(this.theorem);
+        // Keep validation aligned with explicit expansions made in the proof.
+        // The user-facing theorem remains unchanged; only this validation copy
+        // unfolds aliases such as polymorphic `Join`.
+        for (const name of this.expandedDefinitions) {
+            core.expandDef(theorem, [], name, [0, 1]);
+        }
         // Tactics are checked one goal at a time. A substitution copied from
         // one of those temporary contexts can therefore retain binder ids
         // which do not belong to the completed proof's lexical tree. The
@@ -1498,6 +1506,7 @@ export class Assist {
             // local expansion directly instead.
             core.normalizeExpandedProofGoal(goal.type, goal.context);
         }
+        this.expandedDefinitions.add(n);
         return this;
     }
     private replaceFreeVar(ast: AST, src: string, dst: AST, freevarInDst: Set<string> = Core.getFreeVars(dst)) {

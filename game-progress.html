@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deductrium 游玩进度</title>
+  <link rel="stylesheet" href="game-progress.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Deductrium 游玩进度</h1>
+      <p id="updated">等待游戏状态</p>
+    </div>
+    <div id="connection" class="connection">连接中</div>
+  </header>
+
+  <main>
+    <section id="metrics" class="metrics"></section>
+
+    <section class="primary-layout">
+      <div class="viewport-panel">
+        <div class="section-heading">
+          <h2>实时画面</h2>
+          <span id="location"></span>
+        </div>
+        <div id="game-frame" class="game-frame" aria-label="当前游戏画面">
+          <iframe id="game-mirror" class="game-mirror" src="http://localhost:4174/index.html?game-progress-observer=1" title="实时游戏镜像" tabindex="-1"></iframe>
+          <div id="game-fallback" class="game-fallback">
+            <img id="game-shot-a" class="game-shot active" alt="当前游戏画面">
+            <img id="game-shot-b" class="game-shot" alt="">
+          </div>
+        </div>
+      </div>
+
+      <aside class="side-panel">
+        <section>
+          <h2>当前位置</h2>
+          <pre id="current"></pre>
+        </section>
+        <section>
+          <h2>附近</h2>
+          <div id="nearby" class="nearby-list"></div>
+        </section>
+        <section>
+          <h2>最新解锁</h2>
+          <div id="rewards" class="tag-list"></div>
+        </section>
+      </aside>
+    </section>
+
+    <section class="data-layout">
+      <section class="table-panel">
+        <div class="section-heading"><h2>推理层定理</h2><span id="prop-count"></span></div>
+        <div class="table-scroll"><table><thead><tr><th>#</th><th>定理</th><th>来源</th></tr></thead><tbody id="propositions"></tbody></table></div>
+      </section>
+      <section class="table-panel">
+        <div class="section-heading"><h2>操作日志</h2><span id="action-count"></span></div>
+        <div class="table-scroll"><table><thead><tr><th>时间</th><th>操作</th><th>状态</th></tr></thead><tbody id="activity"></tbody></table></div>
+      </section>
+    </section>
+  </main>
+
+  <script type="module" src="game-progress-viewer.js"></script>
+</body>
+</html>

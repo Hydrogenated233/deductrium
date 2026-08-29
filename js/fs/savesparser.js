@@ -22,6 +22,8 @@ export class SavesParser {
         ];
         if (s.assistant)
             tuple[3] = this.serializeAssistantPayload(s.assistant);
+        if (s.info !== undefined)
+            tuple[4] = s.info;
         return tuple;
     }
     serializeProposition(p) {
@@ -35,6 +37,7 @@ export class SavesParser {
             conditionIdxs: v[1],
             deductionIdx: v[0],
             replaceValues: v[2].map(v => astparser.parse(v)),
+            ...(v[4] !== undefined ? { info: v[4] } : {}),
             ...(assistant ? { assistant } : {})
         };
     }
@@ -48,6 +51,7 @@ export class SavesParser {
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
             ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+            ...(payload.tauto ? { tauto: { checkedTheorem: astparser.stringifyTight(payload.tauto.checkedTheorem) } } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
                 index: premise.index,
@@ -63,6 +67,8 @@ export class SavesParser {
                 && (!Array.isArray(payload.ruleNames) || !payload.ruleNames.every(v => typeof v === "string")))
             || (payload.fastMetaRules !== undefined && typeof payload.fastMetaRules !== "string")
             || (payload.allowMcpt !== undefined && typeof payload.allowMcpt !== "boolean")
+            || (payload.tauto !== undefined && (!payload.tauto
+                || typeof payload.tauto.checkedTheorem !== "string"))
             || !Array.isArray(payload.premises)) {
             throw TR("证明助手延迟步骤存档格式无效");
         }
@@ -87,6 +93,7 @@ export class SavesParser {
                 ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
                 ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
                 ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+                ...(payload.tauto ? { tauto: { checkedTheorem: astparser.parse(payload.tauto.checkedTheorem) } } : {}),
                 premises
             };
         }
@@ -160,6 +167,7 @@ export class SavesParser {
             deductionIdx: e[0].includes(">.a1_") ? this.fixbug260330(e[0]) : e[0].includes(":") ? this.fixbug260616(e[0]) : e[0],
             conditionIdxs: e[1],
             replaceValues: e[2].map(v => astparser.parse(v)),
+            ...(e[4] !== undefined ? { info: e[4] } : {}),
             ...(e[3] ? { assistant: this.deserializeAssistantPayload(e[3]) } : {})
         })), deferredKind ? new Set() : (sd[3] ? new Set(sd[3]) : new Set()));
         if (deferredKind)
@@ -173,6 +181,8 @@ export class SavesParser {
                     && (!Array.isArray(payload.ruleNames) || !payload.ruleNames.every(v => typeof v === "string")))
                 || (payload.fastMetaRules !== undefined && typeof payload.fastMetaRules !== "string")
                 || (payload.allowMcpt !== undefined && typeof payload.allowMcpt !== "boolean")
+                || (payload.tauto !== undefined && (!payload.tauto
+                    || typeof payload.tauto.checkedTheorem !== "string"))
                 || !Array.isArray(payload.premises)) {
                 throw TR("证明助手延迟步骤存档格式无效");
             }
@@ -197,6 +207,7 @@ export class SavesParser {
                     ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
                     ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
                     ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+                    ...(payload.tauto ? { tauto: { checkedTheorem: astparser.parse(payload.tauto.checkedTheorem) } } : {}),
                     premises
                 };
             }

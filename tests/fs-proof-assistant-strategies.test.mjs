@@ -7,6 +7,32 @@ import { initFormalSystem } from "../js/fs/initial.js";
 const parser = new ASTParser();
 const lockedRules = ["mp", "a1", "a2"];
 
+// Saved direct rules have no proof-step array.  They must still support the
+// `>` deduction-theorem prefix (for example `>s<>s`) after a save is loaded.
+{
+    const fs = initFormalSystem(true).fs;
+    fs.fastmetarules = "cvuqe><:#zZQR";
+    fs.addDeduction("s<>s", parser.parse("$0⊢$1"), "loaded save");
+    const assistant = new InferenceProofAssistant(fs, "A>B", {
+        ruleNames: [...lockedRules, "s<>s"]
+    });
+    assistant.apply("apply >s<>s");
+    assert.equal(assistant.snapshot().complete, true);
+    assert.equal(parser.stringifyTight(fs.deductions[">s<>s"]?.conclusion ?? parser.parse("False")), "$0>$1");
+}
+
+// contradiction also searches theorem-list propositions, which remain usable
+// as pN sources without first copying them into the local hypothesis list.
+{
+    const fs = initFormalSystem(false).fs;
+    fs.addHypothese(parser.parse("A"));
+    fs.addHypothese(parser.parse("~A"));
+    const assistant = new InferenceProofAssistant(fs, "C", { ruleNames: ["mp", "a1", "a2", ".m"] });
+    assert.ok(assistant.recommendations().includes("contradiction"));
+    assistant.apply("contradiction");
+    assert.equal(assistant.snapshot().complete, true);
+}
+
 // assumption is a direct local-hypothesis shortcut and does not need a
 // bundled rule.
 {

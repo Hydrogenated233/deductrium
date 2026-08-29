@@ -5,6 +5,8 @@ const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const css = await readFile(new URL("../gui.css", import.meta.url), "utf8");
 const ttGui = await readFile(new URL("../src/tt/gui.ts", import.meta.url), "utf8");
 const fsGui = await readFile(new URL("../src/fs/gui.ts", import.meta.url), "utf8");
+assert.match(ttGui, /const complete = snapshot\.goals\.length === 0/, "type-theory qed status must require a complete proof");
+assert.match(fsGui, /const complete = snapshot\.complete/, "inference qed status must require a complete proof");
 
 for (const id of [
     "tactic-text-toggle",

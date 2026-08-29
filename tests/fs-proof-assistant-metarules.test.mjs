@@ -94,8 +94,45 @@ const baseRules = ["mp", "a1", "a2"];
         fastMetaRules: "c",
         allowMcpt: false
     });
-    assert.equal(missingInverse.recommendations().includes("intro"), false);
-    assert.throws(() => missingInverse.apply("intro h"), /逆演绎元定理|未解锁/);
+    assert.equal(missingInverse.recommendations().includes("intro"), true);
+    missingInverse.apply("intro h");
+    missingInverse.apply("exact h");
+    missingInverse.qed();
+    assert.doesNotThrow(() => missingInverse.fs.expandMacroWithProp(0));
+
+    const manualConditionalization = initFormalSystem(false).fs;
+    manualConditionalization.addHypothese(parser.parse("A>(A>B)"));
+    const manual = new InferenceProofAssistant(manualConditionalization, "A>B", {
+        ruleNames: [...baseRules, "mp"],
+        fastMetaRules: "c",
+        allowMcpt: false
+    });
+    manual.apply("intro h");
+    manual.apply("apply p0");
+    manual.apply("exact h");
+    manual.apply("exact h");
+    const manualResult = manual.qed();
+    manual.fs.expandMacroWithProp(manualResult.existingPropositionCount);
+    assert.equal(
+        manual.fs.deductions[manualResult.deductionName].steps.some(step => step.deductionIdx.includes("<")),
+        false,
+        "intro without inverse deduction must use the conditionalization fallback"
+    );
+
+    const peirce = new InferenceProofAssistant(initFormalSystem(false).fs, "(((A>B)>A)>A)", {
+        fastMetaRules: "c>",
+        allowMcpt: false
+    });
+    for (const command of ["intro", "by_contra", "apply h1", "intro", "contradiction"]) {
+        peirce.apply(command);
+    }
+    const peirceResult = peirce.qed();
+    peirce.fs.expandMacroWithProp(0);
+    assert.equal(
+        peirce.fs.deductions[peirceResult.deductionName].steps.some(step => step.deductionIdx.includes("<")),
+        false,
+        "nested intro under by_contra must not require inverse deduction"
+    );
 
     const universal = new InferenceProofAssistant(initFormalSystem(false).fs, "Vx:(x=x)", {
         ruleNames: [...baseRules, "a6", "a7"],

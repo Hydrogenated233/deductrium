@@ -61,8 +61,9 @@ assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), parser.stringi
     pure.qed();
     pureFs.expandMacroWithProp(0);
     assert.equal(pureFs.propositions.length, 1);
-    assert.equal(pureFs.propositions[0].deferredKind, "cpt");
-    assert.match(pureFs.propositions[0].from?.deductionIdx ?? "", /^__tauto_/);
+    assert.equal(pureFs.propositions[0].deferredKind, "assistant");
+    assert.equal(pureFs.propositions[0].from?.deductionIdx, "__assistant");
+    assert.equal(Object.keys(pureFs.deductions).some(name => name.startsWith("__tauto_")), false);
 }
 
 // Without the MCPT unlock, the same proof falls back to ordinary c-prefixed

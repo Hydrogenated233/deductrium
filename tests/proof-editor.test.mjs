@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { highlightProofScript, scriptThroughCaret } from "../js/proof-editor.js";
+import { computeProofEditorGutters, highlightProofScript, scriptThroughCaret } from "../js/proof-editor.js";
 
 const highlighted = highlightProofScript("intro ha\napply f _\n-- note");
 assert.match(highlighted, /proof-token-command[^>]*>intro<\/span>/);
 assert.match(highlighted, /proof-token-identifier[^>]*>ha<\/span>/);
 assert.match(highlighted, /proof-token-hole[^>]*>_<\/span>/);
 assert.match(highlighted, /proof-token-comment[^>]*>-- note<\/span>/);
+assert.match(highlightProofScript("use 1"), /proof-token-command[^>]*>use<\/span>/,
+    "use should be highlighted as a proof command");
 assert.doesNotMatch(highlightProofScript("<script>"), /<script>/,
     "highlighting must escape user text before inserting HTML");
 
@@ -14,6 +16,26 @@ const textarea = { value: "intro h\napply f\nexact h\n", selectionStart: 12 };
 assert.equal(scriptThroughCaret(textarea), "intro h\napply f");
 textarea.selectionStart = textarea.value.length;
 assert.equal(scriptThroughCaret(textarea), "intro h\napply f\nexact h\n");
+
+// The mirror has no scrollbar of its own.  Reserve the textarea's native
+// scrollbar gutter so wrapped lines and the caret remain aligned on systems
+// with classic (non-overlay) scrollbars.
+assert.deepEqual(computeProofEditorGutters({
+    offsetWidth: 420,
+    clientWidth: 405,
+    offsetHeight: 240,
+    clientHeight: 225,
+    borderHorizontal: 2,
+    borderVertical: 2
+}), { right: 13, bottom: 13 });
+assert.deepEqual(computeProofEditorGutters({
+    offsetWidth: 420,
+    clientWidth: 418,
+    offsetHeight: 240,
+    clientHeight: 238,
+    borderHorizontal: 2,
+    borderVertical: 2
+}), { right: 0, bottom: 0 });
 
 const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const css = await readFile(new URL("../gui.css", import.meta.url), "utf8");
@@ -31,6 +53,10 @@ assert.match(fsHeader[0], /id="fs-proof-close"[^>]*class="[^"]*inhabitat-modify[
 assert.match(css, /\.proof-code-editor\s*\{/);
 assert.match(css, /\.proof-token-command\s*\{/);
 assert.match(css, /\.proof-code-editor textarea\s*\{[\s\S]*color:\s*transparent/);
+const proofEditor = await readFile(new URL("../src/proof-editor.ts", import.meta.url), "utf8");
+assert.match(proofEditor, /computeProofEditorGutters/);
+assert.match(proofEditor, /this\.highlight\.style\.right/);
+assert.match(proofEditor, /new ResizeObserver/);
 
 const ttGui = await readFile(new URL("../src/tt/gui.ts", import.meta.url), "utf8");
 const fsGui = await readFile(new URL("../src/fs/gui.ts", import.meta.url), "utf8");

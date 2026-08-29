@@ -19,7 +19,11 @@ function addRules(fs) {
     const fs = initFormalSystem(false).fs;
     const assistant = new InferenceProofAssistant(fs, "A|~A", { ruleNames: lockedRules });
     assert.equal(assistant.recommendations().some(command => command.startsWith("by_cases")), false);
-    assert.throws(() => assistant.apply("by_cases h : A"), /需要解锁|等价推理规则/);
+    assert.throws(() => assistant.apply("by_cases h : A"), error => {
+        assert.match(error.message, /需要解锁|等价推理规则/);
+        assert.match(error.message, /\.m2.*\$0>\$1,~\$0>\$1⊢\$1/);
+        return true;
+    });
 }
 
 // Each branch gets the same local name in an independent scope and materializes

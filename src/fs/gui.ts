@@ -1127,8 +1127,11 @@ export class FSGui {
             errorDiv.appendChild(line);
         } else if (terminal) {
             const status = document.createElement("div");
-            status.className = "proof-text-status";
-            status.textContent = "qed 已就绪，Ctrl+Enter/执行到光标提交；执行全部运行整页";
+            const complete = snapshot.complete;
+            status.className = complete ? "proof-text-status" : "proof-text-line-error";
+            status.textContent = complete
+                ? "qed 已就绪，Ctrl+Enter/执行到光标提交；执行全部运行整页"
+                : "qed 未就绪：仍有未完成的证明目标";
             errorDiv.appendChild(status);
         }
         state.replaceChildren();

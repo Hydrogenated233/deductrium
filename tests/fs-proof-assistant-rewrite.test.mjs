@@ -129,4 +129,17 @@ function addRewriteRules(fs) {
     assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A,B)=(A,B)");
 }
 
+// Distinct replacement-variable names are fixed surface occurrences for rw.
+// An unknown possible match in a different sibling must not cancel the known
+// $0 occurrence selected by rw p0.
+{
+    const fs = initFormalSystem(false).fs;
+    const ruleNames = addRewriteRules(fs);
+    fs.addHypothese(parser.parse("$0=$1"));
+    fs.addHypothese(parser.parse("$1=$2"));
+    const assistant = new InferenceProofAssistant(fs, "$0=$2", { ruleNames });
+    assistant.apply("rw p0");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "$1=$2");
+}
+
 console.log("inference proof-assistant rewrite regression passed");

@@ -299,8 +299,8 @@
                         <p><code>intro</code> 展开一个蕴含或全称前提；蕴含引入要求条件演绎和逆演绎元定理，全称引入要求条件概括元定理。<code>intros h1 h2</code> 连续展开多个前提，省略名称时自动展开全部前导前提；<code>exact h</code> 用假设、定理或无前件规则完成目标；<code>apply h</code> 应用来源并生成前件目标。演绎元定理与逆演绎元定理解锁后，也可使用 <code>apply &gt;rule</code> 或 <code>apply &lt;rule</code>，但底层规则仍须在当前作用域可用；自动生成的子步骤也会检查其中的 <code>&gt;</code>/<code>&lt;</code> 前缀。</p>
                         <p><code>assumption</code> 自动使用与当前目标相同的局部假设；<code>constructor</code> 构造合取 <code>A&amp;B</code> 或等价 <code>A&lt;&gt;B</code>；<code>left</code>/<code>right</code> 选择析取目标的一侧；<code>symm</code> 交换等式/等价两端；<code>rfl</code> 证明两端定义相同的等式。</p>
                         <p><code>contradiction</code> 使用同时存在的 <code>P</code> 与 <code>~P</code>；<code>by_contra h</code> 加入反设 <code>h:~P</code>；<code>by_cases h : P</code> 建立 <code>h:P</code> 与 <code>h:~P</code> 两个分支；<code>contrapose</code> 把 <code>A&gt;B</code> 改为 <code>~B&gt;~A</code>。</p>
-                        <p><code>have h : P</code> 声明待证明事实，<code>have h := f a b</code> 实例化全称命题。依赖的内置规则未解锁时，系统只会使用当前作用域中结构等价的用户规则。</p>
-                        <p><code>obtain &lt;h1,h2&gt; := h</code> 拆分合取或等价假设；<code>obtain h1 | h2 := h</code> 对析取假设建立两个分支；<code>revert h</code> 把命题假设重新放回蕴含目标。</p>
+                        <p><code>have h : P</code> 声明待证明事实，<code>have h := f a b</code> 实例化局部、页面命题或推理规则；规则带前件时会为 <code>h</code> 建立对应的证明子目标。依赖的内置规则未解锁时，系统只会使用当前作用域中结构等价的用户规则。</p>
+                        <p><code>use x</code> 用具体见证项证明存在量词目标 <code>∃y,P(y)</code>，需要存在量词构造规则；<code>obtain &lt;x,hx&gt; := h</code> 可从存在量词假设中引入见证变量和对应命题，也可拆分合取或等价假设；<code>obtain h1 | h2 := h</code> 对析取假设建立两个分支；<code>revert h</code> 把命题假设重新放回蕴含目标。</p>
                         <p><code>rw h</code>/<code>rw &lt;-h</code> 使用等式改写目标中的全部匹配项；<code>rw [h,g]</code> 依次改写；<code>nth_rw 2 h</code> 只改写指定的第几个匹配项。</p>
                         <p><code>simp</code> 使用局部和页面等式按缩短 AST 的方向反复化简；<code>simp [h]</code> 加入指定等式，<code>simp only [h,g]</code> 只使用列出的等式。</p>
                         <p><code>tauto</code> 在完备性规则已解锁时自动证明纯命题目标；完成所有目标后使用 <code>qed</code>。</p>
@@ -427,6 +427,7 @@
         </div>
     </div>
 </body>
+<script src="game-progress-mirror.js"></script>
 <script type="module" src="js/game.js">
 </script>
 

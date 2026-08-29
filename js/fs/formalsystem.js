@@ -99,11 +99,11 @@ export class FormalSystem {
         this.getAtomDeductionTokens(deductionIdx, res);
         return name === deductionIdx || res.includes(name);
     }
-    removeDeduction(name) {
+    prepareDeductionRemoval(name, removing = new Set()) {
         if (!this.deductions[name])
             throw TR("规则名称 ") + name + TR(" 不存在");
         if (this.getDeductionTokens(name).length > 1)
-            return false; // this is composed, ignore it
+            return null; // this is composed, ignore it
         const composedDs = [];
         for (const [n, d] of Object.entries(this.deductions)) {
             if (!d.steps)
@@ -117,6 +117,8 @@ export class FormalSystem {
             }
             for (const s of d.steps) {
                 if (this.getdependency(name, s.deductionIdx)) {
+                    if (removing.has(n))
+                        continue;
                     throw TR("无法删除规则 ") + name + TR("，请先删除对其有依赖的规则 ") + n;
                 }
             }
@@ -128,6 +130,9 @@ export class FormalSystem {
                 }
             }
         }
+        return composedDs;
+    }
+    commitDeductionRemoval(name, composedDs) {
         if (name.startsWith("dc")) {
             this.consts.delete(name.slice(2));
         }
@@ -141,7 +146,28 @@ export class FormalSystem {
             delete this.deductions[d];
         }
         delete this.deductions[name];
+    }
+    removeDeduction(name) {
+        const composedDs = this.prepareDeductionRemoval(name);
+        if (!composedDs)
+            return false;
+        this.commitDeductionRemoval(name, composedDs);
         return true;
+    }
+    removeDeductions(names) {
+        const uniqueNames = [...new Set(names)];
+        const removing = new Set(uniqueNames);
+        const plans = uniqueNames.map(name => [name, this.prepareDeductionRemoval(name, removing)]);
+        const results = new Map();
+        for (const [name, composedDs] of plans) {
+            if (!composedDs) {
+                results.set(name, false);
+                continue;
+            }
+            this.commitDeductionRemoval(name, composedDs);
+            results.set(name, true);
+        }
+        return results;
     }
     renameDeduction(oldname, newname) {
         if (this.getDeductionTokens(oldname).length > 1 || this.getDeductionTokens(newname).length > 1)
@@ -394,7 +420,12 @@ export class FormalSystem {
         const macro = [];
         const subTempvars = new Set;
         for (let i = hypothesisAmount; i <= propositionIdx; i++) {
-            const subDeduction = this.generateDeduction(this.propositions[i].from.deductionIdx);
+            const step = this.propositions[i].from;
+            // Atomic proof-assistant steps carry their own recipe and do not
+            // need a permanent deduction entry for tempvar collection.
+            if (step.assistant)
+                continue;
+            const subDeduction = this.generateDeduction(step.deductionIdx);
             if (subDeduction?.tempvars) {
                 for (const v of subDeduction.tempvars) {
                     subTempvars.add(v);
@@ -412,6 +443,7 @@ export class FormalSystem {
                     return newv;
                 }),
                 deductionIdx: step.deductionIdx,
+                ...(step.info !== undefined ? { info: step.info } : {}),
                 ...(step.assistant ? { assistant: this.cloneDeferredAssistantPayload(step.assistant) } : {})
             });
         }
@@ -435,6 +467,7 @@ export class FormalSystem {
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
             ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+            ...(payload.tauto ? { tauto: { checkedTheorem: astmgr.clone(payload.tauto.checkedTheorem) } } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
                 index: premise.index,
@@ -703,7 +736,12 @@ export class FormalSystem {
                 throw "null";
             const subRuleName = ruleparser.stringify(tree[1]);
             this.generateDeductionByToken(tree[1], subRuleName);
-            return this.deductions[fn.bind(this)(subRuleName, from)];
+            // A deferred proof-assistant rule may materialize by replacing the
+            // deductions map.  In that case the generated name can be returned
+            // while its lookup observes the refreshed map under the requested
+            // nested name.  Keep both keys as valid recovery paths.
+            const generatedName = fn.bind(this)(subRuleName, from);
+            return this.deductions[generatedName] ?? this.deductions[name];
         }
         if (tree[0] === ":") {
             if (!unlocked.includes(":"))
@@ -998,7 +1036,8 @@ export class FormalSystem {
                 const plainStep = {
                     deductionIdx: step.deductionIdx,
                     conditionIdxs: [...step.conditionIdxs],
-                    replaceValues: step.replaceValues.map(value => astmgr.clone(value))
+                    replaceValues: step.replaceValues.map(value => astmgr.clone(value)),
+                    ...(step.info !== undefined ? { info: step.info } : {})
                 };
                 const result = this.deduct(plainStep, inlineMode, partialTest);
                 if (!partialTest && !inlineMode && Number.isInteger(result)) {
@@ -1086,7 +1125,10 @@ export class FormalSystem {
             throw TR("结论中出现语法错误：") + e;
         }
         try {
-            assert.expand(replacedConclusion, false);
+            if (step.info === "rigid")
+                assert.expandRigid(replacedConclusion, false);
+            else
+                assert.expand(replacedConclusion, false);
         }
         catch (e) {
             // assertion in conclusion failed (can be T or U, only F to fail)
@@ -1135,7 +1177,13 @@ export class FormalSystem {
             let firstPos = this.propositions.length - 1;
             let lastPos;
             try {
-                lastPos = this.deduct({ deductionIdx: substep.deductionIdx, replaceValues, conditionIdxs: replacedConditionIdxs }, netInlineMode === "deep" ? inlineMode : null);
+                lastPos = this.deduct({
+                    deductionIdx: substep.deductionIdx,
+                    replaceValues,
+                    conditionIdxs: replacedConditionIdxs,
+                    ...(substep.info !== undefined ? { info: substep.info } : {}),
+                    ...(substep.assistant ? { assistant: this.cloneDeferredAssistantPayload(substep.assistant) } : {})
+                }, netInlineMode === "deep" ? inlineMode : null);
             }
             catch (e) {
                 // if one substep is wrong, remove newly added substeps from proplist
@@ -1345,7 +1393,9 @@ export class FormalSystem {
             idx ??= d.steps.length - 1 + d.conditions.length;
             const step = d.steps[idx - d.conditions.length];
             const sdidx = step?.deductionIdx;
-            const sd = this.generateDeduction(sdidx);
+            const sd = step?.assistant
+                ? this.withDeferredAssistantStep(step, virtual => virtual)
+                : this.generateDeduction(sdidx);
             const stepReplaceValues = step?.replaceValues?.map(e => {
                 const rv = astmgr.clone(e);
                 astmgr.replaceByMatchTable(rv, SmatchTable);
@@ -1358,7 +1408,8 @@ export class FormalSystem {
                 // mp, axiom or macros
                 offsetTable[idx] = this.deduct({
                     deductionIdx: sdidx, replaceValues: stepReplaceValues,
-                    conditionIdxs: step.conditionIdxs.map(id => generate(false, id >= 0 ? id : idx + id))
+                    conditionIdxs: step.conditionIdxs.map(id => generate(false, id >= 0 ? id : idx + id)),
+                    ...(step.assistant ? { assistant: this.cloneDeferredAssistantPayload(step.assistant) } : {})
                 });
                 return offsetTable[idx];
             }
@@ -1367,8 +1418,11 @@ export class FormalSystem {
                 return offsetCondTable[idx];
             if (!sd)
                 throw TR("无法生成中间步骤推理规则：") + sdidx;
+            const conditionalRule = step?.assistant
+                ? this.withDeferredAssistantStep(step, () => this.metaConditionTheorem(DEFERRED_ASSISTANT_STEP, ""))
+                : this.metaConditionUniversalTheorem(sdidx, "");
             return offsetCondTable[idx] = this.deduct({
-                deductionIdx: this.metaConditionUniversalTheorem(sdidx, ""),
+                deductionIdx: conditionalRule,
                 replaceValues: sd.conditions.length ? stepReplaceValues : [s, ...stepReplaceValues],
                 conditionIdxs: step.conditionIdxs.map(id => generate(true, id >= 0 ? id : idx + id))
             });
@@ -1423,7 +1477,9 @@ export class FormalSystem {
                 return cv;
             });
             const sdidx = step?.deductionIdx;
-            const sd = this.generateDeduction(sdidx);
+            const sd = step?.assistant
+                ? this.withDeferredAssistantStep(step, virtual => virtual)
+                : this.generateDeduction(sdidx);
             if (!condMode) {
                 // avoid repeated deductions on the same prop (here reaching hyps are not possible)
                 if (isFinite(offsetTable[idx]))
@@ -1431,7 +1487,8 @@ export class FormalSystem {
                 // mp, axiom or macros
                 offsetTable[idx] = this.deduct({
                     deductionIdx: sdidx, replaceValues: stepReplaceValues,
-                    conditionIdxs: step.conditionIdxs.map(id => generate(false, id >= 0 ? id : idx + id))
+                    conditionIdxs: step.conditionIdxs.map(id => generate(false, id >= 0 ? id : idx + id)),
+                    ...(step.assistant ? { assistant: this.cloneDeferredAssistantPayload(step.assistant) } : {})
                 });
                 return offsetTable[idx];
             }
@@ -1440,8 +1497,11 @@ export class FormalSystem {
                 return offsetCondTable[idx];
             if (!sd)
                 throw TR("无法生成中间步骤推理规则：") + sdidx;
+            const conditionalRule = step?.assistant
+                ? this.withDeferredAssistantStep(step, () => this.metaConditionTheorem(DEFERRED_ASSISTANT_STEP, "元规则生成*"))
+                : this.metaConditionUniversalTheorem(sdidx, "元规则生成*");
             return offsetCondTable[idx] = this.deduct({
-                deductionIdx: this.metaConditionUniversalTheorem(sdidx, "元规则生成*"),
+                deductionIdx: conditionalRule,
                 replaceValues: sd.conditions.length ? stepReplaceValues : [s, ...stepReplaceValues],
                 conditionIdxs: step.conditionIdxs.map(id => generate(true, id >= 0 ? id : idx + id))
             });
@@ -1715,16 +1775,31 @@ export class FormalSystem {
         }
         const s = this._findNewReplName(idx);
         const fastrule = this.fastmetarules;
-        this.fastmetarules += "<";
+        const inverseDeductionAvailable = this.fastmetarules.includes("<");
+        if (inverseDeductionAvailable)
+            this.fastmetarules += "<";
+        const liftIndependent = (propositionIdx) => {
+            if (inverseDeductionAvailable) {
+                return this.deduct({
+                    deductionIdx: "<a1", conditionIdxs: [propositionIdx], replaceValues: [s]
+                });
+            }
+            const proposition = this.propositions[propositionIdx]?.value;
+            if (!proposition)
+                throw TR("条件演绎缺少独立证明行");
+            const axiom = this.deduct({
+                deductionIdx: "a1", conditionIdxs: [], replaceValues: [proposition, s]
+            });
+            return this.deduct({
+                deductionIdx: "mp", conditionIdxs: [axiom, propositionIdx], replaceValues: []
+            });
+        };
         // axiom, |- A
         if (!d.conditions.length) {
             const oldP = this.propositions;
             try {
                 this.expandMacroWithDefaultValue(idx, null, true);
-                this.deduct({
-                    deductionIdx: "<a1", conditionIdxs: [0],
-                    replaceValues: [s]
-                });
+                liftIndependent(0);
                 const ret = this.addMacro("c" + idx, from);
                 this.propositions = oldP;
                 this.fastmetarules = fastrule;
@@ -1743,7 +1818,13 @@ export class FormalSystem {
             idx ??= d.steps.length - 1 + d.conditions.length;
             const step = d.steps[idx - d.conditions.length];
             const sdidx = step?.deductionIdx;
-            const sd = this.generateDeduction(sdidx);
+            // Assistant-generated substeps use the shared `__assistant` marker
+            // only as a compatibility name.  Reattach the step-local payload
+            // while inspecting or applying the step; it is not a persisted
+            // global rule and therefore cannot be resolved by name alone.
+            const sd = step?.assistant
+                ? this.withDeferredAssistantStep(step, virtual => virtual)
+                : this.generateDeduction(sdidx);
             if (!condMode) {
                 // avoid repeated deductions on the same prop (here reaching hyps are not possible)
                 if (isFinite(offsetTable[idx]))
@@ -1760,10 +1841,7 @@ export class FormalSystem {
                 return offsetCondTable[idx];
             if (!sd.conditions.length) {
                 const p0 = generate(false, idx);
-                return offsetCondTable[idx] = this.deduct({
-                    deductionIdx: "<a1", conditionIdxs: [p0],
-                    replaceValues: [s]
-                });
+                return offsetCondTable[idx] = liftIndependent(p0);
             }
             this.metaConditionTheorem(sdidx, "中间步骤");
             return offsetCondTable[idx] = this.deduct({
@@ -1797,8 +1875,35 @@ export class FormalSystem {
         }
         if (this.deductions[">" + idx])
             return ">" + idx;
-        const d = this.generateDeduction(idx);
+        let d = this.generateDeduction(idx);
         this.materializeDeferredDeduction(idx);
+        d = this.deductions[idx] ?? d;
+        if (!d)
+            throw TR("无法生成条件演绎规则，来源规则不存在：") + idx;
+        // A saved user rule may be a direct conditional axiom with no recorded
+        // proof steps.  It can still be lifted through the deduction theorem:
+        // Γ, A ⊢ B becomes Γ ⊢ A > B.  The recursive implementation below
+        // needs d.steps, so synthesize this atomic shape directly.
+        if (d.conditions.length && (d.deferredKind === "assistant"
+            || !d.steps?.length
+            || d.steps.some(step => !!step.assistant))) {
+            const lastCondition = d.conditions[d.conditions.length - 1];
+            const conclusion = {
+                type: "sym",
+                name: ">",
+                nodes: [astmgr.clone(lastCondition), astmgr.clone(d.conclusion)]
+            };
+            const conditionalRule = {
+                type: "meta",
+                name: "⊢",
+                nodes: [
+                    { type: "fn", name: "#array", nodes: d.conditions
+                            .slice(0, -1).map(condition => astmgr.clone(condition)) },
+                    { type: "fn", name: "#array", nodes: [conclusion] }
+                ]
+            };
+            return this.addDeduction(">" + idx, conditionalRule, from);
+        }
         const fastrule = this.fastmetarules;
         // mp, axiom, |- A : error
         if (!d.conditions.length) {
@@ -1810,6 +1915,23 @@ export class FormalSystem {
         let offsetTable = [];
         let offsetCondTable = [];
         let s; // condAst
+        const inverseDeductionAvailable = this.fastmetarules.includes("<");
+        const liftIndependent = (propositionIdx) => {
+            if (inverseDeductionAvailable) {
+                return this.deduct({
+                    deductionIdx: "<a1", conditionIdxs: [propositionIdx], replaceValues: [s]
+                });
+            }
+            const proposition = this.propositions[propositionIdx]?.value;
+            if (!proposition)
+                throw TR("演绎元定理缺少独立证明行");
+            const axiom = this.deduct({
+                deductionIdx: "a1", conditionIdxs: [], replaceValues: [proposition, s]
+            });
+            return this.deduct({
+                deductionIdx: "mp", conditionIdxs: [axiom, propositionIdx], replaceValues: []
+            });
+        };
         const generate = (condMode, idx) => {
             idx ??= d.steps.length - 1 + d.conditions.length;
             const step = d.steps[idx - d.conditions.length];
@@ -1836,7 +1958,9 @@ export class FormalSystem {
                 }
                 offsetTable[idx] = this.deduct({
                     deductionIdx: sdidx, replaceValues: step.replaceValues,
-                    conditionIdxs: condIdxs
+                    conditionIdxs: condIdxs,
+                    ...(step.info !== undefined ? { info: step.info } : {}),
+                    ...(step.assistant ? { assistant: this.cloneDeferredAssistantPayload(step.assistant) } : {})
                 });
                 return offsetTable[idx];
             }
@@ -1850,20 +1974,20 @@ export class FormalSystem {
             const p0 = generate(false, idx);
             // if deduction steps don't contain hyp B
             if (p0 !== -1) {
-                return offsetCondTable[idx] = this.deduct({
-                    deductionIdx: "<a1", conditionIdxs: [p0],
-                    replaceValues: [s]
-                });
+                return offsetCondTable[idx] = liftIndependent(p0);
             }
-            this.metaConditionTheorem(sdidx, "中间步骤");
+            const conditionalRule = step?.assistant
+                ? this.withDeferredAssistantStep(step, () => this.metaConditionTheorem(DEFERRED_ASSISTANT_STEP, "中间步骤"))
+                : this.metaConditionTheorem(sdidx, "中间步骤");
             return offsetCondTable[idx] = this.deduct({
-                deductionIdx: "c" + sdidx, replaceValues: step.replaceValues,
+                deductionIdx: conditionalRule, replaceValues: step.replaceValues,
                 conditionIdxs: step.conditionIdxs.map(id => generate(true, id >= 0 ? id : idx + id))
             });
         };
         const oldP = this.propositions;
         try {
-            this.fastmetarules += "<";
+            if (inverseDeductionAvailable)
+                this.fastmetarules += "<";
             this.removePropositions();
             d.conditions.forEach((c, id) => {
                 if (id !== d.conditions.length - 1) {

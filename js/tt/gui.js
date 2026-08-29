@@ -864,8 +864,11 @@ export class TTGui {
         }
         else if (terminal) {
             const done = document.createElement("div");
-            done.className = "proof-text-status";
-            done.textContent = "qed 已就绪，Ctrl+Enter/执行到光标提交；执行全部运行整页";
+            const complete = snapshot.goals.length === 0;
+            done.className = complete ? "proof-text-status" : "proof-text-line-error";
+            done.textContent = complete
+                ? "qed 已就绪，Ctrl+Enter/执行到光标提交；执行全部运行整页"
+                : "qed 未就绪：仍有未完成的证明目标";
             errorDiv.appendChild(done);
         }
         state.replaceChildren();

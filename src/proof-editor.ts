@@ -1,6 +1,6 @@
 const PROOF_COMMANDS = new Set([
     "intro", "intros", "destruct", "ex", "case", "exact", "apply", "rw", "rwb", "nth_rw",
-    "simpl", "simp", "rfl", "expand", "fnext", "eq", "sup", "qed", "have", "obtain",
+    "simpl", "simp", "rfl", "expand", "fnext", "eq", "sup", "qed", "have", "use", "obtain",
     "revert", "assumption", "constructor", "left", "right", "symm", "contradiction", "by_contra",
     "by_cases", "contrapose", "tauto"
 ]);
@@ -17,6 +17,28 @@ function escapeHtml(value: string): string {
 
 function tokenSpan(className: string, value: string): string {
     return `<span class="proof-token-${className}">${escapeHtml(value)}</span>`;
+}
+
+export interface ProofEditorBoxMetrics {
+    offsetWidth: number;
+    clientWidth: number;
+    offsetHeight: number;
+    clientHeight: number;
+    borderHorizontal?: number;
+    borderVertical?: number;
+}
+
+/** Return the non-overlay scrollbar gutters occupied by a textarea. */
+export function computeProofEditorGutters(metrics: ProofEditorBoxMetrics): {
+    right: number;
+    bottom: number;
+} {
+    const borderHorizontal = metrics.borderHorizontal ?? 0;
+    const borderVertical = metrics.borderVertical ?? 0;
+    return {
+        right: Math.max(0, metrics.offsetWidth - metrics.clientWidth - borderHorizontal),
+        bottom: Math.max(0, metrics.offsetHeight - metrics.clientHeight - borderVertical)
+    };
 }
 
 /** Lightweight highlighting for the shared proof-command surface syntax. */
@@ -58,11 +80,13 @@ export function highlightProofScript(source: string): string {
 /** Overlay a syntax-highlighted pre over a transparent textarea. */
 export class ProofScriptEditor {
     private readonly highlight: HTMLElement | null;
+    private readonly resizeObserver: ResizeObserver | null;
 
     constructor(readonly textarea: HTMLTextAreaElement) {
         const parent = textarea.parentElement;
         if (!parent) {
             this.highlight = null;
+            this.resizeObserver = null;
             return;
         }
         parent.classList.add("proof-code-editor");
@@ -76,6 +100,10 @@ export class ProofScriptEditor {
         textarea.classList.add("proof-code-input");
         textarea.addEventListener("input", () => this.refresh());
         textarea.addEventListener("scroll", () => this.syncScroll());
+        this.resizeObserver = typeof ResizeObserver === "undefined"
+            ? null
+            : new ResizeObserver(() => this.syncLayout());
+        this.resizeObserver?.observe(textarea);
         this.refresh();
     }
 
@@ -87,8 +115,25 @@ export class ProofScriptEditor {
 
     private syncScroll(): void {
         if (!this.highlight) return;
+        this.syncLayout();
         this.highlight.scrollTop = this.textarea.scrollTop;
         this.highlight.scrollLeft = this.textarea.scrollLeft;
+    }
+
+    private syncLayout(): void {
+        if (!this.highlight || typeof getComputedStyle !== "function") return;
+        const style = getComputedStyle(this.textarea);
+        const parsePixels = (value: string) => Number.parseFloat(value) || 0;
+        const gutters = computeProofEditorGutters({
+            offsetWidth: this.textarea.offsetWidth,
+            clientWidth: this.textarea.clientWidth,
+            offsetHeight: this.textarea.offsetHeight,
+            clientHeight: this.textarea.clientHeight,
+            borderHorizontal: parsePixels(style.borderLeftWidth) + parsePixels(style.borderRightWidth),
+            borderVertical: parsePixels(style.borderTopWidth) + parsePixels(style.borderBottomWidth)
+        });
+        this.highlight.style.right = `${gutters.right}px`;
+        this.highlight.style.bottom = `${gutters.bottom}px`;
     }
 }
 

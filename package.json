@@ -6,6 +6,9 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
+    "game:cli": "npm run build --silent && node scripts/game-cli.mjs",
+    "game:headless": "node scripts/game-playwright.mjs",
+    "game:cdp": "node scripts/game-headless.mjs",
     "prebuild": "node scripts/clean-build.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

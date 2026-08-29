@@ -121,6 +121,11 @@ export class InferenceProofAssistant {
             if (!commands.includes(command))
                 commands.push(command);
         };
+        const deferredCommands = [];
+        const addDeferred = (command) => {
+            if (!deferredCommands.includes(command))
+                deferredCommands.push(command);
+        };
         if (this.canIntroduceTarget(node.target))
             add("intro");
         const addPropositionSource = (name, proposition, allowApply) => {
@@ -145,7 +150,7 @@ export class InferenceProofAssistant {
                     && this.canRewriteTarget(node.target, hypothesis.proposition, simplifyDirection, availableRuleNames)) {
                     add("simp");
                 }
-                add(`revert ${hypothesis.name}`);
+                addDeferred(`revert ${hypothesis.name}`);
                 if (hypothesis.proposition.type === "sym" && ["&", "<>"].includes(hypothesis.proposition.name)
                     && hypothesis.proposition.nodes?.length === 2) {
                     const rules = hypothesis.proposition.name === "&" ? [".&1", ".&2"] : [".<>1", ".<>2"];
@@ -160,6 +165,13 @@ export class InferenceProofAssistant {
                     && this.resolveStrategyRule(".|m", availableRuleNames)) {
                     const names = this.nextHypothesisNames(node, 2);
                     add(`obtain ${names[0]} | ${names[1]} := ${hypothesis.name}`);
+                }
+                if (hypothesis.proposition.type === "sym" && hypothesis.proposition.name === "E"
+                    && hypothesis.proposition.nodes?.length === 2
+                    && this.resolveStrategyRule(".Ee", availableRuleNames)
+                    && this.resolveStrategyRule(".Emp", availableRuleNames)) {
+                    const names = this.nextHypothesisNames(node, 2);
+                    add(`obtain <${names[0]},${names[1]}> := ${hypothesis.name}`);
                 }
             }
         }
@@ -195,6 +207,10 @@ export class InferenceProofAssistant {
             && this.resolveStrategyRule("a3", availableRuleNames)) {
             add("contrapose");
         }
+        if (node.target.type === "sym" && node.target.name === "E" && node.target.nodes?.length === 2
+            && this.resolveStrategyRule(".Erp", availableRuleNames)) {
+            add("use ??");
+        }
         const page = this.fs.inferencePages.page(this.pageId);
         page?.propositions.forEach((proposition, index) => {
             addPropositionSource(`p${index}`, proposition.value, false);
@@ -214,6 +230,13 @@ export class InferenceProofAssistant {
         }
         if (options.canTauto && this.isPurePropositionalSyntax(node.target))
             add("tauto");
+        // `revert` is a context-management escape hatch, not a first-line
+        // proof step.  Keep it as a fallback only when no goal-shaping
+        // recommendation was found, and cap the fallback list so a large
+        // context does not turn the recommendation panel into a wall of
+        // rarely useful commands.
+        if (commands.length === 0)
+            return [...commands, ...deferredCommands.slice(0, 3)];
         return commands;
     }
     apply(command) {
@@ -407,6 +430,7 @@ export class InferenceProofAssistant {
                         deductionIdx: data.step.deductionIdx,
                         conditionIdxs: [...data.step.conditionIdxs],
                         replaceValues: [],
+                        ...(data.step.info !== undefined ? { info: data.step.info } : {}),
                         assistant: marker.deferredPayload
                     },
                     deferredKind: "assistant"
@@ -484,6 +508,7 @@ export class InferenceProofAssistant {
                 deductionIdx: step.deductionIdx,
                 conditionIdxs: [...step.conditionIdxs],
                 replaceValues: step.replaceValues.map(value => astmgr.clone(value)),
+                ...(step.info !== undefined ? { info: step.info } : {}),
                 ...(step.assistant ? { assistant: this.cloneDeferredAssistantPayload(step.assistant) } : {})
             })),
             deferredKind: deduction.deferredKind,
@@ -498,6 +523,9 @@ export class InferenceProofAssistant {
                     ? { fastMetaRules: deduction.deferredPayload.fastMetaRules } : {}),
                 ...(deduction.deferredPayload.allowMcpt !== undefined
                     ? { allowMcpt: deduction.deferredPayload.allowMcpt } : {}),
+                ...(deduction.deferredPayload.tauto ? {
+                    tauto: { checkedTheorem: astmgr.clone(deduction.deferredPayload.tauto.checkedTheorem) }
+                } : {}),
                 premises: deduction.deferredPayload.premises.map(premise => ({
                     pageId: premise.pageId,
                     index: premise.index,
@@ -517,6 +545,7 @@ export class InferenceProofAssistant {
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
             ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+            ...(payload.tauto ? { tauto: { checkedTheorem: astmgr.clone(payload.tauto.checkedTheorem) } } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
                 index: premise.index,
@@ -562,11 +591,19 @@ export class InferenceProofAssistant {
             source: this.cloneSource(node.source),
             appliedProposition: node.appliedProposition ? astmgr.clone(node.appliedProposition) : undefined,
             ruleConditionCount: node.ruleConditionCount,
-            tautoName: node.tautoName,
+            tautoSources: node.tautoSources?.map(source => this.cloneSource(source)),
+            tautoTheorem: node.tautoTheorem ? astmgr.clone(node.tautoTheorem) : undefined,
             haveName: node.haveName,
             haveSource: this.cloneSource(node.haveSource),
             haveArguments: node.haveArguments?.map(value => astmgr.clone(value)),
             haveProposition: node.haveProposition ? astmgr.clone(node.haveProposition) : undefined,
+            obtainSource: this.cloneSource(node.obtainSource),
+            obtainVariableName: node.obtainVariableName,
+            obtainHypothesisName: node.obtainHypothesisName,
+            obtainBinder: node.obtainBinder ? astmgr.clone(node.obtainBinder) : undefined,
+            obtainBody: node.obtainBody ? astmgr.clone(node.obtainBody) : undefined,
+            obtainEmpRule: node.obtainEmpRule,
+            obtainEeRule: node.obtainEeRule,
             revertSource: this.cloneSource(node.revertSource),
             introBindings: this.cloneHypotheses(node.introBindings)
         };
@@ -591,9 +628,12 @@ export class InferenceProofAssistant {
         const visit = (node) => {
             if (!node)
                 return;
-            const source = node.kind === "haveApply" ? node.haveSource : node.source;
-            if ((node.kind === "exact" || node.kind === "apply" || node.kind === "haveApply")
-                && source?.kind === "page") {
+            const sources = node.kind === "tauto"
+                ? (node.tautoSources ?? [])
+                : [node.kind === "haveApply" ? node.haveSource : node.source];
+            for (const source of sources) {
+                if (!source || source.kind !== "page")
+                    continue;
                 const key = `${source.pageId}:${source.index}`;
                 if (!seen.has(key)) {
                     const proposition = this.fs.inferencePages.page(source.pageId)?.propositions[source.index];
@@ -650,10 +690,12 @@ export class InferenceProofAssistant {
                 value: astmgr.clone(premise.value)
             }))
         };
+        const generatedByTauto = this.history.some(command => /^tauto(?:\s|$)/.test(command.trim()));
         const step = {
             deductionIdx: deductionName ?? DEFERRED_ASSISTANT_STEP,
             conditionIdxs: premises.map(premise => premise.index),
             replaceValues: [],
+            ...(generatedByTauto ? { info: "tauto" } : {}),
             assistant: payload
         };
         return {
@@ -667,6 +709,7 @@ export class InferenceProofAssistant {
                     deductionIdx: step.deductionIdx,
                     conditionIdxs: [...step.conditionIdxs],
                     replaceValues: [],
+                    ...(step.info !== undefined ? { info: step.info } : {}),
                     assistant: this.cloneDeferredAssistantPayload(payload)
                 },
                 deferredKind: "assistant"
@@ -694,6 +737,7 @@ export class InferenceProofAssistant {
                         ? index - materialized.basePropositionCount
                         : index),
                     replaceValues: row.from.replaceValues.map(value => astmgr.clone(value)),
+                    ...(row.from.info !== undefined ? { info: row.from.info } : {}),
                     ...(row.from.assistant ? { assistant: this.cloneDeferredAssistantPayload(row.from.assistant) } : {})
                 },
                 ...(row.deferredKind ? { deferredKind: row.deferredKind } : {})
@@ -718,23 +762,6 @@ export class InferenceProofAssistant {
     ensureTautoRules(node) {
         if (!node)
             return;
-        if (node.kind === "tauto" && node.tautoName) {
-            const existing = this.fs.deductions[node.tautoName];
-            if (!existing) {
-                this.fs.metaCompleteTheorem(astmgr.clone(node.target), node.tautoName, "证明助手tauto*");
-            }
-            else {
-                if (existing.deferredKind !== "cpt") {
-                    throw new Error(TR("tauto内部规则名称冲突：") + node.tautoName);
-                }
-                try {
-                    this.assertSameProposition(existing.conclusion, node.target);
-                }
-                catch {
-                    throw new Error(TR("tauto内部规则名称冲突：") + node.tautoName);
-                }
-            }
-        }
         for (const child of node.children)
             this.ensureTautoRules(child);
     }
@@ -749,6 +776,7 @@ export class InferenceProofAssistant {
             case "intros": return this.intros(args);
             case "exact": return this.exact(args);
             case "apply": return this.applyRule(args);
+            case "use": return this.use(args);
             case "have": return this.have(args);
             case "obtain": return this.obtain(args);
             case "revert": return this.revert(args);
@@ -781,18 +809,18 @@ export class InferenceProofAssistant {
         if (target.type !== "sym" || ![">", "V"].includes(target.name))
             return false;
         return target.name === ">"
-            ? this.canUseFastMetaRule("c") && this.canUseFastMetaRule("<")
+            // Implication intro can discharge its temporary hypothesis through
+            // the conditional-deduction path.  The inverse-deduction prefix is
+            // only an optional shorter route selected during materialization.
+            ? this.canUseFastMetaRule("c")
             : this.canUseFastMetaRule("v");
     }
     assertIntroMetaRule(target) {
         if (target.name === ">" && !this.canUseFastMetaRule("c")) {
-            throw new Error(TR("intro需要解锁条件演绎元定理"));
-        }
-        if (target.name === ">" && !this.canUseFastMetaRule("<")) {
-            throw new Error(TR("intro自动生成条件演绎步骤还需要解锁逆演绎元定理"));
+            throw new Error(TR("intro需要解锁条件演绎元定理；请先解锁元定理 c，使 (...Γ⊢Q) 变为 (S>...Γ)⊢(S>Q)"));
         }
         if (target.name === "V" && !this.canUseFastMetaRule("v")) {
-            throw new Error(TR("intro需要解锁条件概括元定理"));
+            throw new Error(TR("intro需要解锁条件概括元定理；请先解锁元定理 v，使 (...Γ⊢Q) 变为 (Vx:...Γ)⊢(Vx:Q)"));
         }
     }
     /** Introduce several leading binders as one atomic assistant command. */
@@ -855,14 +883,16 @@ export class InferenceProofAssistant {
         if (!argument.trim())
             throw new Error(TR("exact需要一个证明来源"));
         const source = this.resolveSource(argument.trim(), node);
+        const normalizedTarget = this.normalizeAssertionSyntax(node.target, true);
         if (source.kind !== "rule") {
-            this.assertSameProposition(this.getSourceProposition(source, node), node.target);
+            const normalizedSource = this.normalizeAssertionSyntax(this.getSourceProposition(source, node), true);
+            this.assertSameProposition(normalizedSource, normalizedTarget);
         }
         else {
             const deduction = this.requireDeduction(source.name);
             if (deduction.conditions.length)
                 throw new Error(TR("该规则包含条件，请使用apply"));
-            const match = this.matchConclusion(deduction, node.target, {
+            const match = this.matchConclusion(deduction, normalizedTarget, {
                 positional: [],
                 named: new Map()
             }, deduction.conclusion, node);
@@ -874,6 +904,7 @@ export class InferenceProofAssistant {
                 return astmgr.clone(value);
             });
         }
+        node.target = normalizedTarget;
         node.kind = "exact";
         node.source = source;
         node.children = [];
@@ -899,14 +930,14 @@ export class InferenceProofAssistant {
         if (node.target.name === "&") {
             const rule = this.resolveStrategyRule(".&");
             if (!rule)
-                throw new Error(TR("constructor需要解锁合取构造规则或提供等价推理规则"));
+                this.missingStrategyRule(".&", "constructor需要解锁合取构造规则或提供等价推理规则");
             this.applyRule(rule.name);
             return;
         }
         if (node.target.name === "<>") {
             const rule = this.resolveStrategyRule(".<>");
             if (!rule)
-                throw new Error(TR("constructor需要解锁等价构造规则或提供等价推理规则"));
+                this.missingStrategyRule(".<>", "constructor需要解锁等价构造规则或提供等价推理规则");
             this.applyRule(rule.name);
             return;
         }
@@ -923,7 +954,7 @@ export class InferenceProofAssistant {
         const ruleName = side === "left" ? ".|1" : ".|2";
         const rule = this.resolveStrategyRule(ruleName);
         if (!rule)
-            throw new Error(TR(side + "需要解锁析取构造规则或提供等价推理规则"));
+            this.missingStrategyRule(ruleName, side + "需要解锁析取构造规则或提供等价推理规则");
         this.applyRule(rule.name);
     }
     /** Swap both sides of an equality or equivalence target. */
@@ -936,7 +967,7 @@ export class InferenceProofAssistant {
         }
         const rule = this.resolveStrategyRule(node.target.name === "=" ? ".=s" : ".<>s");
         if (!rule)
-            throw new Error(TR("symm需要解锁对称规则或提供等价推理规则"));
+            this.missingStrategyRule(node.target.name === "=" ? ".=s" : ".<>s", "symm需要解锁对称规则或提供等价推理规则");
         this.applyRule(rule.name);
     }
     /** Close a reflexive equality through an unlocked/equivalent a7 rule. */
@@ -949,7 +980,7 @@ export class InferenceProofAssistant {
         }
         const rule = this.resolveStrategyRule("a7");
         if (!rule)
-            throw new Error(TR("rfl需要解锁等式自反规则或提供等价推理规则"));
+            this.missingStrategyRule("a7", "rfl需要解锁等式自反规则或提供等价推理规则");
         this.exact(rule.name);
     }
     /** Rewrite every matching target occurrence using one or more equalities. */
@@ -1120,10 +1151,10 @@ export class InferenceProofAssistant {
         const destinationTerm = reverse ? equality.nodes[0] : equality.nodes[1];
         const substitution = this.resolveStrategyRule("a8");
         if (!substitution)
-            throw new Error(TR("rw需要解锁等式替换规则或提供等价推理规则"));
+            this.missingStrategyRule("a8", "rw需要解锁等式替换规则或提供等价推理规则");
         const symmetry = reverse ? undefined : this.resolveStrategyRule(".=s");
         if (!reverse && !symmetry)
-            throw new Error(TR("rw正向改写需要解锁等式对称规则或提供等价推理规则"));
+            this.missingStrategyRule(".=s", "rw正向改写需要解锁等式对称规则或提供等价推理规则");
         const steps = this.planRewrite(node.target, sourceTerm, destinationTerm, nth);
         for (const step of steps) {
             const current = this.requireCurrentNode();
@@ -1197,10 +1228,10 @@ export class InferenceProofAssistant {
         const node = this.requireCurrentNode();
         const pair = this.findContradictionPair(node);
         if (!pair)
-            throw new Error(TR("未找到相反命题假设"));
+            throw new Error(TR("未找到相反命题假设或定理"));
         const rule = this.resolveStrategyRule(".m");
         if (!rule)
-            throw new Error(TR("contradiction需要解锁矛盾规则或提供等价推理规则"));
+            this.missingStrategyRule(".m", "contradiction需要解锁矛盾规则或提供等价推理规则");
         const proposition = parser.stringifyTight(pair.proposition);
         const metavariable = rule.metavariables.get("$0") ?? "$0";
         this.applyRule(`${rule.name} ${metavariable}=${proposition}`);
@@ -1215,7 +1246,7 @@ export class InferenceProofAssistant {
             throw new Error(TR("by_contra名称无效"));
         const rule = this.resolveStrategyRule(".mn");
         if (!rule)
-            throw new Error(TR("by_contra需要解锁反证规则或提供等价推理规则"));
+            this.missingStrategyRule(".mn", "by_contra需要解锁反证规则或提供等价推理规则");
         const originalTarget = parser.stringifyTight(node.target);
         this.applyRule(rule.name);
         const implication = this.requireCurrentNode().target;
@@ -1239,7 +1270,7 @@ export class InferenceProofAssistant {
         this.assertUniqueHypothesis(node, name);
         const rule = this.resolveStrategyRule(".m2");
         if (!rule)
-            throw new Error(TR("by_cases需要解锁分类讨论规则或提供等价推理规则"));
+            this.missingStrategyRule(".m2", "by_cases需要解锁分类讨论规则或提供等价推理规则");
         const propositionMeta = rule.metavariables.get("$0") ?? "$0";
         const targetMeta = rule.metavariables.get("$1") ?? "$1";
         this.applyRule(`${rule.name} ${propositionMeta}=${parser.stringifyTight(proposition)} `
@@ -1260,7 +1291,7 @@ export class InferenceProofAssistant {
         }
         const rule = this.resolveStrategyRule("a3");
         if (!rule)
-            throw new Error(TR("contrapose需要解锁逆否规则或提供等价推理规则"));
+            this.missingStrategyRule("a3", "contrapose需要解锁逆否规则或提供等价推理规则");
         this.applyRule(rule.name);
     }
     applyRule(argument) {
@@ -1287,8 +1318,13 @@ export class InferenceProofAssistant {
             });
             const instantiate = (value) => {
                 const result = this.instantiateRuleAst(value, application.context, matchTable);
-                if (this.astContainsFunction(result, "#rp"))
-                    this.fs.assert.expand(result, false);
+                if (this.astContainsPrivateRuleVariable(result)) {
+                    if (this.astContainsFunction(result, "#rp"))
+                        this.fs.assert.expand(result, false);
+                }
+                else {
+                    astmgr.assign(result, this.normalizeAssertionSyntax(result, true));
+                }
                 this.fs.assert.checkGrammer(result, "p");
                 return result;
             };
@@ -1338,6 +1374,22 @@ export class InferenceProofAssistant {
         node.ruleConditionCount = 0;
         node.children = instantiatedPremises.map(condition => this.makeNode(condition, this.cloneHypotheses(node.hypotheses)));
     }
+    /** Introduce a concrete witness for an existential target through `.Erp`. */
+    use(argument) {
+        const value = argument.trim();
+        if (!value)
+            throw new Error(TR("use需要一个具体见证项"));
+        const node = this.requireCurrentNode();
+        if (node.target.type !== "sym" || node.target.name !== "E" || node.target.nodes?.length !== 2) {
+            throw new Error(TR("use只能作用于存在量词目标"));
+        }
+        const rule = this.resolveStrategyRule(".Erp");
+        if (!rule)
+            this.missingStrategyRule(".Erp", "use需要解锁存在量词构造规则或提供等价推理规则");
+        const witness = this.parsePropositionOrItem(value);
+        const witnessMeta = rule.metavariables.get("$2") ?? "$2";
+        this.applyRule(`${rule.name} ${witnessMeta}=${parser.stringifyTight(witness)}`);
+    }
     have(argument) {
         const node = this.requireCurrentNode();
         const value = argument.trim();
@@ -1356,7 +1408,34 @@ export class InferenceProofAssistant {
                 throw new Error(TR("have := 需要一个局部或页面命题来源"));
             const source = this.resolveSource(terms.shift(), node);
             if (source.kind === "rule") {
-                throw new Error(TR("have := 只支持局部或页面命题，不支持推理规则"));
+                const deduction = this.requireDeduction(source.name);
+                const explicit = this.parseRuleArguments(terms, deduction);
+                const instantiated = this.instantiateRuleForHave(source.name, deduction, explicit, node);
+                const ruleSource = {
+                    kind: "rule",
+                    name: source.name,
+                    replaceValues: instantiated.replaceValues.map(value => astmgr.clone(value))
+                };
+                const subgoal = this.makeNode(instantiated.conclusion, this.cloneHypotheses(node.hypotheses));
+                subgoal.kind = "apply";
+                subgoal.source = ruleSource;
+                subgoal.ruleName = source.name;
+                subgoal.replaceValues = instantiated.replaceValues.map(value => astmgr.clone(value));
+                subgoal.appliedProposition = astmgr.clone(instantiated.conclusion);
+                subgoal.ruleConditionCount = deduction.conditions.length;
+                subgoal.children = instantiated.conditions.map(condition => this.makeNode(condition, this.cloneHypotheses(node.hypotheses)));
+                const continuationHypotheses = this.cloneHypotheses(node.hypotheses);
+                continuationHypotheses.push({
+                    name,
+                    proposition: astmgr.clone(instantiated.conclusion),
+                    kind: "have",
+                    sourceNodeId: subgoal.id
+                });
+                const continuation = this.makeNode(node.target, continuationHypotheses);
+                node.kind = "have";
+                node.haveName = name;
+                node.children = [subgoal, continuation];
+                return;
             }
             const sourceProposition = this.getSourceProposition(source, node);
             const args = terms.map(term => this.parsePropositionOrItem(term));
@@ -1399,9 +1478,10 @@ export class InferenceProofAssistant {
         const proposition = this.parseProposition(parts.join(" "));
         this.createHaveGoal(node, name, proposition);
     }
-    createHaveGoal(node, name, proposition) {
+    createHaveGoal(node, name, proposition, consumedHypothesis) {
         const subgoal = this.makeNode(proposition, this.cloneHypotheses(node.hypotheses));
-        const continuationHypotheses = this.cloneHypotheses(node.hypotheses);
+        const continuationHypotheses = this.cloneHypotheses(node.hypotheses)
+            .filter(hypothesis => hypothesis.name !== consumedHypothesis);
         continuationHypotheses.push({ name, proposition: astmgr.clone(proposition), kind: "have", sourceNodeId: subgoal.id });
         const continuation = this.makeNode(node.target, continuationHypotheses);
         node.kind = "have";
@@ -1434,6 +1514,10 @@ export class InferenceProofAssistant {
         if (proposition.type !== "sym" || proposition.nodes?.length !== 2) {
             throw new Error(TR("obtain来源必须是合取、等价或析取命题"));
         }
+        if (proposition.name === "E") {
+            this.obtainExistential(node, firstName, secondName, source, proposition);
+            return;
+        }
         let facts;
         if (proposition.name === "&") {
             facts = [[proposition.nodes[0], ".&1"], [proposition.nodes[1], ".&2"]];
@@ -1453,12 +1537,60 @@ export class InferenceProofAssistant {
         for (const [index, [fact, canonicalRule]] of facts.entries()) {
             const rule = this.resolveStrategyRule(canonicalRule);
             if (!rule)
-                throw new Error(TR("obtain需要解锁消去规则或提供等价推理规则：") + canonicalRule);
+                this.missingStrategyRule(canonicalRule, "obtain需要解锁消去规则或提供等价推理规则");
             const current = this.requireCurrentNode();
-            this.createHaveGoal(current, index === 0 ? firstName : secondName, astmgr.clone(fact));
+            this.createHaveGoal(current, index === 0 ? firstName : secondName, astmgr.clone(fact), source.kind === "hypothesis" && index === facts.length - 1 ? source.name : undefined);
             this.applyRule(rule.name);
             this.exact(sourceText);
         }
+    }
+    /** Introduce a witness variable and its proposition from an existential source. */
+    obtainExistential(node, variableName, hypothesisName, source, proposition) {
+        if (source.kind === "rule")
+            throw new Error(TR("obtain只支持假设或页面命题来源"));
+        const empRule = this.resolveStrategyRule(".Emp");
+        if (!empRule)
+            this.missingStrategyRule(".Emp", "obtain存在量词需要解锁存在量词消去规则或提供等价推理规则");
+        const eeRule = this.resolveStrategyRule(".Ee");
+        if (!eeRule)
+            this.missingStrategyRule(".Ee", "obtain存在量词需要解锁存在命题消去规则或提供等价推理规则");
+        const binder = astmgr.clone(proposition.nodes[0]);
+        const binderName = this.fs.assert.getVarName(binder);
+        if (!binderName)
+            throw new Error(TR("obtain来源的存在量词变量无效"));
+        if (!/^[^\s,]+$/.test(variableName) || !/^[^\s,]+$/.test(hypothesisName)) {
+            throw new Error(TR("obtain生成的假设名称无效"));
+        }
+        const body = astmgr.clone(proposition.nodes[1]);
+        const witnessProposition = this.substituteBound(body, binderName, variableName);
+        this.fs.assert.checkGrammer(witnessProposition, "p");
+        const variable = {
+            name: variableName,
+            binder,
+            kind: "variable"
+        };
+        const witnessHypothesis = {
+            name: hypothesisName,
+            proposition: astmgr.clone(witnessProposition),
+            kind: "intro"
+        };
+        const continuationHypotheses = this.cloneHypotheses(node.hypotheses)
+            .filter(hypothesis => source.kind !== "hypothesis" || hypothesis.name !== source.name);
+        continuationHypotheses.push(variable, witnessHypothesis);
+        const continuation = this.makeNode(node.target, continuationHypotheses);
+        // The child proof is generalized back to
+        // `Vx:(P x > target)` during materialization, then `.Emp`/`.Ee`
+        // consume the original existential source.
+        continuation.introBindings.push(variable, witnessHypothesis);
+        node.kind = "obtainExists";
+        node.obtainSource = this.cloneSource(source);
+        node.obtainVariableName = variableName;
+        node.obtainHypothesisName = hypothesisName;
+        node.obtainBinder = binder;
+        node.obtainBody = body;
+        node.obtainEmpRule = empRule.name;
+        node.obtainEeRule = eeRule.name;
+        node.children = [continuation];
     }
     obtainDisjunction(firstName, secondName, sourceText) {
         if (!sourceText)
@@ -1475,7 +1607,7 @@ export class InferenceProofAssistant {
         }
         const rule = this.resolveStrategyRule(".|m");
         if (!rule)
-            throw new Error(TR("obtain需要解锁析取消去规则或提供等价推理规则：.|m"));
+            this.missingStrategyRule(".|m", "obtain需要解锁析取消去规则或提供等价推理规则");
         const leftMeta = rule.metavariables.get("$0") ?? "$0";
         const rightMeta = rule.metavariables.get("$1") ?? "$1";
         const resultMeta = rule.metavariables.get("$2") ?? "$2";
@@ -1485,6 +1617,11 @@ export class InferenceProofAssistant {
         this.applyRule(`${rule.name} ${leftMeta}=${left} ${rightMeta}=${right} ${resultMeta}=${result}`);
         if (node.kind !== "apply" || node.children.length !== 3 || node.ruleConditionCount !== 2) {
             throw new Error(TR("析取消去规则没有生成预期的两个分支和来源前提"));
+        }
+        if (source.kind === "hypothesis") {
+            for (const child of node.children.slice(0, 2)) {
+                child.hypotheses = child.hypotheses.filter(hypothesis => hypothesis.name !== source.name);
+            }
         }
         this.introNode(node.children[0], firstName);
         this.introNode(node.children[1], secondName);
@@ -1561,45 +1698,143 @@ export class InferenceProofAssistant {
         if (!this.allowMcpt)
             throw new Error(TR("尚未解锁MCPT，不能使用tauto"));
         const node = this.requireCurrentNode();
+        // Prefer a closed tautology.  If the target is only tautological under
+        // theorem-list propositions, check p0 > (p1 > target) and remember the
+        // selected pN rows so materialization can apply inverse deduction later.
+        let checkedTheorem = astmgr.clone(node.target);
+        let tautoSources = [];
+        if (this.isPurePropositionalSyntax(node.target)) {
+            let targetError;
+            try {
+                new Proof(this.fs).assertTautology(node.target);
+            }
+            catch (error) {
+                targetError = error;
+                const candidate = this.findTautoPagePremises(node);
+                if (!candidate)
+                    throw targetError;
+                if (!this.canUseFastMetaRule("<")) {
+                    throw new Error(TR("tauto使用定理表前提需要解锁逆演绎元定理"));
+                }
+                checkedTheorem = candidate.theorem;
+                tautoSources = candidate.sources;
+                new Proof(this.fs).assertTautology(checkedTheorem);
+            }
+        }
+        else {
+            new Proof(this.fs).assertTautology(node.target);
+        }
         // Keep MCPT's exhaustive check as the authority.  Do not add a
         // generated rule here: applying a tactic is a draft-only operation and
         // must not mutate the shared FormalSystem.  The deferred rule is
         // created transactionally by commit() when the result is accepted.
-        const name = this.nextTautoName(node.target);
-        new Proof(this.fs).assertTautology(node.target);
         node.kind = "tauto";
-        node.tautoName = name;
+        node.tautoSources = tautoSources.map(source => this.cloneSource(source));
+        node.tautoTheorem = checkedTheorem;
         node.children = [];
     }
-    nextTautoName(target) {
-        // Replays of a persisted assistant proof should bind to the same
-        // deferred CPT helper instead of allocating a fresh name on every
-        // expansion.
-        if (target) {
-            for (const [name, deduction] of Object.entries(this.fs.deductions)) {
-                if (!name.startsWith("__tauto_") || deduction.deferredKind !== "cpt")
-                    continue;
-                try {
-                    this.assertSameProposition(deduction.conclusion, target);
-                    return name;
-                }
-                catch { }
-            }
+    findTautoPagePremises(node) {
+        if (!this.isPurePropositionalSyntax(node.target))
+            return undefined;
+        const page = this.fs.inferencePages.page(this.pageId);
+        if (!page)
+            return undefined;
+        const candidates = [];
+        const seen = new Set();
+        for (let index = 0; index < page.propositions.length && candidates.length < 32; index++) {
+            const proposition = page.propositions[index]?.value;
+            if (!proposition || !this.isPurePropositionalSyntax(proposition))
+                continue;
+            if (this.fixedPropositionMayMatch(proposition, node.target))
+                continue;
+            const key = parser.stringifyTight(proposition);
+            if (seen.has(key))
+                continue;
+            seen.add(key);
+            candidates.push({
+                source: { kind: "page", pageId: page.id, index },
+                proposition: astmgr.clone(proposition)
+            });
         }
-        let index = 1;
-        // The helper is not added to the GUI's deduction list.  It remains in
-        // the formal-system map so a page row can be validated after reload;
-        // its deferred CPT payload contains no enumeration steps.
-        while (this.fs.deductions[`__tauto_${index}`] || this.hasTautoName(this.root, `__tauto_${index}`))
-            index++;
-        return `__tauto_${index}`;
+        const checked = new Set();
+        let attempts = 0;
+        const maxAttempts = 2048;
+        const tryCombination = (indices) => {
+            if (attempts++ >= maxAttempts)
+                return undefined;
+            const theorem = this.buildTautoImplication(indices.map(index => candidates[index].proposition), node.target);
+            const key = parser.stringifyTight(theorem);
+            if (checked.has(key))
+                return undefined;
+            checked.add(key);
+            try {
+                new Proof(this.fs).assertTautology(theorem);
+                return {
+                    sources: indices.map(index => this.cloneSource(candidates[index].source)),
+                    theorem
+                };
+            }
+            catch {
+                return undefined;
+            }
+        };
+        const search = (size, start, indices) => {
+            if (indices.length === size)
+                return tryCombination(indices);
+            for (let index = start; index <= candidates.length - (size - indices.length); index++) {
+                const found = search(size, index + 1, [...indices, index]);
+                if (found)
+                    return found;
+                if (attempts >= maxAttempts)
+                    return undefined;
+            }
+            return undefined;
+        };
+        for (let size = 1; size <= Math.min(4, candidates.length); size++) {
+            const found = search(size, 0, []);
+            if (found)
+                return found;
+            if (attempts >= maxAttempts)
+                break;
+        }
+        return undefined;
     }
-    hasTautoName(node, name) {
-        if (!node)
-            return false;
-        if (node.tautoName === name)
-            return true;
-        return node.children.some(child => this.hasTautoName(child, name));
+    buildTautoImplication(premises, target) {
+        let theorem = astmgr.clone(target);
+        for (let index = premises.length - 1; index >= 0; index--) {
+            theorem = {
+                type: "sym",
+                name: ">",
+                nodes: [astmgr.clone(premises[index]), theorem]
+            };
+        }
+        return theorem;
+    }
+    createAtomicTautoPayload(target, checkedTheorem, sources) {
+        const premises = sources.map(source => {
+            if (source.kind !== "page")
+                throw new Error(TR("tauto前提必须来自定理表"));
+            const proposition = this.fs.inferencePages.page(source.pageId)?.propositions[source.index];
+            if (!proposition)
+                throw new Error(TR("证明助手引用了不存在的推理表定理"));
+            return {
+                pageId: source.pageId,
+                index: source.index,
+                value: astmgr.clone(proposition.value)
+            };
+        });
+        return {
+            kind: "assistant",
+            version: 1,
+            pageId: this.pageId,
+            theorem: astmgr.clone(target),
+            history: ["tauto"],
+            ...(this.availableRuleNames ? { ruleNames: [...this.availableRuleNames] } : {}),
+            ...(this.availableFastMetaRules !== undefined ? { fastMetaRules: this.availableFastMetaRules } : {}),
+            allowMcpt: this.allowMcpt,
+            tauto: { checkedTheorem: astmgr.clone(checkedTheorem) },
+            premises
+        };
     }
     fastMetaRuleLabel(prefix) {
         return {
@@ -1765,8 +2000,13 @@ export class InferenceProofAssistant {
                     this.assertRuleMatchComplete(match, candidateName);
                     const instantiate = (value) => {
                         const result = this.instantiateRuleAst(value, match.context, match.matchTable);
-                        if (this.astContainsFunction(result, "#rp"))
-                            this.fs.assert.expand(result, false);
+                        if (this.astContainsPrivateRuleVariable(result)) {
+                            if (this.astContainsFunction(result, "#rp"))
+                                this.fs.assert.expand(result, false);
+                        }
+                        else {
+                            astmgr.assign(result, this.normalizeAssertionSyntax(result, true));
+                        }
                         this.fs.assert.checkGrammer(result, "p");
                         return result;
                     };
@@ -2066,6 +2306,21 @@ export class InferenceProofAssistant {
                     conditions: [parser.parse("$0>$2"), parser.parse("$1>$2")],
                     conclusion: parser.parse("($0|$1)>$2")
                 };
+            case ".Erp":
+                return {
+                    conditions: [],
+                    conclusion: parser.parse("#rp($1,$0,$2)>(E$0:$1)")
+                };
+            case ".Emp":
+                return {
+                    conditions: [parser.parse("(V$x:($1>$2))"), parser.parse("(E$x:$1)")],
+                    conclusion: parser.parse("(E$x:$2)")
+                };
+            case ".Ee":
+                return {
+                    conditions: [parser.parse("(E$0:#nf($1,$0))")],
+                    conclusion: parser.parse("#nf($1,$0)")
+                };
             case ".mn":
                 return { conditions: [], conclusion: parser.parse("(~$0>$0)>$0") };
             case ".m2":
@@ -2079,6 +2334,18 @@ export class InferenceProofAssistant {
             default:
                 return undefined;
         }
+    }
+    /** Render the canonical prerequisite rule a strategy needs. */
+    strategyRuleHint(name) {
+        const shape = this.strategyRuleShape(name);
+        if (!shape)
+            return name;
+        const conditions = shape.conditions.map(condition => parser.stringifyTight(condition)).join(",");
+        const conclusion = parser.stringifyTight(shape.conclusion);
+        return `${name}：${conditions ? conditions + "⊢" : "⊢"}${conclusion}`;
+    }
+    missingStrategyRule(name, message) {
+        throw new Error(`${TR(message)}；需要先证明或提供等价推理规则：${this.strategyRuleHint(name)}`);
     }
     matchStrategyRuleSchema(deduction, shape) {
         if (deduction.conditions.length !== shape.conditions.length)
@@ -2122,7 +2389,22 @@ export class InferenceProofAssistant {
         return undefined;
     }
     findContradictionPair(node) {
-        const hypotheses = node.hypotheses.filter(hypothesis => !!hypothesis.proposition && this.isHypothesisAvailable(hypothesis));
+        const hypotheses = node.hypotheses
+            .filter(hypothesis => !!hypothesis.proposition && this.isHypothesisAvailable(hypothesis))
+            .map(hypothesis => ({
+            name: hypothesis.name,
+            proposition: hypothesis.proposition
+        }));
+        // Page propositions are valid proof sources but are not copied into the
+        // local hypothesis list. Include them for contradiction search while
+        // preserving local-name precedence if a user chose a colliding name.
+        const localNames = new Set(hypotheses.map(hypothesis => hypothesis.name));
+        this.fs.inferencePages.page(this.pageId)?.propositions.forEach((proposition, index) => {
+            const name = `p${index}`;
+            if (localNames.has(name))
+                return;
+            hypotheses.push({ name, proposition: proposition.value });
+        });
         for (const negative of hypotheses) {
             const proposition = this.negatedProposition(negative.proposition);
             if (!proposition)
@@ -2213,8 +2495,8 @@ export class InferenceProofAssistant {
         try {
             const pattern = this.renameRuleMetavariables(conclusion, context.internalByOriginal);
             astmgr.replaceByMatchTable(pattern, matchTable);
-            if (this.astContainsFunction(pattern, "#rp") && !this.astContainsPrivateRuleVariable(pattern)) {
-                this.fs.assert.expand(pattern, false);
+            if (!this.astContainsPrivateRuleVariable(pattern)) {
+                astmgr.assign(pattern, this.normalizeAssertionSyntax(pattern, true));
             }
             this.fs.assert.match(astmgr.clone(target), pattern, /^\$/, false, matchTable, replacedTypes, null, []);
         }
@@ -2257,6 +2539,58 @@ export class InferenceProofAssistant {
         if (positional.length > deduction.replaceNames.length)
             throw new Error(TR("apply参数过多"));
         return { positional, named };
+    }
+    /** Instantiate a rule for Lean-style `have h := rule args...`. */
+    instantiateRuleForHave(sourceName, deduction, explicit, node) {
+        const context = this.createRuleMetavariableContext(deduction, deduction.conclusion, explicit, node);
+        const matchTable = {};
+        const replacedTypes = {};
+        const assign = (original, value) => {
+            const internal = context.internalByOriginal.get(original);
+            if (!internal)
+                throw new Error(TR("规则中不存在元变量") + original);
+            if (matchTable[internal] && !astmgr.equal(matchTable[internal], value)) {
+                throw new Error(TR("元变量映射重复：") + original);
+            }
+            this.fs.assert.getReplVarsType(value, replacedTypes, context.replaceTypes[internal]);
+            matchTable[internal] = astmgr.clone(value);
+        };
+        for (let index = 0; index < explicit.positional.length; index++) {
+            const original = deduction.replaceNames[index];
+            if (!original)
+                throw new Error(TR("have参数过多"));
+            assign(original, explicit.positional[index]);
+        }
+        for (const [original, value] of explicit.named.entries())
+            assign(original, value);
+        // Conditions are the only source of inference when the rule is not
+        // being matched against the current goal.  Reuse the normal candidate
+        // search so `have h := mp` can still infer its variables from local
+        // hypotheses/pages when there is a unique match.
+        this.inferRuleMetavariables(context, matchTable, context.conditions, node);
+        const unresolved = context.names.filter(name => !matchTable[context.internalByOriginal.get(name)]);
+        if (unresolved.length) {
+            this.assertRuleMatchComplete({ context, matchTable, unresolved }, sourceName);
+        }
+        const instantiate = (value) => {
+            const result = this.instantiateRuleAst(value, context, matchTable);
+            if (this.astContainsPrivateRuleVariable(result)) {
+                throw new Error(TR("have来源规则仍包含未解析的元变量"));
+            }
+            astmgr.assign(result, this.normalizeAssertionSyntax(result, true));
+            this.fs.assert.checkGrammer(result, "p");
+            return result;
+        };
+        return {
+            conditions: deduction.conditions.map(instantiate),
+            conclusion: instantiate(deduction.conclusion),
+            replaceValues: deduction.replaceNames.map(name => {
+                const value = matchTable[context.internalByOriginal.get(name)];
+                if (!value)
+                    throw new Error(TR("无法从have来源规则推断参数") + name);
+                return astmgr.clone(value);
+            })
+        };
     }
     astContainsFunction(ast, name) {
         if (ast.type === "fn" && ast.name === name)
@@ -2427,18 +2761,116 @@ export class InferenceProofAssistant {
             return astmgr.clone(parser.parse(value));
         }
     }
+    normalizeAssertionSyntax(ast, rigid = false) {
+        const normalized = astmgr.clone(ast);
+        for (let round = 0; round < 16; round++) {
+            const before = astmgr.clone(normalized);
+            try {
+                this.fs.assert.expand(normalized, false);
+            }
+            catch {
+                break;
+            }
+            if (rigid)
+                this.simplifyRigidAssertions(normalized);
+            if (astmgr.equal(before, normalized))
+                break;
+        }
+        return normalized;
+    }
+    /** Simplify assertion wrappers once their `$` names are fixed syntax. */
+    simplifyRigidAssertions(ast, bound = new Set()) {
+        const quant = this.fs.assert.getQuantParams(ast);
+        if (quant) {
+            const binderName = this.fs.assert.getVarName(quant[0]);
+            const nextBound = binderName ? new Set([...bound, binderName]) : bound;
+            this.simplifyRigidAssertions(quant[1], nextBound);
+            return;
+        }
+        let nf = false;
+        try {
+            nf = this.fs.assert.getNfParams(ast);
+        }
+        catch {
+            nf = false;
+        }
+        if (nf) {
+            const [sub, quants, vars] = nf;
+            const nextBound = new Set(bound);
+            for (const quantifier of quants) {
+                const name = this.fs.assert.getVarName(quantifier);
+                if (name)
+                    nextBound.add(name);
+            }
+            this.simplifyRigidAssertions(sub, nextBound);
+            if ([...vars].every(name => !this.containsRigidFreeName(sub, name, nextBound))) {
+                astmgr.assign(ast, sub);
+                this.simplifyRigidAssertions(ast, bound);
+            }
+            return;
+        }
+        let rp = false;
+        try {
+            rp = this.fs.assert.getRpParams(ast);
+        }
+        catch {
+            rp = false;
+        }
+        if (rp) {
+            const [sub, source, destination] = rp;
+            this.simplifyRigidAssertions(sub, bound);
+            if (source.type === "replvar" && !this.containsRigidFreeName(sub, source.name, bound)) {
+                astmgr.assign(ast, sub);
+                this.simplifyRigidAssertions(ast, bound);
+            }
+            else if (astmgr.equal(sub, source)) {
+                astmgr.assign(ast, destination);
+                this.simplifyRigidAssertions(ast, bound);
+            }
+            return;
+        }
+        ast.nodes?.forEach(child => this.simplifyRigidAssertions(child, bound));
+    }
+    containsRigidFreeName(ast, name, bound = new Set) {
+        if (ast.type === "replvar")
+            return ast.name === name && !bound.has(name);
+        const quant = this.fs.assert.getQuantParams(ast);
+        if (quant) {
+            const binderName = this.fs.assert.getVarName(quant[0]);
+            const nextBound = binderName ? new Set([...bound, binderName]) : bound;
+            return this.containsRigidFreeName(quant[1], name, nextBound);
+        }
+        let nf = false;
+        try {
+            nf = this.fs.assert.getNfParams(ast);
+        }
+        catch {
+            nf = false;
+        }
+        if (nf)
+            return this.containsRigidFreeName(nf[0], name, bound);
+        let rp = false;
+        try {
+            rp = this.fs.assert.getRpParams(ast);
+        }
+        catch {
+            rp = false;
+        }
+        if (rp)
+            return this.containsRigidFreeName(rp[0], name, bound);
+        return !!ast.nodes?.some(child => this.containsRigidFreeName(child, name, bound));
+    }
     assertSameProposition(a, b) {
-        const left = astmgr.clone(a);
-        const right = astmgr.clone(b);
-        try {
-            this.fs.assert.expand(left, false);
-        }
-        catch { }
-        try {
-            this.fs.assert.expand(right, false);
-        }
-        catch { }
+        const left = this.normalizeAssertionSyntax(a);
+        const right = this.normalizeAssertionSyntax(b);
         if (astmgr.equal(left, right))
+            return;
+        // Assertion wrappers such as `#nf` are semantically transparent once
+        // both sides are being compared as propositions.  `AssertionSystem.match`
+        // is intentionally directional for inference, so use its symmetric
+        // equality helper before falling back to matching.
+        if (this.fs.assert.equalWithAssertion(left, right, {})
+            && this.fs.assert.equalWithAssertion(right, left, {}))
             return;
         try {
             const noMetavariables = /(?!)/;
@@ -2681,24 +3113,19 @@ export class InferenceProofAssistant {
         let materializationSucceeded = false;
         try {
             // A closed pure-propositional theorem is already within MCPT's exact
-            // domain. Keep it as one lazy node instead of rebuilding a Hilbert
-            // proof from a1/a2/a3/mp during assistant expansion.
+            // domain. Keep it as one shared atomic assistant step instead of
+            // allocating a fresh __tauto_N deduction for every theorem.
             if (this.allowMcpt && this.isPurePropositionalSyntax(this.theorem)) {
-                const name = this.nextTautoName(this.theorem);
                 try {
-                    if (!this.fs.deductions[name]) {
-                        this.fs.metaCompleteTheorem(astmgr.clone(this.theorem), name, "证明助手自动MCPT*");
-                    }
+                    new Proof(this.fs).assertTautology(this.theorem);
                     const step = {
-                        deductionIdx: name,
+                        deductionIdx: DEFERRED_ASSISTANT_STEP,
                         conditionIdxs: [],
-                        replaceValues: []
+                        replaceValues: [],
+                        info: "tauto",
+                        assistant: this.createAtomicTautoPayload(this.theorem, this.theorem, [])
                     };
-                    propositions.push({
-                        value: astmgr.clone(this.theorem),
-                        from: step,
-                        deferredKind: "cpt"
-                    });
+                    propositions.push({ value: astmgr.clone(this.theorem), from: step, deferredKind: "assistant" });
                     steps.push(step);
                     materializationSucceeded = true;
                     return {
@@ -2714,9 +3141,14 @@ export class InferenceProofAssistant {
                 }
             }
             const collectExternalPremises = (node, result = new Map()) => {
-                const source = node.kind === "haveApply" ? node.haveSource : node.source;
-                if ((node.kind === "exact" || node.kind === "apply" || node.kind === "haveApply")
-                    && source?.kind === "page") {
+                const sources = node.kind === "tauto"
+                    ? (node.tautoSources ?? [])
+                    : [node.kind === "haveApply" ? node.haveSource
+                            : node.kind === "obtainExists" ? node.obtainSource
+                                : node.source];
+                for (const source of sources) {
+                    if (!source || source.kind !== "page")
+                        continue;
                     const sourcePage = this.fs.inferencePages.page(source.pageId);
                     const proposition = sourcePage?.propositions[source.index];
                     if (proposition)
@@ -2768,7 +3200,8 @@ export class InferenceProofAssistant {
                     from: {
                         deductionIdx: step.deductionIdx,
                         conditionIdxs: [...step.conditionIdxs],
-                        replaceValues: step.replaceValues.map(item => astmgr.clone(item))
+                        replaceValues: step.replaceValues.map(item => astmgr.clone(item)),
+                        ...(step.info !== undefined ? { info: step.info } : {})
                     },
                     ...(deferredKind ? { deferredKind } : {})
                 });
@@ -2880,7 +3313,11 @@ export class InferenceProofAssistant {
                     if (cached)
                         return cached;
                     const row = propositionAt(absoluteIndex);
-                    const desired = quantify(row.value);
+                    // Once this binder is fixed, normalize the newly quantified
+                    // proposition before matching generated `v*` rules.  This
+                    // removes capture-safe #rp wrappers introduced by a4 and
+                    // keeps equivalent conditions in the same surface shape.
+                    const desired = this.normalizeAssertionSyntax(quantify(row.value), true);
                     if (!row.from) {
                         if (this.containsFreeName(row.value, binding.name)) {
                             throw new Error(TR("全称变量出现在未解除的外部前提中：") + binding.name);
@@ -2928,7 +3365,8 @@ export class InferenceProofAssistant {
                         const quantified = appendDerived(desired, {
                             deductionIdx: selection.name,
                             conditionIdxs: conditions.map(condition => absolute(condition.index)),
-                            replaceValues: selection.replaceValues
+                            replaceValues: selection.replaceValues,
+                            info: "rigid"
                         });
                         transformed.set(absoluteIndex, quantified);
                         return quantified;
@@ -3025,6 +3463,61 @@ export class InferenceProofAssistant {
                     }
                     return result;
                 };
+                if (node.kind === "obtainExists") {
+                    if (node.children.length !== 1 || !node.obtainSource
+                        || !node.obtainVariableName || !node.obtainHypothesisName
+                        || !node.obtainBinder || !node.obtainBody) {
+                        throw new Error(TR("obtain存在量词证明节点结构无效"));
+                    }
+                    if (node.obtainSource.kind === "rule") {
+                        throw new Error(TR("obtain证明来源不能是推理规则"));
+                    }
+                    const sourceIndex = sourceAbsoluteRow(node.obtainSource, hypothesisRows);
+                    const sourceValue = propositionAt(sourceIndex).value;
+                    if (sourceValue.type !== "sym" || sourceValue.name !== "E"
+                        || sourceValue.nodes?.length !== 2) {
+                        throw new Error(TR("obtain存在量词来源已改变"));
+                    }
+                    const binderName = this.fs.assert.getVarName(node.obtainBinder);
+                    const sourceBinderName = this.fs.assert.getVarName(sourceValue.nodes[0]);
+                    if (!binderName || !sourceBinderName
+                        || !astmgr.equal(node.obtainBody, sourceValue.nodes[1])
+                        || binderName !== sourceBinderName) {
+                        throw new Error(TR("obtain存在量词来源与证明节点不匹配"));
+                    }
+                    if (this.containsFreeName(node.target, node.obtainVariableName)) {
+                        throw new Error(TR("obtain生成的见证变量不能出现在最终目标中"));
+                    }
+                    // The child proof introduces x and hx.  Its own finish pass
+                    // turns those local assumptions back into Vx:(P x > target).
+                    const continuation = emit(node.children[0], hypothesisRows);
+                    const expectedUniversal = {
+                        type: "sym",
+                        name: "V",
+                        nodes: [astmgr.clone(node.obtainBinder), {
+                                type: "sym",
+                                name: ">",
+                                nodes: [astmgr.clone(node.obtainBody), astmgr.clone(node.target)]
+                            }]
+                    };
+                    this.assertSameProposition(continuation.proposition, expectedUniversal);
+                    const existentialTarget = {
+                        type: "sym",
+                        name: "E",
+                        nodes: [astmgr.clone(node.obtainBinder), astmgr.clone(node.target)]
+                    };
+                    const empResult = appendDerived(existentialTarget, {
+                        deductionIdx: node.obtainEmpRule ?? ".Emp",
+                        conditionIdxs: [absolute(continuation.index), sourceIndex],
+                        replaceValues: []
+                    });
+                    const result = appendDerived(node.target, {
+                        deductionIdx: node.obtainEeRule ?? ".Ee",
+                        conditionIdxs: [absolute(empResult.index)],
+                        replaceValues: []
+                    });
+                    return finish({ index: result.index, proposition: astmgr.clone(node.target) });
+                }
                 if (node.kind === "revert") {
                     if (node.children.length !== 1 || !node.revertSource) {
                         throw new Error(TR("revert证明节点结构无效"));
@@ -3126,11 +3619,22 @@ export class InferenceProofAssistant {
                     return finish({ index: resultIndex, proposition: astmgr.clone(node.target) });
                 }
                 if (node.kind === "tauto") {
-                    if (!node.tautoName)
-                        throw new Error(TR("tauto证明节点缺少内部规则"));
-                    const step = { deductionIdx: node.tautoName, conditionIdxs: [], replaceValues: [] };
+                    const sources = node.tautoSources ?? [];
+                    const checkedTheorem = node.tautoTheorem ?? node.target;
+                    const sourceIndices = sources.map(source => {
+                        if (source.kind === "rule")
+                            throw new Error(TR("tauto前提不能来自推理规则"));
+                        return sourceAbsoluteRow(source, hypothesisRows);
+                    });
+                    const step = {
+                        deductionIdx: DEFERRED_ASSISTANT_STEP,
+                        conditionIdxs: sourceIndices,
+                        replaceValues: [],
+                        info: "tauto",
+                        assistant: this.createAtomicTautoPayload(node.target, checkedTheorem, sources)
+                    };
                     const index = propositions.length;
-                    propositions.push({ value: astmgr.clone(node.target), from: step, deferredKind: "cpt" });
+                    propositions.push({ value: astmgr.clone(node.target), from: step, deferredKind: "assistant" });
                     steps.push(step);
                     return finish({ index, proposition: astmgr.clone(node.target) });
                 }
@@ -3147,6 +3651,12 @@ export class InferenceProofAssistant {
                         return finish({ index, proposition: astmgr.clone(node.target) });
                     }
                     const sourceAbsoluteIndex = sourceAbsoluteRow(node.source, hypothesisRows);
+                    if (sourceAbsoluteIndex >= basePropositionCount) {
+                        return finish({
+                            index: sourceAbsoluteIndex - basePropositionCount,
+                            proposition: astmgr.clone(node.target)
+                        });
+                    }
                     const idStep = { deductionIdx: ".i", conditionIdxs: [], replaceValues: [astmgr.clone(node.target)] };
                     const idIndex = propositions.length;
                     propositions.push({ value: { type: "sym", name: ">", nodes: [astmgr.clone(node.target), astmgr.clone(node.target)] }, from: idStep });
@@ -3198,6 +3708,7 @@ export class InferenceProofAssistant {
                             return basePropositionCount + mapped;
                         }),
                         replaceValues: proposition.from.replaceValues.map(value => astmgr.clone(value)),
+                        ...(proposition.from.info !== undefined ? { info: proposition.from.info } : {}),
                         ...(proposition.from.assistant ? {
                             assistant: this.cloneDeferredAssistantPayload(proposition.from.assistant)
                         } : {})
@@ -3253,6 +3764,41 @@ export class InferenceProofAssistant {
  * explicitly expanded.  The replay page is isolated from the user's live
  * page, so pN references remain bound to the snapshot captured by qed.
  */
+function materializeAtomicTauto(fs, deduction, payload) {
+    const metadata = payload.tauto;
+    if (!metadata)
+        throw new Error(TR("tauto原子步骤缺少MCPT附加信息"));
+    const previousPropositions = fs.propositions;
+    const previousFastMetaRules = fs.fastmetarules;
+    try {
+        fs.fastmetarules = "cvuqe><:#zZQR";
+        fs.propositions = payload.premises.map(premise => ({
+            value: astmgr.clone(premise.value),
+            from: null
+        }));
+        new Proof(fs).assertTautology(astmgr.clone(metadata.checkedTheorem));
+        new Proof(fs).prove(astmgr.clone(metadata.checkedTheorem));
+        let resultIndex = fs.propositions.length - 1;
+        for (let index = 0; index < payload.premises.length; index++) {
+            resultIndex = fs.deduct({
+                deductionIdx: "mp",
+                conditionIdxs: [resultIndex, index],
+                replaceValues: []
+            });
+        }
+        const result = fs.propositions[resultIndex]?.value;
+        if (!result || !astmgr.equal(result, deduction.conclusion)) {
+            throw new Error(TR("tauto原子步骤展开后的结论不匹配"));
+        }
+        const compiled = fs.compileMacroFromPropositions();
+        deduction.steps = compiled.steps;
+        deduction.tempvars = fs.findLocalNamesInDeductionStep(compiled.steps);
+    }
+    finally {
+        fs.propositions = previousPropositions;
+        fs.fastmetarules = previousFastMetaRules;
+    }
+}
 const assistantReplayStack = new Set();
 registerDeferredAssistantMaterializer((fs, deduction) => {
     const payload = deduction.deferredPayload;
@@ -3263,6 +3809,10 @@ registerDeferredAssistantMaterializer((fs, deduction) => {
         || deduction.conditions.length !== payload.premises.length
         || deduction.conditions.some((condition, index) => !astmgr.equal(condition, payload.premises[index].value))) {
         throw new Error(TR("证明助手延迟步骤与推理规则结论不匹配"));
+    }
+    if (payload.tauto) {
+        materializeAtomicTauto(fs, deduction, payload);
+        return;
     }
     const deductionName = Object.entries(fs.deductions).find(([, value]) => value === deduction)?.[0];
     const replayKey = deductionName ?? `payload:${parser.stringifyTight(payload.theorem)}:${payload.history.join("\u0000")}`;

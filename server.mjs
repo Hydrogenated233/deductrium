@@ -45,7 +45,14 @@ const mimeTypes = {
     ".woff": "font/woff",
     ".woff2": "font/woff2"
 };
-const publicRootFiles = new Set(["index.html", "gui.css"]);
+const publicRootFiles = new Set([
+    "index.html",
+    "gui.css",
+    "game-progress.html",
+    "game-progress.css",
+    "game-progress-viewer.js",
+        "game-progress-mirror.js"
+    ]);
 
 class HttpError extends Error {
     constructor(status, code, message, generation) {
@@ -683,7 +690,7 @@ async function serveStatic(request, response, url) {
             response.end("Not found");
             return;
         }
-        if (!publicRootFiles.has(relativePath) && !relativePath.startsWith("js/")) {
+        if (!publicRootFiles.has(relativePath) && !relativePath.startsWith("js/") && !relativePath.startsWith("game-progress/")) {
             response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
             response.end("Not found");
             return;
