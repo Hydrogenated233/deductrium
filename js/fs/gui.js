@@ -1546,9 +1546,10 @@ export class FSGui {
     /** Gate matching may inspect every persistent inference page, not only the active one. */
     hasPropositionForGate(ast) {
         for (const page of this.pageStore.pages) {
-            if (!page.propositions[0]?.from)
-                continue;
-            if (page.propositions.some(p => astmgr.equal(p.value, ast)))
+            // Hypotheses are kept before derived propositions in a page.  The
+            // first row therefore cannot be used as a page-level eligibility
+            // test: a later completed theorem may still satisfy the gate.
+            if (page.propositions.some(p => p.from && astmgr.equal(p.value, ast)))
                 return true;
         }
         return false;
