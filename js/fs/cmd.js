@@ -9,6 +9,7 @@ export class FSCmd {
     autoCompleteIdx = -1;
     expansionBusy = false;
     expansionGeneration = 0;
+    commandGeneration = 0;
     gui;
     lastDeduction = null;
     savesParser = new SavesParser;
@@ -111,9 +112,8 @@ export class FSCmd {
         if (e.key !== "Enter")
             return false;
         if (this.cmdBuffer[this.cmdBuffer.length - 1] === "## error") {
-            this.escClear = true;
             const lastCmd = actionInput.value;
-            this.clearCmdBuffer();
+            this.cancelCommandAfterError();
             actionInput.value = lastCmd;
         }
         this.showhints([]);
@@ -258,6 +258,18 @@ export class FSCmd {
             this.onEsc();
         }
     }
+    /**
+     * Abort a failed command transaction. `clearCmdBuffer` intentionally
+     * performs one-step navigation while a multi-step command is active, so
+     * error paths must force the root state before clearing it.
+     */
+    cancelCommandAfterError(message) {
+        this.commandGeneration++;
+        this.escClear = true;
+        this.clearCmdBuffer();
+        if (message !== undefined)
+            this.gui.hintText.innerText = String(message);
+    }
     execCmdBuffer() {
         let cmdBuffer = this.cmdBuffer;
         const hintText = this.gui.hintText;
@@ -321,7 +333,10 @@ export class FSCmd {
             if (cmdBuffer[0].includes(" ")) {
                 const queue = cmdBuffer[0].replaceAll(/\s([@=\+\-\*XUI><&\|\\]|<>)\s/g, "$1").replaceAll(/([,\(\:])\s+/g, "$1").split(" ").filter(e => e);
                 this.cmdBuffer = [];
+                const commandGeneration = this.commandGeneration;
                 for (const c of queue) {
+                    if (this.commandGeneration !== commandGeneration)
+                        break;
                     this.cmdBuffer.push(c);
                     this.execCmdBuffer();
                 }
@@ -345,13 +360,11 @@ export class FSCmd {
                         return;
                     }
                 }
-                this.clearCmdBuffer();
-                hintText.innerText = TR(`无效命令`);
+                this.cancelCommandAfterError(TR(`无效命令`));
             }
         }
         catch (e) {
-            this.clearCmdBuffer();
-            hintText.innerText = TR(`意外的错误：`) + e;
+            this.cancelCommandAfterError(TR(`意外的错误：`) + e);
         }
     }
     execExpand() {
@@ -661,9 +674,7 @@ export class FSCmd {
         }
         catch (e) { }
         if (!deduction) {
-            this.escClear = true;
-            this.clearCmdBuffer();
-            hintText.innerText = TR(`推理已取消：\n未找到推理规则`) + ` ${cmdBuffer[1]}`;
+            this.cancelCommandAfterError(TR(`推理已取消：\n未找到推理规则`) + ` ${cmdBuffer[1]}`);
             return;
         }
         const vars = deduction.replaceNames;
@@ -681,8 +692,7 @@ export class FSCmd {
             let idx = Number(cmdBuffer[i]);
             idx = idx < 0 ? formalSystem.propositions.length + idx : idx;
             if (!formalSystem.propositions[idx]) {
-                cmdBuffer.push("## error");
-                hintText.innerText = TR("推理已取消：条件定理不存在");
+                this.cancelCommandAfterError(TR("推理已取消：条件定理不存在"));
                 return;
             }
             cmdBuffer[i] = idx;
@@ -775,8 +785,7 @@ export class FSCmd {
                     this.lastDeduction = cmdBuffer[1];
             }
             catch (e) {
-                cmdBuffer.push("## error");
-                hintText.innerText = TR("推理已取消\n") + e;
+                this.cancelCommandAfterError(TR("推理已取消\n") + e);
             }
             return;
         }

@@ -4,6 +4,7 @@ const tests = [
     "./fs-hy-bugs.test.mjs",
     "./hy-maploader-names.test.mjs",
     "./fs-cmd-del.test.mjs",
+    "./fs-cmd-error-reset.test.mjs",
     "./fs-mcpt-lazy-proof.test.mjs",
     "./fs-proof-assistant.test.mjs",
     "./fs-proof-assistant-metarules.test.mjs",
