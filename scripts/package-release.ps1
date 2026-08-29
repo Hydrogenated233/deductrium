@@ -80,10 +80,6 @@ try {
         "server.mjs",
         "tt-process.mjs",
         "start.cmd",
-        "game-progress.html",
-        "game-progress.css",
-        "game-progress-viewer.js",
-        "game-progress-mirror.js"
     )
     foreach ($relativePath in $runtimeFiles) {
         $source = Join-Path $projectRoot $relativePath
