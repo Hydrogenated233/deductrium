@@ -94,4 +94,17 @@ command.execCmdBuffer();
 assert.deepEqual(command.cmdBuffer, []);
 assert.equal(command.escClear, true);
 
+// Failed entr expansion must leave the editor at the root command state;
+// retaining ["entr"] makes the next command continue a dead expansion.
+{
+    const failed = makeCommand(formalSystem);
+    failed.gui.canExpandInferenceOffThread = () => false;
+    failed.gui.formalSystem.expandMacroWithDefaultValue = () => { throw new Error("synthetic expansion failure"); };
+    failed.command.cmdBuffer = ["entr", "axiom"];
+    failed.command.execExpand();
+    assert.deepEqual(failed.command.cmdBuffer, []);
+    assert.equal(failed.command.escClear, true);
+    assert.match(failed.gui.hintText.innerText, /expanding|展开定理出错/);
+}
+
 console.log("inference command failure reset regression passed");

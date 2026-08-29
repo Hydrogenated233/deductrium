@@ -372,10 +372,7 @@ export class FSCmd {
                     fs.fastmetarules = fmr;
                     fs.deductions = fsd;
                     fs.propositions = prop;
-                    this.cmdBuffer.pop();
-                    this.cmdBuffer.pop();
-                    this.execCmdBuffer();
-                    hintText.innerText += "\n" + e;
+                    this.cancelCommandAfterError(TR("展开定理出错：") + e);
                 }
             } else if (item.startsWith("p")) {
                 const p = item.slice(1);
@@ -399,10 +396,7 @@ export class FSCmd {
                     fs.fastmetarules = fmr;
                     fs.deductions = fsd;
                     fs.propositions = prop;
-                    this.cmdBuffer.pop();
-                    this.cmdBuffer.pop();
-                    this.execCmdBuffer();
-                    hintText.innerText += "\n" + e;
+                    this.cancelCommandAfterError(TR("展开定理出错：") + e);
                 }
             } else {
                 // else if clicked metarule, pop to roll back
@@ -941,10 +935,7 @@ export class FSCmd {
         }).catch(error => {
             if (generation !== this.expansionGeneration) return;
             this.expansionBusy = false;
-            this.cmdBuffer.pop();
-            this.cmdBuffer.pop();
-            this.execCmdBuffer();
-            this.gui.hintText.innerText += "\n" + error;
+            this.cancelCommandAfterError(TR("展开定理出错：") + error);
         });
     }
 

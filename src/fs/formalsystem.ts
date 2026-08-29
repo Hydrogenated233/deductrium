@@ -1681,7 +1681,16 @@ export class FormalSystem {
         // than as a macro with recorded substeps.  The recursive construction
         // below needs d.steps, so synthesize the semantic conditional rule
         // directly for this atomic case: (s>C_i) ... |- (s>D).
-        if (d?.conditions?.length && !d.steps?.length) {
+        // A completed user rule may carry steps whose generated helper rules
+        // are outside the current unlock scope (for example .<>FF contains
+        // <a1 steps while only c is unlocked). The rule itself remains a
+        // valid atomic source for conditionalization, so lift its proposition
+        // shape instead of dereferencing unavailable subrules.
+        const hasUnavailableSteps = !!d?.steps?.some(step => {
+            try { return !this.generateDeduction(step.deductionIdx); }
+            catch { return true; }
+        });
+        if (d?.conditions?.length && (!d.steps?.length || hasUnavailableSteps)) {
             const s = this._findNewReplName(idx);
             const wrapImplication = (condition: AST): AST => ({
                 type: "sym",
