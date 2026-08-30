@@ -13,6 +13,7 @@ import {
     InferenceProofSnapshot
 } from "./proof-assistant.js";
 import { SavesParser } from "./savesparser.js";
+import { migrateInferenceProofCommand, migrateInferenceProofHistory } from "./proof-syntax.js";
 import {
     InferenceWorkerClient,
     InferenceWorkerResult,
@@ -325,8 +326,8 @@ export class FSGui {
             this.inferenceProofSnapshot = assistant.snapshot();
             this.inferenceProofTextMode = draft.textMode === true;
             this.inferenceProofScript = typeof draft.script === "string"
-                ? draft.script
-                : draft.history.join("\n");
+                ? draft.script.split(/\r?\n/).map(migrateInferenceProofCommand).join("\n")
+                : migrateInferenceProofHistory(draft.history).join("\n");
             this.inferenceProofScriptDirty = typeof draft.script === "string";
             this.renderInferenceProofSnapshot(this.inferenceProofSnapshot);
         } catch (error) {
@@ -1092,8 +1093,7 @@ export class FSGui {
     }
     private parseInferenceProofScript(text: string) {
         return text.split(/\r?\n/).map((raw, index) => {
-            let command = raw.trim();
-            command = command.replace(/\s+\.$/, "").trim();
+            const command = raw.trim();
             return { command, lineNumber: index + 1 };
         }).filter(entry => !!entry.command);
     }

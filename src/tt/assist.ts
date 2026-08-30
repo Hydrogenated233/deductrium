@@ -272,8 +272,64 @@ export class Assist {
     }
     intros(s: string) {
         if (!s?.trim()) throw TR("意外的空表达式");
-        s.split(" ").map(ss => ss ? this.intro(ss) : "");
+        s.split(/[\s,]+/).map(ss => ss ? this.intro(ss) : "");
         return this;
+    }
+
+    /** Lean-style aliases for common structural tactics. */
+    cases(spec: string) {
+        const value = spec?.trim() ?? "";
+        if (!value) throw TR("cases需要一个变量名");
+        // `cases n with d dh` is accepted as the compact form used by the
+        // induction implementation; a bare `cases n` keeps the existing
+        // destruct behavior and generated names.
+        return /\s+with\s+/i.test(value) ? this.induction(value) : this.destruct(value);
+    }
+
+    /** Lean's `rcases` spelling is equivalent for this dependent eliminator. */
+    rcases(spec: string) {
+        return this.cases(spec);
+    }
+
+    /** Construct the current goal using its canonical inductive constructor. */
+    construct() {
+        const goal = this.goal[0];
+        if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
+        if (goal.type.type === "X") return this.case();
+        if (goal.type.type === "S") return this.ex("");
+        if (goal.type.name === "True") return this.exact("true");
+        if (goal.type.type === "=" || goal.type.nodes?.[0]?.nodes?.[0]?.name === "eq") return this.rfl();
+        throw TR("constructor无法确定当前目标的构造子，请使用left、right、case或ex");
+    }
+
+    /** Close a goal with the first local value whose type checks against it. */
+    assumption() {
+        const goal = this.goal[0];
+        if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
+        for (const [name] of goal.context) {
+            try {
+                core.checkType({
+                    type: ":",
+                    name: "",
+                    nodes: [wrapVar(name), Core.clone(goal.type)]
+                }, goal.context, false);
+                return this.exact(name);
+            } catch { }
+        }
+        throw TR("未找到与当前目标匹配的假设");
+    }
+
+    /** Lean's `simp` spelling, with `simpa using h` for a local proof term. */
+    simp(str?: string) {
+        return this.simpl(str);
+    }
+
+    simpa(str?: string) {
+        const value = str?.trim() ?? "";
+        const usingMatch = /^(?:(.*?)\s+)?using\s+([\s\S]+)$/i.exec(value);
+        if (!usingMatch) return this.simpl(value);
+        this.simpl(usingMatch[1]?.trim() ?? "");
+        return this.exact(usingMatch[2].trim());
     }
 
     static eq_matches = ([
@@ -653,6 +709,15 @@ export class Assist {
         this.goal.unshift(...newGoals);
     }
     rw(eq: string | AST, back: boolean = false, forcingMatchAST?: AST) {
+        if (typeof eq === "string") {
+            const source = eq.trim();
+            if (source.startsWith("[") && source.endsWith("]")) {
+                const entries = this.splitTopLevelCommaList(source.slice(1, -1));
+                if (!entries.length) throw TR("rw改写列表不能为空");
+                for (const entry of entries) this.rw(entry);
+                return this;
+            }
+        }
         if (typeof eq === "string") eq = markExplicitAtSyntax(parser.parse(eq));
         if (!eq) throw TR("请输入用于改写的相等假设");
         const goal = this.goal.shift();
@@ -801,6 +866,24 @@ export class Assist {
         goal.ast.checked = goal.type;
         this.goal.unshift(goal);
         return this;
+    }
+
+    private splitTopLevelCommaList(source: string): string[] {
+        const result: string[] = [];
+        let current = "";
+        let depth = 0;
+        for (const char of source) {
+            if (char === "," && depth === 0) {
+                if (current.trim()) result.push(current.trim());
+                current = "";
+                continue;
+            }
+            current += char;
+            if ("([{<".includes(char)) depth++;
+            else if (")]}>".includes(char)) depth = Math.max(0, depth - 1);
+        }
+        if (current.trim()) result.push(current.trim());
+        return result;
     }
     rwb(eq: string | AST) {
         this.rw(eq, true);
@@ -1140,7 +1223,62 @@ export class Assist {
             displayExplicitAt: ast.displayExplicitAt
         };
     }
-    destruct(n: string) {
+    /** Lean-style induction entry point.  `with` names the inductive-step
+     * data and induction-hypothesis bindings, e.g. `induction n with d dh`.
+     * The existing destruct implementation remains the shared eliminator. */
+    induction(spec: string) {
+        const value = spec?.trim() ?? "";
+        const match = /^([^\s]+)(?:\s+with\s+([\s\S]+))?$/.exec(value);
+        if (!match) throw TR("induction语法应为 induction 变量 [with 名称...]");
+        const names = match[2]
+            ? match[2].split(/[\s,]+/).filter(Boolean)
+            : [];
+        if (names.some(name => !/^[^\s,]+$/.test(name))) {
+            throw TR("induction分支名称无效");
+        }
+        return this.destruct(match[1], names);
+    }
+
+    private renameInductionBinding(goal: Goal, source: string, destination: string) {
+        if (!source || source === destination) return;
+        if (goal.context.some(([name]) => name === destination)) {
+            throw TR("induction分支名称已存在：" + destination);
+        }
+        const replacement = wrapVar(destination);
+        for (const entry of goal.context) {
+            if (entry[0] === source) entry[0] = destination;
+            this.replaceFreeVar(entry[1], source, replacement);
+        }
+        this.replaceFreeVar(goal.type, source, replacement);
+        this.replaceFreeVar(goal.ast, source, replacement);
+    }
+
+    private renameInductionBindings(goal: Goal, baseContextNames: Set<string>, inductiveType: AST,
+        names: string[]) {
+        const fresh = goal.context
+            .filter(([name]) => !baseContextNames.has(name))
+            .map(([name, type]) => ({ name, type }));
+        if (fresh.length !== names.length) return;
+
+        // The eliminator exposes constructor arguments in an internal order
+        // where the induction hypothesis may precede the predecessor.  Lean's
+        // `with d dh` convention names the data argument first, then its IH.
+        // Prefer the fresh binding whose type is the inductive type for `d`.
+        const ordered = fresh.slice();
+        if (names.length === 2) {
+            const dataIndex = fresh.findIndex(({ type }) => Core.exactEqual(type, inductiveType));
+            if (dataIndex >= 0) {
+                const [data] = ordered.splice(dataIndex, 1);
+                ordered.unshift(data);
+            }
+        }
+        if (ordered.length !== names.length) return;
+        for (let index = 0; index < names.length; index++) {
+            this.renameInductionBinding(goal, ordered[index].name, names[index]);
+        }
+    }
+
+    destruct(n: string, inductionNames: string[] = []) {
         n = n.trim();
         const goal = this.goal.shift();
         if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
@@ -1337,10 +1475,20 @@ export class Assist {
             const k = wrapVar(e[0]); k.checked = e[1]; return k;
         })), true);
         let k = 0;
+        // The eliminated variable may be reused by the generated constructor
+        // binding (for nat, the step predecessor is commonly named `n` again).
+        // Exclude it from the old-context set so `induction n with d dh` can
+        // rename both the predecessor and its induction hypothesis.
+        const baseContextNames = new Set(goal.context
+            .map(e => e[0])
+            .filter(name => name !== n));
         for (const g of newGoals) {
             this.goal.unshift(g);
             const intros = introNums[k++];
             intros.forEach(e => this.intro((n + "_" + e).replaceAll("_x", "")));
+            if (inductionNames.length) {
+                this.renameInductionBindings(g, baseContextNames, nType, inductionNames);
+            }
             this.goal.shift();
         }
         if (!newGoals.length) {
@@ -1473,6 +1621,12 @@ export class Assist {
             if (core.opaque.find(e => e[0] === n) && core.state.sysDefs["@" + n]) {
                 core.expandDef(goal.type, goal.context, "@" + n, [0, 1])
             }
+            // Expansion can instantiate a lambda definition (for example
+            // `isProp`), but the selected definition is still the only named
+            // constant that should be unfolded. Reduce the newly introduced
+            // beta redexes syntactically so the surrounding `not (...)` (or
+            // any other user-facing wrapper) remains opaque and readable.
+            Core.assign(goal.type, this.reduceBetaSyntax(goal.type), true);
             const expandedDefinition = core.state.sysDefs[n] || core.state.userDefs[n];
             const explicitDefinition = core.opaque.find(e => e[0] === n)
                 ? core.state.sysDefs["@" + n]
@@ -1482,8 +1636,11 @@ export class Assist {
             if (expandedDefinition && core.hasDefinitionCache(n) && !expansionHasHoles) {
                 core.normalizeExpandedProofGoal(goal.type, goal.context);
             } else {
+                // Type checking may desugar and beta-reduce the complete AST.
+                // Validate a clone so an explicit `expand name` does not also
+                // rewrite unrelated surface syntax such as `not (...)`.
                 core.checkType(
-                    goal.type,
+                    Core.clone(goal.type),
                     goal.context,
                     false,
                     undefined,

@@ -105,8 +105,11 @@ export class TTAssistEngine {
         const parameter = commandEnd === -1 ? null : value.slice(commandEnd);
         if (!name || name === "qed")
             throw new Error(TR("未知的证明策略"));
-        const tactic = assist[name];
-        if (typeof tactic !== "function" || name === "constructor" || name === "autofillTactics" || name === "markTargets") {
+        // `constructor` is a JavaScript class keyword, so the assistant
+        // exposes its Lean-style structural implementation as `construct`.
+        const tacticName = name === "constructor" ? "construct" : name;
+        const tactic = assist[tacticName];
+        if (typeof tactic !== "function" || name === "autofillTactics" || name === "markTargets") {
             throw new Error(TR("未知的证明策略"));
         }
         tactic.call(assist, parameter);

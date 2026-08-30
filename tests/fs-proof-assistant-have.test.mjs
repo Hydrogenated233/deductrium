@@ -79,4 +79,52 @@ const parser = new ASTParser();
     assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A=B");
 }
 
+// Lean-style have can consume implication premises from the local context.
+// Each proof argument is materialized as an `mp` step, so a curried
+// proposition such as p0 : $0 > ($1 > $2) can be applied as `p0 b a`.
+{
+    const fs = initFormalSystem(true).fs;
+    const assistant = new InferenceProofAssistant(fs, "($0>($1>$2))>($1>($0>$2))");
+    assistant.apply("intro p0");
+    assistant.apply("intro a");
+    assistant.apply("intro b");
+    assistant.apply("have h := p0 b a");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses.at(-1).proposition), "$2");
+    assistant.apply("exact h");
+    assert.equal(assistant.snapshot().complete, true);
+    const result = assistant.qed();
+    assert.equal(result.committed, true);
+    fs.expandMacroWithProp(fs.propositions.length - 1);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "($0>($1>$2))>($1>($0>$2))");
+}
+
+// Applications may mix universal specialization and implication elimination
+// across successive local facts.
+{
+    const fs = initFormalSystem(true).fs;
+    const assistant = new InferenceProofAssistant(fs, "(Vx:(A>(x=x)))>(A>(B=B))");
+    assistant.apply("intro p0");
+    assistant.apply("intro hA");
+    assistant.apply("have hAB := p0 B");
+    assistant.apply("have hB := hAB hA");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses.at(-1).proposition), "B=B");
+    assistant.apply("exact hB");
+    assert.equal(assistant.snapshot().complete, true);
+    assistant.qed();
+}
+
+// Page propositions used as implication arguments are included in the lazy
+// payload and all pN references are remapped during deferred replay.
+{
+    const fs = initFormalSystem(true).fs;
+    fs.addHypothese(parser.parse("A>B"));
+    fs.addHypothese(parser.parse("A"));
+    const assistant = new InferenceProofAssistant(fs, "B");
+    assistant.apply("have h := p0 p1");
+    assistant.apply("exact h");
+    assistant.qed();
+    fs.expandMacroWithProp(2);
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "B");
+}
+
 console.log("inference proof-assistant Lean have regression passed");

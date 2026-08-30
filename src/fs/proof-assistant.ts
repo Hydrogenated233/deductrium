@@ -11,6 +11,7 @@ import type {
 } from "./formalsystem.js";
 import { Proof } from "./proof.js";
 import { InferencePageStore } from "./inference-pages.js";
+import { migrateInferenceProofHistory } from "./proof-syntax.js";
 
 const astmgr = new ASTMgr();
 const parser = new ASTParser();
@@ -178,6 +179,8 @@ interface DraftNode {
     /** Direct `have name := source arg...` application metadata. */
     haveSource?: SourceRef;
     haveArguments?: AST[];
+    /** Sources used for implication arguments; `null` entries are term arguments. */
+    haveArgumentSources?: (SourceRef | null)[];
     haveProposition?: AST;
     /** Existential source and local names introduced by `obtain <x,hx> := h`. */
     obtainSource?: SourceRef;
@@ -253,11 +256,12 @@ export class InferenceProofAssistant {
         this.history = [];
         this.committed = false;
         this.revision = 0;
-        if (options.history?.length) {
+        const history = migrateInferenceProofHistory(options.history);
+        if (history.length) {
             const systemSnapshot = this.captureFormalSystemState();
             const root = this.cloneDraftNode(this.root);
             try {
-                this.replayHistory(options.history);
+                this.replayHistory(history);
             } catch (error) {
                 this.restoreFormalSystemState(systemSnapshot);
                 this.root = root;
@@ -350,6 +354,7 @@ export class InferenceProofAssistant {
                     const rules = hypothesis.proposition.name === "&" ? [".&1", ".&2"] : [".<>1", ".<>2"];
                     if (rules.every(rule => this.resolveStrategyRule(rule, availableRuleNames))) {
                         const names = this.nextHypothesisNames(node, 2);
+                        add(`cases ${hypothesis.name}`);
                         add(`obtain <${names[0]},${names[1]}> := ${hypothesis.name}`);
                     }
                 }
@@ -358,6 +363,7 @@ export class InferenceProofAssistant {
                     && this.canUseFastMetaRule("c")
                     && this.resolveStrategyRule(".|m", availableRuleNames)) {
                     const names = this.nextHypothesisNames(node, 2);
+                    add(`cases ${hypothesis.name}`);
                     add(`obtain ${names[0]} | ${names[1]} := ${hypothesis.name}`);
                 }
                 if (hypothesis.proposition.type === "sym" && hypothesis.proposition.name === "E"
@@ -365,6 +371,7 @@ export class InferenceProofAssistant {
                     && this.resolveStrategyRule(".Ee", availableRuleNames)
                     && this.resolveStrategyRule(".Emp", availableRuleNames)) {
                     const names = this.nextHypothesisNames(node, 2);
+                    add(`cases ${hypothesis.name}`);
                     add(`obtain <${names[0]},${names[1]}> := ${hypothesis.name}`);
                 }
             }
@@ -778,6 +785,7 @@ export class InferenceProofAssistant {
             haveName: node.haveName,
             haveSource: this.cloneSource(node.haveSource),
             haveArguments: node.haveArguments?.map(value => astmgr.clone(value)),
+            haveArgumentSources: node.haveArgumentSources?.map(source => this.cloneSource(source) ?? null),
             haveProposition: node.haveProposition ? astmgr.clone(node.haveProposition) : undefined,
             obtainSource: this.cloneSource(node.obtainSource),
             obtainVariableName: node.obtainVariableName,
@@ -812,7 +820,12 @@ export class InferenceProofAssistant {
             if (!node) return;
             const sources = node.kind === "tauto"
                 ? (node.tautoSources ?? [])
-                : [node.kind === "haveApply" ? node.haveSource : node.source];
+                : [
+                    node.kind === "haveApply" ? node.haveSource : node.source,
+                    ...(node.kind === "haveApply"
+                        ? (node.haveArgumentSources ?? []).filter((source): source is SourceRef => !!source)
+                        : [])
+                ];
             for (const source of sources) {
                 if (!source || source.kind !== "page") continue;
                 const key = `${source.pageId}:${source.index}`;
@@ -971,6 +984,8 @@ export class InferenceProofAssistant {
             case "use": return this.use(args);
             case "have": return this.have(args);
             case "obtain": return this.obtain(args);
+            case "cases": return this.cases(args);
+            case "rcases": return this.cases(args);
             case "revert": return this.revert(args);
             case "assumption": return this.assumption(args);
             case "constructor": return this.constructorStrategy(args);
@@ -981,6 +996,7 @@ export class InferenceProofAssistant {
             case "rw": return this.rewrite(args);
             case "nth_rw": return this.nthRewrite(args);
             case "simp": return this.simplify(args);
+            case "simpa": return this.simpa(args);
             case "contradiction": return this.contradiction(args);
             case "by_contra": return this.byContra(args);
             case "by_cases": return this.byCases(args);
@@ -1260,6 +1276,67 @@ export class InferenceProofAssistant {
             return;
         }
         if (!changed && sources.length) return;
+    }
+
+    /** Lean-style `simpa`, optionally closing the goal with `using source`. */
+    private simpa(argument: string): void {
+        const value = argument.trim();
+        const usingMatch = /^(?:(.*?)\s+)?using\s+([^\s]+)$/.exec(value);
+        if (!usingMatch) {
+            this.simplify(value);
+            return;
+        }
+        this.simplify(usingMatch[1]?.trim() ?? "");
+        this.exact(usingMatch[2]);
+    }
+
+    /**
+     * Lean-style case splitting for a local conjunction, equivalence,
+     * existential, or disjunction.  The compact `with a b` form names the
+     * generated facts; without names the usual h1/h2 names are selected.
+     */
+    private cases(argument: string): void {
+        const value = argument.trim();
+        const match = /^([^\s]+)(?:\s+with\s+([\s\S]+))?$/i.exec(value);
+        if (!match) throw new Error(TR("cases语法应为 cases h [with h1 h2]"));
+        const sourceName = match[1];
+        const node = this.requireCurrentNode();
+        const source = this.resolveSource(sourceName, node);
+        if (source.kind === "rule") throw new Error(TR("cases来源必须是假设或页面命题"));
+        const proposition = this.getSourceProposition(source, node);
+        if (proposition.type !== "sym" || !["&", "<>", "|", "E"].includes(proposition.name)
+            || proposition.nodes?.length !== 2) {
+            throw new Error(TR("cases来源必须是合取、等价、析取或存在命题"));
+        }
+        const names = this.parseCasesNames(match[2] ?? "", node);
+        if (proposition.name === "|" && names.length === 2) {
+            this.obtain(`${names[0]} | ${names[1]} := ${sourceName}`);
+            return;
+        }
+        if (names.length !== 2) throw new Error(TR("cases需要两个分支名称"));
+        this.obtain(`⟨${names[0]},${names[1]}⟩ := ${sourceName}`);
+    }
+
+    /** Lean's `rcases` is the pattern-oriented spelling of `cases`. */
+    private rcases(argument: string): void {
+        this.cases(argument);
+    }
+
+    private parseCasesNames(value: string, node: DraftNode): string[] {
+        if (!value.trim()) return this.nextHypothesisNames(node, 2);
+        const pair = /[⟨<]\s*([^,\s<>⟩]+)\s*,\s*([^,\s<>⟩]+)\s*[⟩>]/.exec(value);
+        if (pair) return [pair[1], pair[2]];
+        const branchNames: string[] = [];
+        for (const branch of value.split("|")) {
+            const tokens = branch.trim().split(/\s+/).filter(Boolean);
+            const candidate = tokens.at(-1)?.replace(/=>$/, "");
+            if (candidate && /^[^\s,|<>⟩]+$/.test(candidate)
+                && !["inl", "inr", "left", "right", "zero", "succ"].includes(candidate)) {
+                branchNames.push(candidate);
+            }
+        }
+        if (branchNames.length === 2) return branchNames;
+        return value.split(/[\s,]+/).filter(name => /^[^\s,|<>⟩]+$/.test(name));
     }
 
     private parseRewriteSource(value: string): { source: string; reverse: boolean } {
@@ -1604,8 +1681,9 @@ export class InferenceProofAssistant {
                 return;
             }
             const sourceProposition = this.getSourceProposition(source, node);
-            const args = terms.map(term => this.parsePropositionOrItem(term));
-            const proposition = this.instantiateUniversalApplication(sourceProposition, args);
+            const application = this.instantiateHaveApplication(sourceProposition, terms, node);
+            const args = application.arguments;
+            const proposition = application.proposition;
             this.fs.assert.checkGrammer(proposition, "p");
             const continuationHypotheses = this.cloneHypotheses(node.hypotheses);
             continuationHypotheses.push({
@@ -1618,6 +1696,7 @@ export class InferenceProofAssistant {
             node.haveName = name;
             node.haveSource = this.cloneSource(source);
             node.haveArguments = args.map(arg => astmgr.clone(arg));
+            node.haveArgumentSources = application.sources.map(source => this.cloneSource(source) ?? null);
             node.haveProposition = astmgr.clone(proposition);
             node.children = [continuation];
             return;
@@ -1852,6 +1931,54 @@ export class InferenceProofAssistant {
             result = this.substituteBoundValue(result.nodes[1], binderName, argument);
         }
         return result;
+    }
+
+    /**
+     * Instantiate a Lean-style `have h := source ...` application.  Universal
+     * binders consume ordinary terms, while implication binders consume proof
+     * sources (hypotheses or page propositions) and are materialized as `mp`.
+     * Keeping the two kinds tagged avoids treating a proof name as a literal
+     * term when the application crosses both forms.
+     */
+    private instantiateHaveApplication(proposition: AST, terms: string[], node: DraftNode): {
+        proposition: AST;
+        arguments: AST[];
+        sources: (SourceRef | null)[];
+    } {
+        let result = astmgr.clone(proposition);
+        const argumentValues: AST[] = [];
+        const sources: (SourceRef | null)[] = [];
+        for (const term of terms) {
+            if (result.type === "sym" && result.name === "V" && result.nodes?.length === 2) {
+                const argument = this.parsePropositionOrItem(term);
+                const binderName = this.fs.assert.getVarName(result.nodes[0]);
+                if (!binderName) throw new Error(TR("have来源命题的全称量词变量无效"));
+                result = this.substituteBoundValue(result.nodes[1], binderName, argument);
+                argumentValues.push(argument);
+                sources.push(null);
+                continue;
+            }
+            if (result.type === "sym" && result.name === ">" && result.nodes?.length === 2) {
+                const source = this.resolveSource(term, node);
+                if (source.kind === "rule") {
+                    throw new Error(TR("have蕴涵参数必须是假设或定理来源：") + term);
+                }
+                const sourceProposition = this.getSourceProposition(source, node);
+                try {
+                    this.assertSameProposition(sourceProposition, result.nodes[0]);
+                } catch {
+                    throw new Error(TR("have蕴涵参数与前件不匹配：") + term);
+                }
+                result = astmgr.clone(result.nodes[1]);
+                // Retain a parsed placeholder for stable cloning/history; the
+                // tagged source is authoritative when materializing the `mp`.
+                argumentValues.push(this.parsePropositionOrItem(term));
+                sources.push(this.cloneSource(source)!);
+                continue;
+            }
+            throw new Error(TR("have应用参数过多，来源命题不是足够的全称或蕴涵命题"));
+        }
+        return { proposition: result, arguments: argumentValues, sources };
     }
 
     private tauto(argument: string): void {
@@ -3250,9 +3377,14 @@ export class InferenceProofAssistant {
         const collectExternalPremises = (node: DraftNode, result = new Map<string, Proposition>()): Map<string, Proposition> => {
             const sources = node.kind === "tauto"
                 ? (node.tautoSources ?? [])
-                : [node.kind === "haveApply" ? node.haveSource
-                    : node.kind === "obtainExists" ? node.obtainSource
-                        : node.source];
+                : [
+                    node.kind === "haveApply" ? node.haveSource
+                        : node.kind === "obtainExists" ? node.obtainSource
+                            : node.source,
+                    ...(node.kind === "haveApply"
+                        ? (node.haveArgumentSources ?? []).filter((source): source is SourceRef => !!source)
+                        : [])
+                ];
             for (const source of sources) {
                 if (!source || source.kind !== "page") continue;
                 const sourcePage = this.fs.inferencePages.page(source.pageId);
@@ -3523,28 +3655,51 @@ export class InferenceProofAssistant {
                 return { index: result.index, proposition: astmgr.clone(node.haveProposition) };
             }
 
-            for (const argument of args) {
-                if (currentProposition.type !== "sym" || currentProposition.name !== "V"
-                    || currentProposition.nodes?.length !== 2) {
-                    throw new Error(TR("have应用参数过多，来源命题不是足够的全称命题"));
+            const argumentSources = node.haveArgumentSources ?? [];
+            for (let index = 0; index < args.length; index++) {
+                const argument = args[index];
+                if (currentProposition.type === "sym" && currentProposition.name === "V"
+                    && currentProposition.nodes?.length === 2) {
+                    const binder = astmgr.clone(currentProposition.nodes[0]);
+                    const binderName = this.fs.assert.getVarName(binder);
+                    if (!binderName) throw new Error(TR("have来源命题的全称量词变量无效"));
+                    const body = astmgr.clone(currentProposition.nodes[1]);
+                    const specialized = this.substituteBoundValue(body, binderName, argument);
+                    const elimination = appendDerived(implication(currentProposition, specialized), {
+                        deductionIdx: "a4",
+                        conditionIdxs: [],
+                        replaceValues: [binder, body, astmgr.clone(argument)]
+                    });
+                    const result = appendDerived(specialized, {
+                        deductionIdx: "mp",
+                        conditionIdxs: [absolute(elimination.index), currentRow],
+                        replaceValues: []
+                    });
+                    currentRow = absolute(result.index);
+                    currentProposition = specialized;
+                    continue;
                 }
-                const binder = astmgr.clone(currentProposition.nodes[0]);
-                const binderName = this.fs.assert.getVarName(binder);
-                if (!binderName) throw new Error(TR("have来源命题的全称量词变量无效"));
-                const body = astmgr.clone(currentProposition.nodes[1]);
-                const specialized = this.substituteBoundValue(body, binderName, argument);
-                const elimination = appendDerived(implication(currentProposition, specialized), {
-                    deductionIdx: "a4",
-                    conditionIdxs: [],
-                    replaceValues: [binder, body, astmgr.clone(argument)]
-                });
-                const result = appendDerived(specialized, {
-                    deductionIdx: "mp",
-                    conditionIdxs: [absolute(elimination.index), currentRow],
-                    replaceValues: []
-                });
-                currentRow = absolute(result.index);
-                currentProposition = specialized;
+                if (currentProposition.type === "sym" && currentProposition.name === ">"
+                    && currentProposition.nodes?.length === 2) {
+                    const source = argumentSources[index];
+                    if (!source || source.kind === "rule") {
+                        throw new Error(TR("have蕴涵参数缺少假设或定理来源"));
+                    }
+                    const argumentRow = sourceAbsoluteRow(source, hypothesisRows);
+                    this.assertSameProposition(
+                        propositionAt(argumentRow).value,
+                        currentProposition.nodes[0]
+                    );
+                    const result = appendDerived(astmgr.clone(currentProposition.nodes[1]), {
+                        deductionIdx: "mp",
+                        conditionIdxs: [currentRow, argumentRow],
+                        replaceValues: []
+                    });
+                    currentRow = absolute(result.index);
+                    currentProposition = astmgr.clone(currentProposition.nodes[1]);
+                    continue;
+                }
+                throw new Error(TR("have应用参数过多，来源命题不是足够的全称或蕴涵命题"));
             }
             this.assertSameProposition(currentProposition, node.haveProposition);
             return { index: currentRow - basePropositionCount, proposition: astmgr.clone(node.haveProposition) };
@@ -3941,21 +4096,43 @@ registerDeferredAssistantMaterializer((fs, deduction) => {
         premiseIndices.add(premise.index);
         indexMap.set(premise.index, position);
     }
-    let replayHistory: string[];
-    try {
-        replayHistory = payload.history.map(command => {
-            const match = /^(apply|exact)\s+p([0-9]+)(?=\s|$)/.exec(command.trim())
-                ?? /^(have\s+[^\s,:=]+\s*:=\s*)p([0-9]+)(?=\s|$)/.exec(command.trim());
-            if (!match) return command;
-            const originalIndex = Number(match[2]);
+    // `pN` is also a valid user-chosen local hypothesis name (for example
+    // `intro p0`).  Do not mistake that name for a theorem-list reference
+    // while remapping the replay recipe's snapshotted page premises.
+    const localNames = new Set<string>();
+    for (const command of payload.history) {
+        const match = /^(?:intro|intros)\s+(.+)$/.exec(command.trim());
+        if (match) {
+            match[1].split(/[\s,]+/).filter(Boolean).forEach(name => localNames.add(name));
+        }
+        const have = /^have\s+([^\s,:=]+)/.exec(command.trim());
+        if (have) localNames.add(have[1]);
+        const obtain = /^obtain\s+(?:<|⟨)?([^,\s<>⟩|]+)(?:\s*,\s*|\s*\|\s*)([^\s<>⟩|]+)\s*(?:>|⟩)?\s*:=/.exec(command.trim());
+        if (obtain) {
+            localNames.add(obtain[1]);
+            localNames.add(obtain[2]);
+        }
+    }
+    const remapPageReferences = (command: string): string => {
+        return command.replace(/\bp([0-9]+)\b/g, (whole, rawIndex: string) => {
+            const originalIndex = Number(rawIndex);
+            if (localNames.has(whole)) return whole;
             const replayIndex = indexMap.get(originalIndex);
             if (replayIndex === undefined) {
                 throw new Error(TR("证明助手延迟步骤缺少所引用的前提定理 p") + originalIndex);
             }
-            if (/^(apply|exact)\b/.test(match[1])) {
-                return command.replace(/^(apply|exact)\s+p[0-9]+/, `${match[1]} p${replayIndex}`);
-            }
-            return command.replace(/^(have\s+[^\s,:=]+\s*:=\s*)p[0-9]+/, `${match[1]}p${replayIndex}`);
+            return `p${replayIndex}`;
+        });
+    };
+    let replayHistory: string[];
+    try {
+        replayHistory = payload.history.map(command => {
+            const trimmed = command.trim();
+            // Only commands that can name theorem-list rows are remapped. This
+            // keeps arbitrary proposition text untouched while also handling
+            // every `pN` argument in `have h := pN pM ...`.
+            if (!/^(?:apply|exact|have|obtain|rw|rwb|nth_rw)\b/.test(trimmed)) return command;
+            return remapPageReferences(command);
         });
     } catch (error) {
         // This mapping runs before the replay try/finally below.  Release the
