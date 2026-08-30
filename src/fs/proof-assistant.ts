@@ -162,11 +162,13 @@ interface DraftNode {
     id: number;
     target: AST;
     hypotheses: InferenceProofHypothesis[];
-    kind: "pending" | "apply" | "have" | "haveApply" | "obtainExists" | "revert" | "exact" | "tauto";
+    kind: "pending" | "apply" | "applyAt" | "have" | "haveApply" | "obtainExists" | "revert" | "exact" | "tauto";
     children: DraftNode[];
     ruleName?: string;
     replaceValues?: AST[];
     source?: SourceRef;
+    /** Local hypothesis rewritten by Lean-style `apply rule at h`. */
+    applyAtHypothesis?: string;
     /** Instantiated conclusion/source proposition used by implication apply. */
     appliedProposition?: AST;
     /** Number of leading children required by a shared rule's `⊢` conditions. */
@@ -778,6 +780,7 @@ export class InferenceProofAssistant {
             ruleName: node.ruleName,
             replaceValues: node.replaceValues?.map(value => astmgr.clone(value)),
             source: this.cloneSource(node.source),
+            applyAtHypothesis: node.applyAtHypothesis,
             appliedProposition: node.appliedProposition ? astmgr.clone(node.appliedProposition) : undefined,
             ruleConditionCount: node.ruleConditionCount,
             tautoSources: node.tautoSources?.map(source => this.cloneSource(source)!),
@@ -979,14 +982,18 @@ export class InferenceProofAssistant {
         switch (name) {
             case "intro": return this.intro(args);
             case "intros": return this.intros(args);
+            case "rintro": return this.rintro(args);
             case "exact": return this.exact(args);
             case "apply": return this.applyRule(args);
+            case "specialize": return this.specialize(args);
             case "use": return this.use(args);
             case "have": return this.have(args);
             case "obtain": return this.obtain(args);
             case "cases": return this.cases(args);
             case "rcases": return this.cases(args);
             case "revert": return this.revert(args);
+            case "change": return this.change(args);
+            case "show": return this.show(args);
             case "assumption": return this.assumption(args);
             case "constructor": return this.constructorStrategy(args);
             case "left": return this.disjunctionStrategy("left", args);
@@ -1050,6 +1057,63 @@ export class InferenceProofAssistant {
             return;
         }
         for (const name of names) this.introNode(node, name);
+    }
+
+    /** Lean's `rintro`: introduce binders and destruct one simple pattern. */
+    private rintro(argument: string): void {
+        const patterns = this.splitRintroPatterns(argument.trim());
+        if (!patterns.length) throw new Error(TR("rintro需要至少一个模式"));
+        for (const pattern of patterns) {
+            if (/^[^\s,<>⟨⟩|()]+$/.test(pattern)) {
+                this.intro(pattern === "_" ? "" : pattern);
+                continue;
+            }
+            const pair = /^[<⟨]\s*([^,\s<>⟨⟩]+)\s*,\s*([^,\s<>⟨⟩]+)\s*[>⟩]$/.exec(pattern);
+            const branch = /^\(\s*([^|\s()]+)\s*\|\s*([^|\s()]+)\s*\)$/.exec(pattern);
+            if (!pair && !branch) throw new Error(TR("rintro暂不支持该模式：") + pattern);
+            const node = this.requireCurrentNode();
+            const temporary = this.nextHypothesisName(node);
+            this.intro(temporary);
+            if (pair) this.cases(`${temporary} with ${pair[1]} ${pair[2]}`);
+            else this.cases(`${temporary} with ${branch[1]} | ${branch[2]}`);
+        }
+    }
+
+    private splitRintroPatterns(value: string): string[] {
+        const patterns: string[] = [];
+        let current = "";
+        let depth = 0;
+        const push = () => {
+            const pattern = current.trim();
+            if (pattern) patterns.push(pattern);
+            current = "";
+        };
+        for (const character of value) {
+            if (/\s/.test(character) && depth === 0) {
+                push();
+                continue;
+            }
+            current += character;
+            if ("(<⟨".includes(character)) depth++;
+            else if (")>⟩".includes(character)) depth = Math.max(0, depth - 1);
+        }
+        push();
+        return patterns;
+    }
+
+    /** Change the current proposition to an assertion-equivalent surface form. */
+    private change(argument: string): void {
+        const value = argument.trim();
+        if (!value) throw new Error(TR("change需要一个目标命题"));
+        const node = this.requireCurrentNode();
+        const target = this.parseProposition(value);
+        this.assertSameProposition(node.target, target);
+        node.target = astmgr.clone(target);
+    }
+
+    /** Lean's `show` spelling for `change`. */
+    private show(argument: string): void {
+        this.change(argument);
     }
 
     private introNode(node: DraftNode, name: string): void {
@@ -1541,6 +1605,11 @@ export class InferenceProofAssistant {
     }
 
     private applyRule(argument: string): void {
+        const atMatch = /^(.*)\s+at\s+([^\s]+)$/.exec(argument.trim());
+        if (atMatch && atMatch[1].trim()) {
+            this.applyAt(atMatch[1].trim(), atMatch[2]);
+            return;
+        }
         const node = this.requireCurrentNode();
         const parts = argument.trim() ? argument.trim().split(/\s+/) : [];
         if (!parts.length) throw new Error(TR("apply需要一个证明来源或推理规则"));
@@ -1616,6 +1685,127 @@ export class InferenceProofAssistant {
         node.appliedProposition = appliedProposition;
         node.ruleConditionCount = 0;
         node.children = instantiatedPremises.map(condition => this.makeNode(condition, this.cloneHypotheses(node.hypotheses)));
+    }
+
+    /** Lean-style `apply source at h`, transforming a local proposition. */
+    private applyAt(sourceText: string, hypothesisName: string): void {
+        const node = this.requireCurrentNode();
+        const hypothesis = node.hypotheses.find(item => item.name === hypothesisName && !!item.proposition);
+        if (!hypothesis?.proposition) throw new Error(TR("未找到要应用的假设：") + hypothesisName);
+        const parts = this.splitApplicationTerms(sourceText);
+        if (!parts.length) throw new Error(TR("apply at需要一个证明来源"));
+        const sourceName = parts.shift()!;
+        if (sourceName === "_") throw new Error(TR("推理层证明助手暂不支持_模糊匹配"));
+        const source = this.resolveSource(sourceName, node);
+
+        if (source.kind !== "rule") {
+            const sourceProposition = this.getSourceProposition(source, node);
+            const application = this.instantiateHaveApplication(
+                sourceProposition,
+                [...parts, hypothesisName],
+                node
+            );
+            const continuationHypotheses = this.cloneHypotheses(node.hypotheses)
+                .filter(item => item.name !== hypothesisName);
+            continuationHypotheses.push({
+                name: hypothesisName,
+                proposition: astmgr.clone(application.proposition),
+                kind: "have"
+            });
+            const continuation = this.makeNode(node.target, continuationHypotheses);
+            node.kind = "haveApply";
+            node.haveName = hypothesisName;
+            node.haveSource = this.cloneSource(source);
+            node.haveArguments = application.arguments.map(value => astmgr.clone(value));
+            node.haveArgumentSources = application.sources.map(value => this.cloneSource(value) ?? null);
+            node.haveProposition = astmgr.clone(application.proposition);
+            node.children = [continuation];
+            return;
+        }
+
+        const deduction = this.requireDeduction(source.name);
+        if (!deduction.conditions.length) {
+            throw new Error(TR("apply at来源规则必须至少有一个前件"));
+        }
+        const explicit = this.parseRuleArguments(parts, deduction);
+        const context = this.createRuleMetavariableContext(deduction, hypothesis.proposition, explicit, node);
+        const match = this.matchConclusion(
+            deduction,
+            hypothesis.proposition,
+            explicit,
+            deduction.conditions[0],
+            node,
+            context,
+            [deduction.conditions[0]]
+        );
+        this.assertRuleMatchComplete(match, source.name);
+        const instantiate = (value: AST) => {
+            const result = this.instantiateRuleAst(value, context, match.matchTable);
+            if (this.astContainsPrivateRuleVariable(result)) {
+                if (this.astContainsFunction(result, "#rp")) this.fs.assert.expand(result, false);
+            } else {
+                astmgr.assign(result, this.normalizeAssertionSyntax(result, true));
+            }
+            this.fs.assert.checkGrammer(result, "p");
+            return result;
+        };
+        const conditions = deduction.conditions.map(instantiate);
+        this.assertSameProposition(conditions[0], hypothesis.proposition);
+        const conclusion = instantiate(deduction.conclusion);
+        const replaceValues = deduction.replaceNames.map(name => {
+            const value = match.matchTable[context.internalByOriginal.get(name)!];
+            if (!value) throw new Error(TR("无法从目标推断规则参数") + name);
+            return astmgr.clone(value);
+        });
+        const continuationHypotheses = this.cloneHypotheses(node.hypotheses)
+            .filter(item => item.name !== hypothesisName);
+        continuationHypotheses.push({
+            name: hypothesisName,
+            proposition: astmgr.clone(conclusion),
+            kind: "have"
+        });
+        const continuation = this.makeNode(node.target, continuationHypotheses);
+        node.kind = "applyAt";
+        node.applyAtHypothesis = hypothesisName;
+        node.source = {
+            kind: "rule",
+            name: source.name,
+            replaceValues
+        };
+        node.ruleName = source.name;
+        node.replaceValues = replaceValues.map(value => astmgr.clone(value));
+        node.appliedProposition = astmgr.clone(conclusion);
+        node.ruleConditionCount = deduction.conditions.length;
+        node.children = conditions.slice(1)
+            .map(condition => this.makeNode(condition, this.cloneHypotheses(node.hypotheses)));
+        node.children.push(continuation);
+    }
+
+    /** Lean-style `specialize h a ...`, replacing a local function fact. */
+    private specialize(argument: string): void {
+        const node = this.requireCurrentNode();
+        const parts = this.splitApplicationTerms(argument.trim());
+        if (parts.length < 2) throw new Error(TR("specialize语法应为 specialize h 参数..."));
+        const sourceName = parts.shift()!;
+        const hypothesis = node.hypotheses.find(item => item.name === sourceName && !!item.proposition);
+        if (!hypothesis?.proposition) throw new Error(TR("specialize只能作用于局部假设：") + sourceName);
+        if (hypothesis.kind === "variable") throw new Error(TR("specialize只能作用于命题假设：") + sourceName);
+        const application = this.instantiateHaveApplication(hypothesis.proposition, parts, node);
+        const continuationHypotheses = this.cloneHypotheses(node.hypotheses)
+            .filter(item => item.name !== sourceName);
+        continuationHypotheses.push({
+            name: sourceName,
+            proposition: astmgr.clone(application.proposition),
+            kind: "have"
+        });
+        const continuation = this.makeNode(node.target, continuationHypotheses);
+        node.kind = "haveApply";
+        node.haveName = sourceName;
+        node.haveSource = { kind: "hypothesis", name: sourceName, nodeId: hypothesis.sourceNodeId };
+        node.haveArguments = application.arguments.map(value => astmgr.clone(value));
+        node.haveArgumentSources = application.sources.map(value => this.cloneSource(value) ?? null);
+        node.haveProposition = astmgr.clone(application.proposition);
+        node.children = [continuation];
     }
 
     /** Introduce a concrete witness for an existential target through `.Erp`. */
@@ -3826,6 +4016,31 @@ export class InferenceProofAssistant {
                 const continuationRows = new Map(hypothesisRows);
                 continuationRows.set(node.haveName, first.index);
                 return finish(emit(node.children[0], continuationRows));
+            }
+            if (node.kind === "applyAt") {
+                if (node.children.length < 1 || !node.applyAtHypothesis
+                    || !node.ruleName || !node.appliedProposition) {
+                    throw new Error(TR("apply at证明节点结构无效"));
+                }
+                const continuation = node.children.at(-1)!;
+                const premiseResults = node.children.slice(0, -1)
+                    .map(child => emit(child, hypothesisRows));
+                const hypothesisIndex = hypothesisRows.get(node.applyAtHypothesis);
+                if (hypothesisIndex === undefined) {
+                    throw new Error(TR("apply at找不到要转换的假设：") + node.applyAtHypothesis);
+                }
+                const step: DeductionStep = {
+                    deductionIdx: node.ruleName,
+                    conditionIdxs: [
+                        absolute(hypothesisIndex),
+                        ...premiseResults.map(result => absolute(result.index))
+                    ],
+                    replaceValues: (node.replaceValues ?? []).map(value => astmgr.clone(value))
+                };
+                const transformed = appendDerived(node.appliedProposition, step);
+                const continuationRows = new Map(hypothesisRows);
+                continuationRows.set(node.applyAtHypothesis, transformed.index);
+                return finish(emit(continuation, continuationRows));
             }
             if (node.kind === "apply") {
                 const children = node.children.map(child => emit(child, hypothesisRows));

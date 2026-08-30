@@ -1,5 +1,6 @@
 const PROOF_COMMANDS = new Set([
-    "intro", "intros", "induction", "destruct", "cases", "rcases", "ex", "case", "exact", "apply", "rw", "rwb", "nth_rw",
+    "intro", "intros", "rintro", "induction", "destruct", "cases", "rcases", "ex", "case", "exact", "apply", "specialize", "rw", "rwb", "nth_rw",
+    "change", "show",
     "simpl", "simp", "simpa", "rfl", "expand", "fnext", "eq", "sup", "qed", "have", "use", "obtain",
     "revert", "assumption", "constructor", "left", "right", "symm", "contradiction", "by_contra",
     "by_cases", "contrapose", "tauto"

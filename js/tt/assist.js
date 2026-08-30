@@ -308,6 +308,87 @@ export class Assist {
         s.split(/[\s,]+/).map(ss => ss ? this.intro(ss) : "");
         return this;
     }
+    /**
+     * Lean-style `rintro`: introduce binders and destructure one simple
+     * product/sum pattern.  The proof tree already owns the dependent
+     * eliminator, so this is deliberately a thin syntax layer over `intro`
+     * and `destruct` rather than a second elimination implementation.
+     */
+    rintro(spec) {
+        const patterns = this.splitRintroPatterns(spec?.trim() ?? "");
+        if (!patterns.length)
+            throw TR("rintro需要至少一个模式");
+        for (const pattern of patterns) {
+            if (/^[^\s,<>⟨⟩|()]+$/.test(pattern)) {
+                this.intro(pattern === "_" ? "" : pattern);
+                continue;
+            }
+            const pair = /^[<⟨]\s*([^,\s<>⟨⟩]+)\s*,\s*([^,\s<>⟨⟩]+)\s*[>⟩]$/.exec(pattern);
+            if (pair) {
+                const goal = this.goal[0];
+                if (!goal)
+                    throw TR("无证明目标，请使用qed命令结束证明");
+                const temporary = Core.getNewName("h", new Set(goal.context.map(entry => entry[0])));
+                this.intro(temporary);
+                this.destruct(temporary, [pair[1], pair[2]]);
+                continue;
+            }
+            throw TR("rintro暂不支持该模式：") + pattern;
+        }
+        return this;
+    }
+    splitRintroPatterns(value) {
+        const patterns = [];
+        let current = "";
+        let depth = 0;
+        const push = () => {
+            const pattern = current.trim();
+            if (pattern)
+                patterns.push(pattern);
+            current = "";
+        };
+        for (const character of value) {
+            if (/\s/.test(character) && depth === 0) {
+                push();
+                continue;
+            }
+            current += character;
+            if ("(<⟨".includes(character))
+                depth++;
+            else if (")>⟩".includes(character))
+                depth = Math.max(0, depth - 1);
+        }
+        push();
+        return patterns;
+    }
+    /** Change the current goal to a definitionally equal surface type. */
+    change(spec) {
+        const source = spec?.trim() ?? "";
+        if (!source)
+            throw TR("change需要一个目标类型");
+        const goal = this.goal.shift();
+        if (!goal)
+            throw TR("无证明目标，请使用qed命令结束证明");
+        let target;
+        try {
+            target = markExplicitAtSyntax(parser.parse(source));
+            core.checkType({
+                type: "===", name: "", nodes: [Core.clone(goal.type), Core.clone(target)]
+            }, goal.context, false, undefined, false, true);
+        }
+        catch (error) {
+            this.goal.unshift(goal);
+            throw error;
+        }
+        goal.type = target;
+        goal.ast.checked = goal.type;
+        this.goal.unshift(goal);
+        return this;
+    }
+    /** Lean's `show` spelling for changing a definitionally equal goal. */
+    show(spec) {
+        return this.change(spec);
+    }
     /** Lean-style aliases for common structural tactics. */
     cases(spec) {
         const value = spec?.trim() ?? "";
@@ -620,7 +701,11 @@ export class Assist {
     }
     apply(ast) {
         if (typeof ast === "string") {
-            ast = markExplicitAtSyntax(parser.parse(ast));
+            const source = ast.trim();
+            const atMatch = /^(.*)\s+at\s+([^\s]+)$/.exec(source);
+            if (atMatch && atMatch[1].trim())
+                return this.applyAt(atMatch[1], atMatch[2]);
+            ast = markExplicitAtSyntax(parser.parse(source));
         }
         const goal = this.goal.shift();
         if (!goal)
@@ -710,6 +795,150 @@ export class Assist {
         // then set goal.ast to refer the new smaller hole
         goal.ast = goal.ast.nodes[1];
         goal.type = applyType;
+        this.goal.unshift(goal);
+        return this;
+    }
+    /**
+     * Lean-style `apply f at h`: use `h` as the first argument of `f`,
+     * replace the local binding with the resulting type, and expose any
+     * remaining function arguments as ordinary proof goals.
+     */
+    applyAt(sourceText, hypothesisName) {
+        const goal = this.goal.shift();
+        if (!goal)
+            throw TR("无证明目标，请使用qed命令结束证明");
+        const sourceContext = goal.context;
+        const bindingIndex = sourceContext.findIndex(([name]) => name === hypothesisName);
+        if (bindingIndex < 0) {
+            this.goal.unshift(goal);
+            throw TR("未知的变量：") + hypothesisName;
+        }
+        const hypothesisType = Core.clone(sourceContext[bindingIndex][1]);
+        let source;
+        let sourceType;
+        try {
+            source = markExplicitAtSyntax(parser.parse(sourceText.trim()));
+            sourceType = core.checkType(source, sourceContext, false);
+            if (sourceType.type !== "P" && sourceType.type !== "->") {
+                throw TR("apply at 来源必须是函数类型");
+            }
+            core.checkType({
+                type: ":", name: "", nodes: [wrapVar(hypothesisName), Core.clone(sourceType.nodes[0])]
+            }, sourceContext, false);
+        }
+        catch (error) {
+            this.goal.unshift(goal);
+            throw error;
+        }
+        const firstArgument = wrapVar(hypothesisName);
+        firstArgument.checked = hypothesisType;
+        let application = wrapApply(source, firstArgument);
+        let resultType = Core.clone(sourceType.nodes[1]);
+        if (sourceType.type === "P")
+            this.replaceFreeVar(resultType, sourceType.name, firstArgument);
+        const newGoals = [];
+        const dependencies = new Map();
+        let holeIndex = 0;
+        while (resultType.type === "P" || resultType.type === "->") {
+            let parameterType = Core.clone(resultType.nodes[0]);
+            for (const [holeName, dependency] of dependencies) {
+                if (!Core.getFreeVars(parameterType).has(holeName))
+                    continue;
+                if (!dependency.varname)
+                    dependency.varname = this.getNewDependGoalVarName();
+                this.replaceFreeVar(parameterType, holeName, wrapVar(dependency.varname));
+            }
+            const hole = wrapVar("(?#at" + (holeIndex++) + ")");
+            hole.checked = parameterType;
+            const premiseGoal = {
+                context: Core.cloneContext(sourceContext),
+                ast: hole,
+                type: parameterType,
+                depend: null
+            };
+            newGoals.push(premiseGoal);
+            dependencies.set(hole.name, { hole, sourceGoal: premiseGoal, varname: "", dependents: [] });
+            application = wrapApply(application, hole);
+            if (resultType.type === "P") {
+                const body = Core.clone(resultType.nodes[1]);
+                this.replaceFreeVar(body, resultType.name, hole);
+                resultType = body;
+            }
+            else {
+                resultType = Core.clone(resultType.nodes[1]);
+            }
+            const current = newGoals.at(-1);
+            for (const dependency of dependencies.values()) {
+                const marker = dependency.varname || dependency.hole.name;
+                if (dependency.sourceGoal === current || !Core.getFreeVars(current.type).has(marker))
+                    continue;
+                dependency.dependents.push(current);
+            }
+        }
+        for (const [holeName, dependency] of dependencies) {
+            if (!Core.getFreeVars(resultType).has(holeName))
+                continue;
+            if (!dependency.varname)
+                dependency.varname = this.getNewDependGoalVarName();
+            this.replaceFreeVar(resultType, holeName, wrapVar(dependency.varname));
+        }
+        const bodyHole = wrapVar("(?#0)");
+        bodyHole.checked = goal.type;
+        const continuationContext = Core.cloneContext(sourceContext.filter((_entry, index) => index !== bindingIndex));
+        continuationContext.unshift([hypothesisName, resultType, 0]);
+        const wrapped = wrapApply(wrapLambda("L", hypothesisName, resultType, bodyHole), application);
+        Core.assign(goal.ast, wrapped, true);
+        goal.ast = goal.ast.nodes[0].nodes[1];
+        goal.ast.checked = goal.type;
+        goal.context = continuationContext;
+        for (const dependency of dependencies.values()) {
+            if (!dependency.varname)
+                continue;
+            dependency.sourceGoal.depend = {
+                src: dependency.hole,
+                dst: resultType,
+                goals: [...dependency.dependents, goal],
+                varname: dependency.varname
+            };
+        }
+        this.goal.unshift(goal);
+        this.goal.unshift(...newGoals);
+        return this;
+    }
+    /** Lean-style `specialize h a ...`, replacing a local function fact. */
+    specialize(spec) {
+        const value = spec?.trim() ?? "";
+        const match = /^([^\s]+)\s+([\s\S]+)$/.exec(value);
+        if (!match)
+            throw TR("specialize语法应为 specialize h 参数...");
+        const goal = this.goal.shift();
+        if (!goal)
+            throw TR("无证明目标，请使用qed命令结束证明");
+        const bindingIndex = goal.context.findIndex(([name]) => name === match[1]);
+        if (bindingIndex < 0) {
+            this.goal.unshift(goal);
+            throw TR("未知的变量：") + match[1];
+        }
+        const sourceContext = goal.context;
+        let term;
+        let resultType;
+        try {
+            term = markExplicitAtSyntax(parser.parse(value));
+            resultType = core.checkType(term, sourceContext, false);
+        }
+        catch (error) {
+            this.goal.unshift(goal);
+            throw error;
+        }
+        const bodyHole = wrapVar("(?#0)");
+        bodyHole.checked = goal.type;
+        const continuationContext = Core.cloneContext(sourceContext.filter((_entry, index) => index !== bindingIndex));
+        continuationContext.unshift([match[1], Core.clone(resultType), 0]);
+        const wrapped = wrapApply(wrapLambda("L", match[1], Core.clone(resultType), bodyHole), term);
+        Core.assign(goal.ast, wrapped, true);
+        goal.ast = goal.ast.nodes[0].nodes[1];
+        goal.ast.checked = goal.type;
+        goal.context = continuationContext;
         this.goal.unshift(goal);
         return this;
     }

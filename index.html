@@ -296,12 +296,12 @@
                 <details id="fs-proof-help" class="fs-proof-help">
                     <summary>策略介绍</summary>
                     <div class="fs-proof-help-content">
-                        <p><code>intro</code> 展开一个蕴含或全称前提；蕴含引入要求条件演绎和逆演绎元定理，全称引入要求条件概括元定理。<code>intros h1 h2</code> 连续展开多个前提，省略名称时自动展开全部前导前提；<code>exact h</code> 用假设、定理或无前件规则完成目标；<code>apply h</code> 应用来源并生成前件目标。演绎元定理与逆演绎元定理解锁后，也可使用 <code>apply &gt;rule</code> 或 <code>apply &lt;rule</code>，但底层规则仍须在当前作用域可用；自动生成的子步骤也会检查其中的 <code>&gt;</code>/<code>&lt;</code> 前缀。</p>
+                        <p><code>intro</code> 展开一个蕴含或全称前提；蕴含引入要求条件演绎和逆演绎元定理，全称引入要求条件概括元定理。<code>intros h1 h2</code> 连续展开多个前提，<code>rintro h1 ⟨ha,hb⟩</code> 可在引入后立即拆分一个合取/等价前提；省略名称时自动展开全部前导前提；<code>exact h</code> 用假设、定理或无前件规则完成目标；<code>apply h</code> 应用来源并生成前件目标。演绎元定理与逆演绎元定理解锁后，也可使用 <code>apply &gt;rule</code> 或 <code>apply &lt;rule</code>，但底层规则仍须在当前作用域可用；自动生成的子步骤也会检查其中的 <code>&gt;</code>/<code>&lt;</code> 前缀。</p>
                         <p><code>assumption</code> 自动使用与当前目标相同的局部假设；<code>constructor</code> 构造合取 <code>A&amp;B</code> 或等价 <code>A&lt;&gt;B</code>；<code>left</code>/<code>right</code> 选择析取目标的一侧；<code>symm</code> 交换等式/等价两端；<code>rfl</code> 证明两端定义相同的等式。</p>
                         <p><code>contradiction</code> 使用同时存在的 <code>P</code> 与 <code>~P</code>；<code>by_contra h</code> 加入反设 <code>h:~P</code>；<code>by_cases h : P</code> 建立 <code>h:P</code> 与 <code>h:~P</code> 两个分支；<code>contrapose</code> 把 <code>A&gt;B</code> 改为 <code>~B&gt;~A</code>。</p>
-                        <p><code>have h : P</code> 声明待证明事实，<code>have h := f a b</code> 实例化局部、页面命题或推理规则；规则带前件时会为 <code>h</code> 建立对应的证明子目标。依赖的内置规则未解锁时，系统只会使用当前作用域中结构等价的用户规则。</p>
+                        <p><code>have h : P</code> 声明待证明事实，<code>have h := f a b</code> 实例化局部、页面命题或推理规则；规则带前件时会为 <code>h</code> 建立对应的证明子目标。<code>apply f at h</code> 用 <code>h</code> 作为 <code>f</code> 的首个参数并更新该局部事实，剩余前件会成为新的证明目标；<code>specialize h a b</code> 直接实例化局部的全称或蕴涵假设。依赖的内置规则未解锁时，系统只会使用当前作用域中结构等价的用户规则。</p>
                         <p><code>cases h</code> 或 <code>rcases h</code> 是 <code>obtain</code> 的 Lean 风格别名，可拆分合取、等价、存在或析取假设；也可写 <code>cases h with ha hb</code> 或 <code>cases h with ⟨ha,hb⟩</code> 指定新假设名称。<code>use x</code> 用具体见证项证明存在量词目标 <code>∃y,P(y)</code>，需要存在量词构造规则；<code>obtain &lt;x,hx&gt; := h</code> 可从存在量词假设中引入见证变量和对应命题；<code>revert h</code> 把命题假设重新放回蕴含目标。</p>
-                        <p><code>rw h</code>/<code>rw &lt;-h</code> 使用等式改写目标中的全部匹配项；<code>rw [h,g]</code> 依次改写；<code>nth_rw 2 h</code> 只改写指定的第几个匹配项。</p>
+                        <p><code>rw h</code>/<code>rw &lt;-h</code> 使用等式改写目标中的全部匹配项；<code>rw [h,g]</code> 依次改写；<code>nth_rw 2 h</code> 只改写指定的第几个匹配项。<code>change P</code> 或 <code>show P</code> 只接受与当前目标定义等价的命题。</p>
                         <p><code>simp</code> 使用局部和页面等式按缩短 AST 的方向反复化简；<code>simpa using h</code> 先化简再用假设 <code>h</code> 完成目标；<code>simp [h]</code> 加入指定等式，<code>simp only [h,g]</code> 只使用列出的等式。</p>
                         <p><code>tauto</code> 在完备性规则已解锁时自动证明纯命题目标；完成所有目标后使用 <code>qed</code>。</p>
                     </div>
@@ -417,9 +417,9 @@
                 <details id="tactic-help" class="tactic-help">
                         <summary>策略介绍</summary>
                         <div class="tactic-help-content">
-                            <p><code>intro</code> 引入 Π/蕴含的前提；<code>exact</code> 用证明项完成目标；<code>apply</code> 应用定理并为参数生成目标。</p>
+                            <p><code>intro</code> 引入 Π/蕴含的前提；<code>intros</code> 连续引入，<code>rintro ⟨ha,hb⟩</code> 引入后立即拆分合取或等价前提；<code>exact</code> 用证明项完成目标；<code>apply</code> 应用定理并为参数生成目标，<code>apply f at h</code> 则把局部假设 <code>h</code> 作为 <code>f</code> 的首个参数并更新其类型；<code>specialize h a</code> 实例化局部函数假设。</p>
                             <p><code>destruct</code> 解构归纳类型、和类型或等式；Lean 风格的 <code>cases</code>/<code>rcases</code> 是同义入口，<code>induction n with d dh</code> 可为归纳步数据和归纳假设指定名称；<code>ex</code>、<code>case</code>、<code>constructor</code>、<code>left</code>/<code>right</code> 构造相应数据。</p>
-                            <p><code>rw</code>/<code>rwb</code> 改写，<code>simpl</code>/<code>simp</code> 化简，<code>simpa using h</code> 化简后使用局部证明，<code>rfl</code> 证明定义相等，<code>expand</code> 展开定义；参数中的 <code>_</code> 由系统尝试填充。</p>
+                            <p><code>rw</code>/<code>rwb</code> 改写，<code>simpl</code>/<code>simp</code> 化简，<code>simpa using h</code> 化简后使用局部证明，<code>change P</code>/<code>show P</code> 切换到定义等价的目标，<code>rfl</code> 证明定义相等，<code>expand</code> 展开定义；参数中的 <code>_</code> 由系统尝试填充。</p>
                             <p><code>fnext</code> 处理函数外延，<code>eq</code> 使用等式推荐，<code>sup</code> 构造 W 类型；所有目标完成后使用 <code>qed</code>。</p>
                         </div>
                     </details>
