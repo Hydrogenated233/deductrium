@@ -42,6 +42,7 @@ const tests = [
     "./fs-issue-15-qed-premise-order.test.mjs",
     "./fs-issue-16-rigid-explicit-arguments.test.mjs",
     "./fs-issue-17-qed-generalization.test.mjs",
+    "./fs-issue-20-ifft-tauto.test.mjs",
     "./tt-issue-13-expand-surface.test.mjs",
     "./tt-system-alias-self-reference.test.mjs",
     "./tt-nbe-system-compute-rule.test.mjs",

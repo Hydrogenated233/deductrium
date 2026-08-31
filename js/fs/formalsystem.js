@@ -1419,11 +1419,29 @@ export class FormalSystem {
             if (!sd)
                 throw TR("无法生成中间步骤推理规则：") + sdidx;
             const conditionalRule = step?.assistant
-                ? this.withDeferredAssistantStep(step, () => this.metaConditionTheorem(DEFERRED_ASSISTANT_STEP, ""))
+                ? this.withDeferredAssistantStep(step, () => this.metaConditionUniversalTheorem(DEFERRED_ASSISTANT_STEP, ""))
                 : this.metaConditionUniversalTheorem(sdidx, "");
+            const conditionalReplaceValues = step?.assistant
+                ? this.generateDeduction(conditionalRule).replaceNames.map(name => {
+                    if (name === s.name)
+                        return astmgr.clone(s);
+                    const sourceIndex = sd.replaceNames.indexOf(name);
+                    const sourceValue = sourceIndex >= 0
+                        ? stepReplaceValues?.[sourceIndex]
+                        : undefined;
+                    // Deferred assistant atoms keep theorem-local `$` syntax
+                    // fixed rather than exposing it as call arguments.  The
+                    // generated conditional helper discovers those names
+                    // again, so pass them through identically instead of
+                    // feeding undefined replacement slots to deduct().
+                    return sourceValue
+                        ? astmgr.clone(sourceValue)
+                        : { type: "replvar", name };
+                })
+                : (sd.conditions.length ? stepReplaceValues : [s, ...stepReplaceValues]);
             return offsetCondTable[idx] = this.deduct({
                 deductionIdx: conditionalRule,
-                replaceValues: sd.conditions.length ? stepReplaceValues : [s, ...stepReplaceValues],
+                replaceValues: conditionalReplaceValues,
                 conditionIdxs: step.conditionIdxs.map(id => generate(true, id >= 0 ? id : idx + id))
             });
         };
@@ -1498,11 +1516,24 @@ export class FormalSystem {
             if (!sd)
                 throw TR("无法生成中间步骤推理规则：") + sdidx;
             const conditionalRule = step?.assistant
-                ? this.withDeferredAssistantStep(step, () => this.metaConditionTheorem(DEFERRED_ASSISTANT_STEP, "元规则生成*"))
+                ? this.withDeferredAssistantStep(step, () => this.metaConditionUniversalTheorem(DEFERRED_ASSISTANT_STEP, "元规则生成*"))
                 : this.metaConditionUniversalTheorem(sdidx, "元规则生成*");
+            const conditionalReplaceValues = step?.assistant
+                ? this.generateDeduction(conditionalRule).replaceNames.map(name => {
+                    if (name === s.name)
+                        return astmgr.clone(s);
+                    const sourceIndex = sd.replaceNames.indexOf(name);
+                    const sourceValue = sourceIndex >= 0
+                        ? stepReplaceValues?.[sourceIndex]
+                        : undefined;
+                    return sourceValue
+                        ? astmgr.clone(sourceValue)
+                        : { type: "replvar", name };
+                })
+                : (sd.conditions.length ? stepReplaceValues : [s, ...stepReplaceValues]);
             return offsetCondTable[idx] = this.deduct({
                 deductionIdx: conditionalRule,
-                replaceValues: sd.conditions.length ? stepReplaceValues : [s, ...stepReplaceValues],
+                replaceValues: conditionalReplaceValues,
                 conditionIdxs: step.conditionIdxs.map(id => generate(true, id >= 0 ? id : idx + id))
             });
         };
