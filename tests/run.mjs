@@ -150,7 +150,8 @@ const tests = [
     "./tt-gate-fuzzy-matching.test.mjs",
     "./tt-hott-context-cache.test.mjs",
     "./tt-assist-multiple-apply.test.mjs",
-    "./tt-factorial2-puzzle.test.mjs"
+    "./tt-factorial2-puzzle.test.mjs",
+    "./issue-14-build-output.test.mjs"
 ];
 
 for (const test of tests) {

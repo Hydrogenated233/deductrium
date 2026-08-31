@@ -6,8 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "prebuild": "node scripts/clean-build.mjs",
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build",
     "test": "node tests/run.mjs",

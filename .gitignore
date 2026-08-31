@@ -1,6 +1,8 @@
 old/*
 v2/*
 node_modules/
+.deductrium-build.lock
+.deductrium-build-*/
 npm-debug.log*
 release/
 work/
