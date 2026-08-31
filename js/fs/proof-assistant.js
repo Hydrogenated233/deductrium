@@ -7,6 +7,7 @@ import { InferencePageStore } from "./inference-pages.js";
 import { migrateInferenceProofHistory } from "./proof-syntax.js";
 const astmgr = new ASTMgr();
 const parser = new ASTParser();
+const PRIVATE_RULE_METAVARIABLE_PATTERN = /^\$\$assistant_rule_/;
 /**
  * DOM-free proof assistant for the deduction layer.
  *
@@ -650,15 +651,36 @@ export class InferenceProofAssistant {
     }
     /**
      * Collect theorem-list premises once for both named-qed recording and
-     * deferred replay.  Proof-tree traversal order is not the user's premise
-     * order: an `apply` can expose p1 before a later branch consumes p0.  Keep
-     * the first-seen order of distinct pages for cross-page compatibility, but
-     * restore the explicit row order within each page.
+     * deferred replay.  For named qed, the selected page's leading hypotheses
+     * define the theorem scope, matching the legacy `hyp ...; m name` flow, so
+     * retain them even when the proof tree does not reference every hypothesis
+     * directly. Bare qed keeps its existing minimal-dependency behavior.
+     * Proof-tree traversal order is not the user's premise order: an `apply`
+     * can expose p1 before a later branch consumes p0.  Keep the first-seen
+     * order of distinct pages for cross-page compatibility, but restore the
+     * explicit row order within each page.
      */
-    collectExternalPremiseRefs() {
+    collectExternalPremiseRefs(includePageScope = false) {
         const selectedPage = this.fs.inferencePages.page(this.pageId);
         const result = new Map();
         const pageOrder = new Map();
+        if (!selectedPage)
+            throw new Error(TR("推理表不存在"));
+        if (includePageScope) {
+            pageOrder.set(selectedPage.id, 0);
+            const firstDerived = selectedPage.propositions.findIndex(proposition => !!proposition.from);
+            const hypothesisCount = firstDerived === -1
+                ? selectedPage.propositions.length
+                : firstDerived;
+            for (let index = 0; index < hypothesisCount; index++) {
+                result.set(`${selectedPage.id}:${index}`, {
+                    pageId: selectedPage.id,
+                    index,
+                    proposition: selectedPage.propositions[index],
+                    pageOrder: 0
+                });
+            }
+        }
         const visit = (node) => {
             if (!node)
                 return;
@@ -695,23 +717,19 @@ export class InferenceProofAssistant {
             node.children.forEach(visit);
         };
         visit(this.root);
-        // Keep the selected page in the payload even when no external premise
-        // is used.  This makes old drafts deterministic across page switches.
-        if (!selectedPage)
-            throw new Error(TR("推理表不存在"));
         return [...result.values()]
             .sort((left, right) => left.pageOrder - right.pageOrder || left.index - right.index)
             .map(({ pageId, index, proposition }) => ({ pageId, index, proposition }));
     }
-    collectExternalPremises() {
-        return this.collectExternalPremiseRefs().map(({ pageId, index, proposition }) => ({
+    collectExternalPremises(includePageScope = false) {
+        return this.collectExternalPremiseRefs(includePageScope).map(({ pageId, index, proposition }) => ({
             pageId,
             index,
             value: astmgr.clone(proposition.value)
         }));
     }
     buildDeferredQed(name, preferredName) {
-        const premises = this.collectExternalPremises();
+        const premises = this.collectExternalPremises(name !== undefined);
         // Named qed keeps its user-facing deduction.  A bare qed is instead a
         // virtual assistant step carrying its own recipe; allocating one
         // `__assist_N` rule per proof needlessly pollutes the shared rule table.
@@ -2853,7 +2871,7 @@ export class InferenceProofAssistant {
                 astmgr.assign(pattern, this.normalizeAssertionSyntax(pattern, !preserveSchematicAssertions));
             }
             if (!astmgr.equal(target, pattern)) {
-                this.fs.assert.match(astmgr.clone(target), pattern, /^\$/, false, matchTable, replacedTypes, null, []);
+                this.fs.assert.match(astmgr.clone(target), pattern, PRIVATE_RULE_METAVARIABLE_PATTERN, false, matchTable, replacedTypes, null, []);
             }
         }
         catch (error) {
@@ -3086,7 +3104,7 @@ export class InferenceProofAssistant {
                 for (const candidate of candidates) {
                     const trial = Object.fromEntries(Object.entries(matchTable).map(([key, value]) => [key, astmgr.clone(value)]));
                     try {
-                        this.fs.assert.match(astmgr.clone(candidate), astmgr.clone(pattern), /^\$/, false, trial, {}, null, []);
+                        this.fs.assert.match(astmgr.clone(candidate), astmgr.clone(pattern), PRIVATE_RULE_METAVARIABLE_PATTERN, false, trial, {}, null, []);
                         const value = trial[internal];
                         if (value && !values.some(item => astmgr.equal(item, value)))
                             values.push(astmgr.clone(value));
@@ -3518,7 +3536,7 @@ export class InferenceProofAssistant {
             // Named qed compiles a self-contained chain.  Bring page propositions
             // used by exact into its initial condition rows before any derived row.
             if (includeExternalPremises) {
-                for (const { pageId, index, proposition } of this.collectExternalPremiseRefs()) {
+                for (const { pageId, index, proposition } of this.collectExternalPremiseRefs(includeExternalPremises)) {
                     const key = `${pageId}:${index}`;
                     externalPremiseRows.set(key, propositions.length);
                     propositions.push({ value: astmgr.clone(proposition.value), from: null });

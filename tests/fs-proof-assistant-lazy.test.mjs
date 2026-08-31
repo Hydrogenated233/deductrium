@@ -160,6 +160,9 @@ const saves = new SavesParser(true);
     outer.apply("apply t");
     outer.apply("apply inner");
     outer.apply("exact p0");
+    // `inner` was recorded with both page hypotheses in scope; the second p1
+    // discharges `t`'s own `~A` premise after the rule's retained `~A` premise.
+    outer.apply("exact p1");
     outer.apply("exact p1");
     outer.qed("outer");
     assert.ok(fs.generateDeduction(">>outer"));
