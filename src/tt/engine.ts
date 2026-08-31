@@ -1,5 +1,10 @@
 import { AST, ASTParser } from "./astparser.js";
-import { Context, Core, DefinitionTypeCacheSnapshot } from "./core.js";
+import {
+    Context,
+    Core,
+    CoreSystemInductiveBundle,
+    DefinitionTypeCacheSnapshot
+} from "./core.js";
 import { initTypeSystem } from "./initial.js";
 import { langMgr, TR } from "../lang.js";
 import { markExplicitAtSyntax, restoreSemanticMetaNamesForDisplay } from "./presentation.js";
@@ -20,7 +25,97 @@ export type TTCoreConfig = {
     userDefinitions?: [string, AST][];
     /** Inference state needed to instantiate generalized types of prior user definitions. */
     userDefinitionCaches?: [string, DefinitionTypeCacheSnapshot][];
+    /** Trusted body-less constants supplied by the creative-mode sandbox. */
+    trustedAxioms?: [string, AST][];
+    /** Trusted ordinary-inductive bundles supplied by the creative-mode sandbox. */
+    trustedInductives?: readonly CoreSystemInductiveBundle[];
+    /** Transparent definitions supplied by the creative-mode sandbox. */
+    trustedDefinitions?: readonly [string, AST][];
+    /** Original cross-category declaration order supplied by the sandbox bridge. */
+    trustedDeclarationOrder?: readonly TTTrustedDeclarationOrderEntry[];
 };
+
+export type TTTrustedDeclarationOrderEntry = {
+    kind: "axiom" | "inductive" | "definition";
+    name: string;
+};
+
+type TTTrustedDeclarationConfig = Pick<
+    TTCoreConfig,
+    "trustedAxioms" | "trustedInductives" | "trustedDefinitions" | "trustedDeclarationOrder"
+>;
+
+/**
+ * Install the creative sandbox projection without reordering declarations by
+ * category. Older callers without an explicit order retain the legacy
+ * axioms/inductives/definitions sequence.
+ */
+export function installTrustedDeclarations(core: Core, config: TTTrustedDeclarationConfig) {
+    const axioms = config.trustedAxioms ?? [];
+    const inductives = config.trustedInductives ?? [];
+    const definitions = config.trustedDefinitions ?? [];
+    const axiomByName = new Map(axioms);
+    const inductiveByName = new Map(inductives.map(bundle => [bundle.type[0], bundle] as const));
+    const definitionByName = new Map(definitions);
+    const allEntries: TTTrustedDeclarationOrderEntry[] = [
+        ...axioms.map(([name]) => ({ kind: "axiom" as const, name })),
+        ...inductives.map(bundle => ({ kind: "inductive" as const, name: bundle.type[0] })),
+        ...definitions.map(([name]) => ({ kind: "definition" as const, name }))
+    ];
+    const allNames = new Set(allEntries.map(entry => entry.name));
+    const expectedKeys = new Set(allEntries.map(entry => `${entry.kind}:${entry.name}`));
+    if (allNames.size !== allEntries.length || expectedKeys.size !== allEntries.length) {
+        throw new Error("沙盒 bridge 包含重复声明名称");
+    }
+
+    let ordered = allEntries;
+    if (config.trustedDeclarationOrder !== undefined) {
+        const seen = new Set<string>();
+        ordered = config.trustedDeclarationOrder.map(entry => {
+            const key = `${entry?.kind}:${entry?.name}`;
+            if (!entry || !expectedKeys.has(key)) {
+                throw new Error(`沙盒 bridge 顺序包含未知声明：${entry?.name ?? ""}`);
+            }
+            if (seen.has(key)) {
+                throw new Error(`沙盒 bridge 顺序包含重复声明：${entry.name}`);
+            }
+            seen.add(key);
+            return { kind: entry.kind, name: entry.name };
+        });
+        if (seen.size !== expectedKeys.size) {
+            const missing = allEntries.find(entry => !seen.has(`${entry.kind}:${entry.name}`));
+            throw new Error(`沙盒 bridge 顺序缺少声明：${missing?.name ?? ""}`);
+        }
+    }
+
+    try {
+        for (const entry of ordered) {
+            if (entry.kind === "axiom") {
+                const type = axiomByName.get(entry.name);
+                if (type) core.setSystemType(entry.name, core.desugar(Core.clone(type), true));
+                continue;
+            }
+            if (entry.kind === "inductive") {
+                const bundle = inductiveByName.get(entry.name);
+                if (bundle) core.registerSystemInductive(bundle);
+                continue;
+            }
+            const definition = definitionByName.get(entry.name);
+            if (definition) core.registerSystemDefinition(entry.name, Core.clone(definition));
+        }
+    } catch (error) {
+        // Definitions install their source before checking it, and an earlier
+        // inductive bundle may already be live. Revoke the entire candidate
+        // projection before exposing the failure.
+        core.clearSystemInductives();
+        for (const [name] of definitions) {
+            core.setSystemDefinition(name);
+            core.clearDefinitionCache(name);
+        }
+        for (const [name] of axioms) core.setSystemType(name);
+        throw error;
+    }
+}
 
 export type TTCoreCheckResult = {
     ok: boolean;
@@ -144,6 +239,12 @@ export class TTCoreEngine {
             if (!progress) break;
         }
         this.core.elaborateSemanticSystemTypes();
+
+        // The sandbox Worker validates declarations in workspace order. Keep
+        // that exact order here so definitions and inductives may depend on
+        // any preceding trusted declaration without worker/UI drift.
+        installTrustedDeclarations(this.core, config);
+        this.core.syncSemanticTypes();
 
         this.core.state.disableSimpleFn = disableSimpleFn;
         this.core.state.disableSimpleEq = disableSimpleEq;

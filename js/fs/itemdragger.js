@@ -1,3 +1,81 @@
+export function filterDragCandidates(candidates, getName, excludedNames) {
+    if (!excludedNames?.size)
+        return [...candidates];
+    return candidates.filter(candidate => !excludedNames.has(getName(candidate)));
+}
+export function isWithinDragBlock(bounds, clientY) {
+    if (!bounds.length)
+        return false;
+    const top = Math.min(...bounds.map(bound => bound.top));
+    const bottom = Math.max(...bounds.map(bound => bound.bottom));
+    return clientY >= top && clientY <= bottom;
+}
+/**
+ * Resolve a pointer position to the same destination grammar used by the
+ * workspace.  A row has a small "before" band and an "after" band.  Folder
+ * rows deliberately do not produce `inside:` destinations: dropping on a
+ * folder must not silently append to its tail.  Dropping below a child row
+ * still uses `after:` and therefore preserves that child's folder scope.
+ */
+export function resolveDragDestination(rows, clientY) {
+    if (!rows.length)
+        return { destination: " ", kind: "bottom" };
+    const isFirstVisibleChild = (index) => {
+        const row = rows[index];
+        const previous = rows[index - 1];
+        if (!previous?.folder || previous.folderOpen === false)
+            return false;
+        if (row.depth === undefined && previous.depth === undefined)
+            return true;
+        return row.depth !== undefined
+            && previous.depth !== undefined
+            && row.depth === previous.depth + 1;
+    };
+    const before = (index) => {
+        if (index > 0 && isFirstVisibleChild(index)) {
+            return { destination: `after:${rows[index - 1].name}`, kind: "after" };
+        }
+        return { destination: rows[index].name, kind: "top" };
+    };
+    const after = (row) => ({
+        destination: row.folder && !row.folderOpen
+            ? `after-subtree:${row.name}`
+            : `after:${row.name}`,
+        kind: "after"
+    });
+    // A malformed/stale layout can briefly leave overlapping rectangles. Use
+    // the deepest (then smallest/closest) row instead of allowing an outer
+    // folder to capture a pointer that is visibly over an inner row.
+    const containing = rows
+        .map((row, index) => ({ row, index }))
+        .filter(({ row, index }) => clientY >= row.top
+        && (clientY < row.bottom || (index === rows.length - 1 && clientY <= row.bottom)));
+    if (containing.length) {
+        containing.sort((a, b) => {
+            const depthA = Number.isFinite(a.row.depth) ? a.row.depth : -1;
+            const depthB = Number.isFinite(b.row.depth) ? b.row.depth : -1;
+            if (depthA !== depthB)
+                return depthB - depthA;
+            const heightA = a.row.bottom - a.row.top;
+            const heightB = b.row.bottom - b.row.top;
+            if (heightA !== heightB)
+                return heightA - heightB;
+            const centerA = Math.abs(clientY - (a.row.top + a.row.bottom) / 2);
+            const centerB = Math.abs(clientY - (b.row.top + b.row.bottom) / 2);
+            return centerA - centerB;
+        });
+        const { row, index } = containing[0];
+        if (row.folder)
+            return after(row);
+        const height = Math.max(1, row.bottom - row.top);
+        const topBand = Math.max(3, Math.min(8, height * 0.25));
+        return clientY < row.top + topBand ? before(index) : after(row);
+    }
+    const nextIndex = rows.findIndex(row => clientY < row.top);
+    if (nextIndex >= 0)
+        return before(nextIndex);
+    return after(rows[rows.length - 1]);
+}
 export class ListDragger {
     list;
     constructor(list) {
@@ -10,7 +88,10 @@ export class ListDragger {
     moved = false;
     onExecute = () => { };
     queryAllowDrag = () => true;
+    /** Rows that move together with the selected row, such as a folder subtree. */
+    queryDraggedNames = null;
     startY = 0;
+    draggedNames = new Set();
     mouseMoveListener = (event) => this.onMove(event);
     mouseUpListener = () => this.onUp();
     touchMoveListener = (event) => this.onTouchMove(event);
@@ -91,6 +172,7 @@ export class ListDragger {
         this.dragging = true;
         this.startY = ev.clientY;
         this.srcName = this.getRowName(idxEl);
+        this.draggedNames = new Set(this.queryDraggedNames?.(this.srcName) ?? []);
         document.addEventListener('mousemove', this.mouseMoveListener);
         document.addEventListener('mouseup', this.mouseUpListener);
         document.addEventListener('touchmove', this.touchMoveListener, { passive: false });
@@ -110,38 +192,88 @@ export class ListDragger {
         if (!this.dragging)
             return;
         this.moved = true;
-        const children = Array.from(this.list.children).filter(element => !element.hasAttribute("data-drag-row") || !element.classList.contains("hide"));
+        const visibleChildren = Array.from(this.list.children).filter(element => !element.hasAttribute("data-drag-row") || !element.classList.contains("hide"));
+        const draggedRows = visibleChildren.filter(element => this.draggedNames.has(this.getRowName(element)));
+        const candidateChildren = this.queryDraggedNames === null
+            ? visibleChildren
+            : visibleChildren.filter(element => element.dataset.dragRow === "true");
+        const children = filterDragCandidates(candidateChildren, element => this.getRowName(element), this.draggedNames);
         const rowCount = Math.ceil(children.length / this.cols);
-        let inserted = false;
         this.list.querySelectorAll(".dragging-bottom, .dragging-top, .dragging-inside").forEach(e => {
             e.classList.remove("dragging-bottom");
             e.classList.remove("dragging-top");
             e.classList.remove("dragging-inside");
         });
+        // The inference-layer lists still use the historical multi-column
+        // drag behavior.  Only theorem/sandbox workspaces opt into the
+        // subtree-aware before/after destinations below.
+        if (this.queryDraggedNames === null) {
+            let inserted = false;
+            for (let r = 0; r < rowCount; r++) {
+                const firstChild = children[r * this.cols];
+                if (!firstChild)
+                    continue;
+                const rect = firstChild.getBoundingClientRect();
+                const midY = rect.top + rect.height / 2;
+                if (e.clientY < midY) {
+                    this.dstName = this.getRowName(firstChild);
+                    firstChild.classList.add("dragging-top");
+                    inserted = true;
+                    break;
+                }
+                if (firstChild.dataset.dragFolder === "true"
+                    && firstChild.dataset.dragFolderOpen === "true"
+                    && e.clientY <= rect.bottom) {
+                    this.dstName = "inside:" + this.getRowName(firstChild);
+                    firstChild.classList.add("dragging-inside");
+                    inserted = true;
+                    break;
+                }
+            }
+            if (!inserted) {
+                this.dstName = " ";
+                children[(rowCount - 1) * this.cols]?.classList.add("dragging-bottom");
+            }
+            return;
+        }
+        const candidates = [];
+        const elementsByName = new Map();
         for (let r = 0; r < rowCount; r++) {
-            const firstIndex = r * this.cols;
-            const firstChild = children[firstIndex];
+            const firstChild = children[r * this.cols];
             if (!firstChild)
                 continue;
             const rect = firstChild.getBoundingClientRect();
-            const midY = rect.top + rect.height / 2;
-            if (e.clientY < midY) {
-                this.dstName = this.getRowName(firstChild);
-                firstChild.classList.add("dragging-top");
-                inserted = true;
-                break;
-            }
-            if (firstChild.dataset.dragFolder === "true"
-                && firstChild.dataset.dragFolderOpen === "true"
-                && e.clientY <= rect.bottom) {
-                this.dstName = "inside:" + this.getRowName(firstChild);
-                firstChild.classList.add("dragging-inside");
-                inserted = true;
-                break;
-            }
+            const name = this.getRowName(firstChild);
+            const depth = Number.parseInt(firstChild.dataset.dragDepth ?? "", 10);
+            candidates.push({
+                name,
+                top: rect.top,
+                bottom: rect.bottom,
+                folder: firstChild.dataset.dragFolder === "true",
+                folderOpen: firstChild.dataset.dragFolderOpen === "true",
+                depth: Number.isFinite(depth) ? depth : undefined
+            });
+            elementsByName.set(name, firstChild);
         }
-        if (!inserted) {
-            this.dstName = " ";
+        const result = this.srcName && isWithinDragBlock(draggedRows.map(row => row.getBoundingClientRect()), e.clientY)
+            ? { destination: this.srcName, kind: "noop" }
+            : resolveDragDestination(candidates, e.clientY);
+        this.dstName = result.destination;
+        if (result.kind === "top") {
+            elementsByName.get(result.destination)?.classList.add("dragging-top");
+        }
+        else if (result.kind === "after") {
+            const targetName = result.destination.startsWith("after-subtree:")
+                ? result.destination.slice("after-subtree:".length)
+                : result.destination.slice("after:".length);
+            elementsByName.get(targetName)?.classList.add("dragging-bottom");
+        }
+        else if (result.kind === "inside") {
+            // Kept for callers that provide a legacy destination, but the
+            // pointer resolver above no longer generates this state.
+            elementsByName.get(result.destination.slice("inside:".length))?.classList.add("dragging-inside");
+        }
+        else if (result.kind === "bottom") {
             children[(rowCount - 1) * this.cols]?.classList.add("dragging-bottom");
         }
     }
@@ -160,6 +292,7 @@ export class ListDragger {
         this.moved = false;
         this.srcName = null;
         this.dstName = null;
+        this.draggedNames.clear();
         document.removeEventListener('mousemove', this.mouseMoveListener);
         document.removeEventListener('mouseup', this.mouseUpListener);
         document.removeEventListener('touchmove', this.touchMoveListener);

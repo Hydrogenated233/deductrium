@@ -1,6 +1,6 @@
 import { TR } from "../lang.js";
 import { ASTParser } from "./astparser.js";
-import { SemanticNbeTypeChecker } from "./nbe-checker.js";
+import { SemanticNbeTypeChecker, isNbeUniverseType } from "./nbe-checker.js";
 import { SemanticNbeKernel } from "./nbe-kernel.js";
 import { compactImplicitAliasesForDisplay, hasExplicitAtOccurrence } from "./presentation.js";
 import { findContextEntriesBeforeByName, findContextIndexByBondVarId, hasContextName, isBinderNode, markScopedBondVars, prependContext, ScopeCursor, validBondVarId as isPositiveBondVarId } from "./scoped-syntax.js";
@@ -513,6 +513,8 @@ export class Core {
     }
     semanticKernel = new SemanticNbeKernel();
     semanticTypeChecker = new SemanticNbeTypeChecker(this.semanticKernel);
+    registeredSystemInductives = new Map();
+    inductiveMetadata = new Map();
     state = {
         sysTypes: {
             "U@": wrapVar("U@:"),
@@ -594,6 +596,241 @@ export class Core {
     }
     syncSemanticComputeRules() {
         return this.semanticKernel.replaceComputeRules(this.state.computeRules);
+    }
+    /**
+     * Install a trusted ordinary-inductive signature as one transaction.
+     *
+     * The kernel does not need a separate inductive declaration language: a
+     * type, constructor types, an eliminator type, and its iota equations are
+     * all ordinary system entries.  Keeping their registration together is
+     * important for the sandbox, however, because installing only the type
+     * would leave constructors/eliminator unresolved and installing rules
+     * before their constants exist would compile an unusable rule table.
+     */
+    registerSystemInductive(bundle) {
+        if (!bundle?.type?.[0] || !bundle.type[1]) {
+            throw new Error("归纳类型 bundle 缺少类型条目");
+        }
+        const entries = [
+            bundle.type,
+            ...(bundle.auxiliaryTypes ?? []),
+            ...(bundle.constructors ?? []),
+            ...(bundle.eliminator ? [bundle.eliminator] : []),
+            ...(bundle.recursor ? [bundle.recursor] : [])
+        ];
+        const definitions = [...(bundle.definitions ?? [])];
+        const names = new Set();
+        for (const [name, type] of entries) {
+            if (!name || !type || names.has(name)) {
+                throw new Error(`归纳类型 bundle 名称冲突：${name || ""}`);
+            }
+            names.add(name);
+        }
+        for (const [name, definition] of definitions) {
+            if (!name || !definition || names.has(name)) {
+                throw new Error(`归纳类型 bundle 名称冲突：${name || ""}`);
+            }
+            names.add(name);
+        }
+        // A trusted bundle must never silently overwrite a system/user entry.
+        // Sandbox validation normally catches this earlier, but keeping the
+        // check at the Core boundary prevents stale declarations after a
+        // repeated load or a worker retry.
+        for (const name of names) {
+            if (this.hasConst(name)) {
+                throw new Error(`归纳类型 bundle 名称冲突：${name}`);
+            }
+        }
+        const normalizedEntries = entries.map(([name, type]) => [
+            name,
+            this.desugar(Core.clone(type), true)
+        ]);
+        const normalizedRules = {};
+        for (const [head, rules] of Object.entries(bundle.computeRules ?? {})) {
+            if (!head || !Array.isArray(rules))
+                continue;
+            normalizedRules[head] = rules
+                .filter(rule => !!rule?.pattern?.length && !!rule.result)
+                .map(rule => ({
+                pattern: rule.pattern.map(pattern => this.desugar(Core.clone(pattern), true)),
+                result: this.desugar(Core.clone(rule.result), true)
+            }));
+        }
+        let familyType = normalizedEntries[0][1];
+        const familyBinders = [];
+        while ((familyType.type === "P" || familyType.type === "->")
+            && familyType.nodes?.[0] && familyType.nodes?.[1]) {
+            familyBinders.push({
+                name: familyType.type === "P" ? familyType.name : "",
+                type: Core.clone(familyType.nodes[0])
+            });
+            familyType = familyType.nodes[1];
+        }
+        const parameterCount = bundle.metadata?.parameterCount ?? familyBinders.length;
+        const indexCount = bundle.metadata?.indexCount ?? 0;
+        if (parameterCount < 0 || indexCount < 0
+            || parameterCount + indexCount !== familyBinders.length) {
+            throw new Error(`归纳类型 metadata 参数/索引数量不一致：${parameterCount}+${indexCount}`);
+        }
+        const parameters = familyBinders.slice(0, parameterCount);
+        const indices = familyBinders.slice(parameterCount);
+        const previousTypes = new Map();
+        for (const [name] of normalizedEntries)
+            previousTypes.set(name, this.state.sysTypes[name]);
+        const normalizedDefinitions = definitions.map(([name, definition]) => [
+            name,
+            this.desugar(Core.clone(definition), true)
+        ]);
+        const previousDefinitions = new Map();
+        for (const [name] of normalizedDefinitions)
+            previousDefinitions.set(name, this.state.sysDefs[name]);
+        const previousRules = new Map();
+        for (const head of Object.keys(normalizedRules)) {
+            previousRules.set(head, this.state.computeRules[head]);
+        }
+        try {
+            for (const [name, type] of normalizedEntries)
+                this.state.sysTypes[name] = type;
+            for (const [name, definition] of normalizedDefinitions)
+                this.state.sysDefs[name] = definition;
+            for (const [head, rules] of Object.entries(normalizedRules)) {
+                // Preserve any pre-existing equations for a shared head. A
+                // fresh ordinary inductive normally has a unique eliminator,
+                // while append semantics make registration composable for
+                // generated aliases.
+                this.state.computeRules[head] = [
+                    ...(this.state.computeRules[head] ?? []),
+                    ...rules
+                ];
+            }
+            this.syncSemanticDefinitions();
+            this.syncSemanticComputeRules();
+            // `setConstantType` accepts a raw system type so dependencies can
+            // be installed as a mutually-referencing batch.  Validate every
+            // generated type only after the whole batch is visible, but keep
+            // the checks inside this transaction so an invalid constructor or
+            // eliminator cannot leak partially-registered sandbox constants.
+            for (const [, type] of normalizedEntries) {
+                this.checkTypeFormation(type, []);
+            }
+        }
+        catch (error) {
+            for (const [name, previous] of previousTypes) {
+                if (previous)
+                    this.state.sysTypes[name] = previous;
+                else
+                    delete this.state.sysTypes[name];
+            }
+            for (const [name, previous] of previousDefinitions) {
+                if (previous)
+                    this.state.sysDefs[name] = previous;
+                else
+                    delete this.state.sysDefs[name];
+            }
+            for (const [head, previous] of previousRules) {
+                if (previous)
+                    this.state.computeRules[head] = previous;
+                else
+                    delete this.state.computeRules[head];
+            }
+            this.syncSemanticDefinitions();
+            this.syncSemanticComputeRules();
+            throw error;
+        }
+        const registrationName = bundle.type[0];
+        const metadata = bundle.metadata
+            ? {
+                version: bundle.metadata.version,
+                typeName: bundle.metadata.typeName,
+                parameterCount,
+                indexCount,
+                eliminatorName: bundle.metadata.eliminatorName,
+                fullEliminatorName: bundle.metadata.fullEliminatorName,
+                recursorName: bundle.metadata.recursorName,
+                fullRecursorName: bundle.metadata.fullRecursorName,
+                parameters,
+                indices,
+                constructors: bundle.metadata.constructors.map(ctor => ({
+                    name: ctor.name,
+                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
+                }))
+            }
+            : undefined;
+        this.registeredSystemInductives.set(registrationName, {
+            names: [...names],
+            previousTypes,
+            previousDefinitions,
+            previousRules,
+            metadata
+        });
+        if (metadata) {
+            this.inductiveMetadata.set(metadata.typeName, metadata);
+        }
+        return {
+            names: normalizedEntries.map(([name]) => name),
+            computeRuleCount: Object.values(normalizedRules)
+                .reduce((count, rules) => count + rules.length, 0)
+        };
+    }
+    /** Remove all dynamic bundles previously installed by a sandbox bridge. */
+    clearSystemInductives() {
+        for (const [typeName, registration] of this.registeredSystemInductives) {
+            for (const [name, previous] of registration.previousTypes) {
+                if (previous)
+                    this.state.sysTypes[name] = previous;
+                else
+                    delete this.state.sysTypes[name];
+            }
+            for (const [name, previous] of registration.previousDefinitions) {
+                if (previous)
+                    this.state.sysDefs[name] = previous;
+                else
+                    delete this.state.sysDefs[name];
+            }
+            for (const [head, previous] of registration.previousRules) {
+                if (previous)
+                    this.state.computeRules[head] = previous;
+                else
+                    delete this.state.computeRules[head];
+            }
+            this.inductiveMetadata.delete(typeName);
+        }
+        this.registeredSystemInductives.clear();
+        this.syncSemanticDefinitions();
+        this.syncSemanticTypes();
+        this.syncSemanticComputeRules();
+    }
+    getInductiveMetadata(typeName) {
+        const metadata = this.inductiveMetadata.get(typeName);
+        if (!metadata)
+            return undefined;
+        return {
+            version: metadata.version,
+            typeName: metadata.typeName,
+            parameterCount: metadata.parameterCount,
+            indexCount: metadata.indexCount,
+            eliminatorName: metadata.eliminatorName,
+            fullEliminatorName: metadata.fullEliminatorName,
+            recursorName: metadata.recursorName,
+            fullRecursorName: metadata.fullRecursorName,
+            parameters: metadata.parameters.map(parameter => ({
+                name: parameter.name,
+                type: Core.clone(parameter.type)
+            })),
+            indices: metadata.indices.map(index => ({
+                name: index.name,
+                type: Core.clone(index.type)
+            })),
+            constructors: metadata.constructors.map(ctor => ({
+                name: ctor.name,
+                argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
+            }))
+        };
+    }
+    isRegisteredInductiveType(typeName) {
+        return this.inductiveMetadata.has(typeName);
     }
     setSystemType(name, type) {
         if (type)
@@ -855,6 +1092,33 @@ export class Core {
         if (!prepared)
             throw TR("类型检查未返回定义结果");
         return prepared;
+    }
+    /**
+     * Validate a declaration type, returning its fully elaborated syntax.
+     * Ordinary `checkType` only synthesizes the type of an arbitrary term;
+     * trusted declarations additionally require that synthesized type to be
+     * a Universe and that no elaboration metavariable remains.
+     */
+    checkTypeFormation(ast, context = []) {
+        const candidate = Core.clone(ast);
+        const inferred = this.checkType(candidate, context, false, undefined, false, true, false);
+        if (hasSemanticElaborationHole(candidate)
+            || collectInferenceMetaNames(candidate).size
+            || hasSemanticElaborationHole(inferred)
+            || collectInferenceMetaNames(inferred).size) {
+            this.error(candidate, TR("类型推断中仍有未确定的占位符"), true);
+        }
+        if (isNbeUniverseType(inferred))
+            return candidate;
+        const normalized = this.semanticKernel.tryWhnf(inferred, context, {
+            deadline: this.state.time ? this.state.time + Core.timeout : undefined,
+            maxSteps: Core.semanticTypeSynthesisMaxSteps,
+            unfoldDefinitions: true
+        });
+        if (!normalized || !isNbeUniverseType(normalized)) {
+            this.error(candidate, TR("声明类型必须属于某个 Universe"), true);
+        }
+        return candidate;
     }
     checkType(ast, context, allowModify, beforeInferResolution, allowUnsolvedTermMetas = false, requireSemantic = false, preservePresentation = true) {
         const semanticPresentation = preservePresentation && (!allowModify

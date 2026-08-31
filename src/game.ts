@@ -7,6 +7,8 @@ import { calcMaxReachOrd, cmp, printOrd } from "./hy/ordinal.js";
 import { langMgr, TR } from "./lang.js";
 import { GameSaveLoad } from "./saveload.js";
 import { TTGui } from "./tt/gui.js";
+import { runAfterSandboxReady, TTSandboxGui } from "./tt/sandbox-gui.js";
+import { sandboxEnabledInMode } from "./tt/sandbox.js";
 function parseDeductriumAmout(str: string) {
     let coeff: number;
     if (str.endsWith("µg")) coeff = 1;
@@ -33,6 +35,7 @@ export class Game {
     fsGui: FSGui;
     hyperGui: HyperGui;
     ttGui: TTGui;
+    sandboxGui: TTSandboxGui | null = null;
     rewards: string[] = [];
     deductriums: number = 0; //ug
     destructedGates: number = 0;
@@ -65,7 +68,7 @@ export class Game {
     constructor() {
         const gamemode = window.location.search === "?creative" ? "creative" : "survival";
         langMgr.init();
-        if (gamemode === "creative") {
+        if (sandboxEnabledInMode(gamemode)) {
             this.creative = true;
         }
         this.fsGui = new FSGui(
@@ -80,16 +83,34 @@ export class Game {
             this.creative, true
         );
         this.ttGui = new TTGui(this.creative, true);
+        // The sandbox is created while the type layer is still suppressing
+        // rendering.  Refresh its read-only rows whenever the type list later
+        // rebuilds its syntax/highlight tables.
+        this.ttGui.onTypeListUpdated = () => this.sandboxGui?.refreshDisplays();
+        if (this.creative) {
+            // The sandbox may use the same built-in system constants as the
+            // creative type layer, but it never receives theorem-row
+            // definitions or folder-local constants implicitly.
+            this.sandboxGui = new TTSandboxGui(
+                document.getElementById("panel-4") as HTMLElement,
+                (bridge, options) => this.ttGui.setSandboxAxioms(bridge, options),
+                ast => this.ttGui.renderSandboxAst(ast),
+                { systemRuleIds: [...this.ttGui.unlockedTypes] },
+                true
+            );
+        }
 
         document.getElementById("panel").classList.remove("hide");
         this.hyperGui = new HyperGui();
 
         document.querySelectorAll("#panel>button").forEach((btn, idx) => {
             (btn as HTMLButtonElement).onclick = () => {
+                const panelId = (btn as HTMLButtonElement).dataset.panel || `panel-${idx}`;
+                if (panelId === "panel-4" && !sandboxEnabledInMode(gamemode)) return;
                 document.querySelectorAll("#panel>div").forEach(a => a.classList.remove("show"));
-                document.getElementById("panel-" + idx).classList.add("show");
-                this.ttGui.setTypePanelVisible(idx === 2);
-                if (idx === 0) {
+                document.getElementById(panelId)?.classList.add("show");
+                this.ttGui.setTypePanelVisible(panelId === "panel-2");
+                if (panelId === "panel-0") {
                     this.hyperGui.onresize();
                     this.hyperGui.active = true;
                 } else { this.hyperGui.active = false; }
@@ -694,13 +715,15 @@ export class Game {
             };
             reader.readAsText(file);
         });
-        progressBtns[3].addEventListener("click", () => gameSaveLoad.reset());
-        document.querySelector(".restart").addEventListener("click", () => gameSaveLoad.reset());
+        progressBtns[3].addEventListener("click", () => gameSaveLoad.reset(this));
+        document.querySelector(".restart").addEventListener("click", () => gameSaveLoad.reset(this));
         progressBtns[4].addEventListener("click", () => { langMgr.setLang(langMgr.lang === "en" ? "zh" : "en"); window.location.reload() });
 
         const saves = localStorage.getItem(gameSaveLoad.storageKey);
         // autosave while updated within a time interval
-        this.hyperGui.world.onStateChange = this.ttGui.onStateChange = this.fsGui.onStateChange = () => gameSaveLoad.stateChange(this);
+        const scheduleAutosave = () => gameSaveLoad.stateChange(this);
+        this.hyperGui.world.onStateChange = this.ttGui.onStateChange = this.fsGui.onStateChange = scheduleAutosave;
+        if (this.sandboxGui) this.sandboxGui.onStateChange = scheduleAutosave;
         const flushAutosave = () => gameSaveLoad.flush(this);
         window.addEventListener("pagehide", flushAutosave);
         document.addEventListener("visibilitychange", () => {
@@ -708,27 +731,29 @@ export class Game {
         });
 
         if (saves) gameSaveLoad.load(this, saves);
-        // Save restoration suppresses rendering while rows are reconstructed.
-        // The final updateAfterUnlock below starts the single coordinated
-        // validation pass after display options have also been restored.
-        this.ttGui.skipRendering = false;
-        document.getElementById("loading").classList.add("hide");
-        this.fsGui.skipRendering = false;
-        this.fsGui.onchangeOmitNF();
-        const displayPi = document.getElementById("displayPi") as HTMLInputElement;
-        displayPi.addEventListener("change", e => {
-            this.ttGui.displayPi = !displayPi.checked;
+        else void this.sandboxGui?.initializeFromStandaloneSave();
+        void runAfterSandboxReady(this.sandboxGui, () => {
+            // Save restoration keeps type rendering suppressed until the
+            // sandbox has installed exactly one final trusted bridge.
+            this.ttGui.skipRendering = false;
+            document.getElementById("loading").classList.add("hide");
+            this.fsGui.skipRendering = false;
+            this.fsGui.onchangeOmitNF();
+            const displayPi = document.getElementById("displayPi") as HTMLInputElement;
+            displayPi.addEventListener("change", () => {
+                this.ttGui.displayPi = !displayPi.checked;
+                this.ttGui.updateAfterUnlock();
+                if (!this.ttGui.displayPi) this.rewards.push("[set]NotDisplayPi");
+                if (this.ttGui.displayPi && this.rewards.includes("[set]NotDisplayPi")) {
+                    this.rewards = this.rewards.filter(e => e !== "[set]NotDisplayPi");
+                }
+            });
+            this.ttGui.displayPi = !this.rewards.includes("[set]NotDisplayPi");
+            displayPi.checked = !this.ttGui.displayPi;
             this.ttGui.updateAfterUnlock();
-            if (!this.ttGui.displayPi) this.rewards.push("[set]NotDisplayPi");
-            if (this.ttGui.displayPi && this.rewards.includes("[set]NotDisplayPi")) {
-                this.rewards = this.rewards.filter(e => e !== "[set]NotDisplayPi");
-            }
+            langMgr.setLang(langMgr.lang);
+            this.hyperGui.needUpdate = true;
         });
-        this.ttGui.displayPi = !this.rewards.includes("[set]NotDisplayPi");
-        displayPi.checked = !this.ttGui.displayPi;
-        this.ttGui.updateAfterUnlock();
-        langMgr.setLang(langMgr.lang);
-        this.hyperGui.needUpdate = true;
     }
     checkAllZFC(mute: boolean) {
         let r = this.fsGui.deductions.includes("aUnion");

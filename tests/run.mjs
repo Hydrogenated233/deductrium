@@ -151,6 +151,16 @@ const tests = [
     "./tt-hott-context-cache.test.mjs",
     "./tt-assist-multiple-apply.test.mjs",
     "./tt-factorial2-puzzle.test.mjs",
+    "./tt-core-inductive-bundle.test.mjs",
+    "./tt-sandbox.test.mjs",
+    "./tt-sandbox-ordering.test.mjs",
+    "./tt-sandbox-incremental-session.test.mjs",
+    "./tt-assist-sandbox-inductive.test.mjs",
+    "./tt-sandbox-indexed-inductive.test.mjs",
+    "./tt-sandbox-display-names.test.mjs",
+    "./tt-sandbox-game-save.test.mjs",
+    "./tt-sandbox-lifecycle.test.mjs",
+    "./tt-sandbox-gui-error-boundary.test.mjs",
     "./issue-14-build-output.test.mjs"
 ];
 

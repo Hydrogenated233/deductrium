@@ -15,10 +15,15 @@ const makeNode = tagName => {
         innerText: "",
         style: {},
         classList: {
-            add() { },
-            remove() { },
-            toggle() { },
-            contains() { return false; }
+            values: new Set(),
+            add(...names) { names.forEach(name => node.classList.values.add(name)); },
+            remove(...names) { names.forEach(name => node.classList.values.delete(name)); },
+            toggle(name, force) {
+                const next = force === undefined ? !node.classList.values.has(name) : !!force;
+                if (next) node.classList.values.add(name); else node.classList.values.delete(name);
+                return next;
+            },
+            contains(name) { return node.classList.values.has(name); }
         },
         appendChild(child) {
             node.children.push(child);
@@ -28,8 +33,20 @@ const makeNode = tagName => {
             const index = node.children.indexOf(child);
             if (index >= 0) node.children.splice(index, 1);
             return child;
-        }
+        },
+        setAttribute(name, value) {
+            node.attributes ??= new Map();
+            node.attributes.set(name, String(value));
+        },
+        getAttribute(name) {
+            return node.attributes?.get(name) ?? null;
+        },
+        addEventListener() { },
+        querySelectorAll() { return []; }
     };
+    Object.defineProperty(node, "childNodes", {
+        get() { return node.children; }
+    });
     Object.defineProperty(node, "lastChild", {
         get() { return node.children.at(-1) ?? null; }
     });
@@ -86,6 +103,36 @@ try {
         assert.notEqual(text, "_", `${name} must not use a missing-type placeholder`);
         assert.doesNotMatch(text, /\?nbe/, `${name} must not expose an internal NbE metavariable`);
     }
+
+    // Trusted sandbox names must be registered before the first AST render;
+    // otherwise the initial frame incorrectly receives the freeVar class.
+    const sandboxName = "sandboxDisplayUnique";
+    const renderGui = Object.create(TTGui.prototype);
+    renderGui.typeList = makeNode("div");
+    renderGui.sandboxAxioms = [[sandboxName, parser.parse("U")]];
+    renderGui.ast2HTML = TTGui.prototype.ast2HTML;
+    renderGui.getInhabitatArray = () => [];
+    renderGui.getTheoremItemForInput = () => null;
+    renderGui.isKnownTheoremName = () => false;
+    renderGui.floatTypeDiv = makeNode("div");
+    renderGui.disableSimpleEq = false;
+    renderGui.displayPi = true;
+    renderGui.theoremItems = [];
+    renderGui.renderSandboxAxioms();
+    const findNode = (node, text) => {
+        if (node?.innerText === text) return node;
+        for (const child of node?.children ?? []) {
+            const match = findNode(child, text);
+            if (match) return match;
+        }
+        return undefined;
+    };
+    const renderedName = findNode(renderGui.typeList, sandboxName);
+    assert.ok(renderedName, "sandbox axiom name should be rendered");
+    assert.equal(renderedName.classList.contains("constant"), true,
+        "sandbox axiom name must be highlighted as a constant on first render");
+    assert.equal(renderedName.classList.contains("freeVar"), false,
+        "sandbox axiom name must not be highlighted as a free variable");
 } finally {
     console.log = previousLog;
     if (previousDocument === undefined) delete globalThis.document;

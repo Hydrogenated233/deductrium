@@ -938,6 +938,10 @@ function universeLevel(type) {
         ? cloneSyntax(args[0])
         : null;
 }
+/** Whether a syntax node denotes one of the kernel's Universe sorts. */
+export function isNbeUniverseType(type) {
+    return universeLevel(type) !== null;
+}
 function lookupContextType(ast, context) {
     if (validId(ast.bondVarId)) {
         const binding = context.find(([, , id]) => id === ast.bondVarId);

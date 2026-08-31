@@ -31,8 +31,8 @@
         </div>
     </div>
     <div id="panel" class="hide">
-        <button>几何层</button><button id="deduct-btn" class="hide">推理层</button><button id="type-btn"
-            class="hide">类型层</button><button id="progress-btn" class="hide">进度层</button>
+        <button data-panel="panel-0">几何层</button><button id="deduct-btn" class="hide" data-panel="panel-1">推理层</button><button id="type-btn"
+            class="hide" data-panel="panel-2">类型层</button><button id="sandbox-btn" class="hide" data-panel="panel-4">沙盒</button><button id="progress-btn" class="hide" data-panel="panel-3">进度层</button>
         <div id="panel-0" class="show" style="user-select: none;">
             <label style="position: absolute;"><input type="checkbox" />以输入形式(ascii)显示谜题</label>
             <canvas id="hyper"></canvas>
@@ -424,6 +424,61 @@
                         </div>
                     </details>
             </div>
+        </div>
+        <div id="panel-4">
+            <div class="sandbox-header">
+                <div>
+                    <h2>类型论沙盒</h2>
+                    <p>创造模式中的可信原始公理环境；声明会桥接到类型层，不影响生存模式、地图、成就或解锁状态。</p>
+                </div>
+                <span class="sandbox-isolation-badge">创造模式</span>
+            </div>
+            <div class="sandbox-editor">
+                <label for="sandbox-input">添加声明</label>
+                <textarea id="sandbox-input" rows="2" spellcheck="false"
+                    placeholder="例如：A : U&#10;base : A&#10;inc := Lx:nat.succ x"></textarea>
+            </div>
+            <div id="sandbox-status" class="sandbox-status" role="status"></div>
+            <div class="sandbox-declarations">
+                <div class="sandbox-list-header">
+                    <span>沙盒声明</span>
+                    <span class="sandbox-list-hint">禁用后，依赖它的后续声明会失效</span>
+                </div>
+                <div class="list-wrapper">
+                    <div class="inhabitat" id="sandbox-list">
+                        <button id="sandbox-add" class="inhabitat-modify" type="button" title="添加沙盒声明">+</button>
+                    </div>
+                </div>
+                <div class="cmd-btns sandbox-actions">
+                    <button id="sandbox-add-folder" type="button">新文件夹</button>
+                    <button id="sandbox-validate" type="button">重新校验</button>
+                    <button id="sandbox-export" type="button">导出</button>
+                    <button id="sandbox-import-trigger" type="button">导入</button>
+                    <input id="sandbox-import" type="file" accept="application/json,.json" class="hide" />
+                </div>
+            </div>
+            <div class="sandbox-check">
+                <label for="sandbox-check-input">在当前沙盒环境检查表达式</label>
+                <div class="sandbox-check-row">
+                    <input id="sandbox-check-input" type="text" placeholder="例如：base = base" autocomplete="off" />
+                    <button id="sandbox-check" type="button">检查</button>
+                </div>
+                <div id="sandbox-check-output" class="sandbox-check-output"></div>
+            </div>
+            <details class="sandbox-help">
+                <summary>如何添加公理类型</summary>
+                <div class="sandbox-help-content">
+                    <p>在上方输入框写一行声明，使用 <code>名称 : 类型</code> 格式，例如 <code>A : U</code>。</p>
+                    <p>要定义可展开的透明常量，使用 <code>名称 := 项</code>，也可以写 <code>名称 := 项 : 类型</code>。例如 <code>inc := Lx:nat.succ x</code>；定义会先通过类型检查，再桥接到创造模式的类型层。直接从公式或网页复制时，周围的不可见空白会自动规范化。</p>
+                    <p>再添加依赖它的项或命题，例如 <code>base : A</code>、<code>loop : base = base</code>。声明按列表顺序校验，不能前向引用。</p>
+                    <p>创造模式沙盒可以引用当前类型层已解锁的系统内置常量；名称区分大小写，例如 <code>nat</code>、<code>ind_nat</code>、<code>succ</code>。普通定理行和局部常量不会自动进入沙盒作用域，如需使用请在沙盒中显式声明。</p>
+                    <p>普通归纳类型使用 <code>inductive</code> 声明，例如：<code>inductive tri : U | nt : tri | 0t : tri | pt : tri</code>。通过校验后会生成 <code>tri</code>、构造子和 <code>ind_tri</code>。</p>
+                    <p>索引归纳把统一参数写在圆括号中，把索引写在方括号中。例如 <code>inductive Vec (A : U) [n : nat] : U | vnil : Vec A 0 | vcons : Pn:nat,A -&gt; Vec A n -&gt; Vec A (succ n)</code>。每个构造子必须显式给出返回索引；系统会生成保留索引约束的 <code>ind_Vec</code> 和 <code>rec_Vec</code>。</p>
+                    <p>构造子的 iota 计算规则由系统自动生成：上例会让 <code>ind_tri C cnt c0t cpt nt</code> 计算为 <code>cnt</code>，对 <code>0t</code>、<code>pt</code> 也分别计算到对应分支。<code>simpl</code>、定义相等检查和 NbE 会自动使用这些规则。</p>
+                    <p>当前版本不能在输入框中直接注册任意 <code>pattern =&gt; result</code> 计算规则。自定义计算规则必须先通过作用域、类型、严格正性、终止性和冲突检查；未经检查的规则会破坏定义相等，因此暂不接受。</p>
+                    <p>沙盒声明是创造模式中的 trusted 公理；停用或删除后，依赖它的声明和类型层引用会一起失效。</p>
+                </div>
+            </details>
         </div>
     </div>
 </body>

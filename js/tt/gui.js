@@ -2,6 +2,7 @@ import { langMgr, TR } from "../lang.js";
 import { ASTParser, debugBoundVarId } from "./astparser.js";
 import { Core, assignContext, wrapApply, wrapVar, wrapLambda } from "./core.js";
 import { TTCoreWorkerClient } from "./core-worker-client.js";
+import { installTrustedDeclarations } from "./engine.js";
 import { TTAssistEngine } from "./assist-engine.js";
 import { TTAssistWorkerClient } from "./assist-worker-client.js";
 import { Assist } from "./assist.js";
@@ -9,9 +10,10 @@ import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { initTypeSystem } from "./initial.js";
 import { ProofScriptEditor, scriptThroughCaret } from "../proof-editor.js";
-import { restoreSemanticMetaNamesForDisplay } from "./presentation.js";
+import { prettySandboxInductiveNamesForDisplay, restoreSemanticMetaNamesForDisplay } from "./presentation.js";
 import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator, typeTheoryValidationTimedOut } from "./theorem-validation.js";
 import { TheoremWorkspace } from "./theorem-workspace.js";
+import { applyWorkspaceLayout, createWorkspaceDragHandle, syncWorkspaceDomOrder } from "./theorem-workspace-view.js";
 import { TTProofSessionStore } from "./proof-sessions.js";
 const parser = new ASTParser;
 const constructors = new Set();
@@ -24,10 +26,54 @@ const tacticTextModeStorageKey = "deductrium-tt-proof-text-mode";
 let consts = new Set;
 const allrules = initTypeSystem();
 const reservedConsts = new Set;
+export function cloneInductiveBundle(bundle) {
+    return {
+        type: [bundle.type[0], Core.clone(bundle.type[1])],
+        auxiliaryTypes: (bundle.auxiliaryTypes ?? []).map(([name, type]) => [name, Core.clone(type)]),
+        constructors: (bundle.constructors ?? []).map(([name, type]) => [name, Core.clone(type)]),
+        eliminator: bundle.eliminator
+            ? [bundle.eliminator[0], Core.clone(bundle.eliminator[1])]
+            : undefined,
+        recursor: bundle.recursor
+            ? [bundle.recursor[0], Core.clone(bundle.recursor[1])]
+            : undefined,
+        definitions: (bundle.definitions ?? []).map(([name, definition]) => [name, Core.clone(definition)]),
+        computeRules: Object.fromEntries(Object.entries(bundle.computeRules ?? {}).map(([head, rules]) => [
+            head,
+            rules.map(rule => ({
+                pattern: rule.pattern.map(pattern => Core.clone(pattern)),
+                result: Core.clone(rule.result)
+            }))
+        ])),
+        metadata: bundle.metadata
+            ? {
+                version: bundle.metadata.version,
+                typeName: bundle.metadata.typeName,
+                parameterCount: bundle.metadata.parameterCount,
+                indexCount: bundle.metadata.indexCount,
+                indices: bundle.metadata.indices?.map(index => ({
+                    name: index.name,
+                    type: Core.clone(index.type)
+                })),
+                eliminatorName: bundle.metadata.eliminatorName,
+                fullEliminatorName: bundle.metadata.fullEliminatorName,
+                recursorName: bundle.metadata.recursorName,
+                fullRecursorName: bundle.metadata.fullRecursorName,
+                constructors: bundle.metadata.constructors.map(ctor => ({
+                    name: ctor.name,
+                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
+                }))
+            }
+            : undefined
+    };
+}
 export class TTGui {
     puzzleDefs = new Set;
     skipRendering = true;
     onStateChange = () => { };
+    /** Called after the rendered type/constant tables have been rebuilt. */
+    onTypeListUpdated = () => { };
     core = new Core;
     disableSimpleFn = false;
     disableSimpleEq = false;
@@ -54,6 +100,17 @@ export class TTGui {
     // "_" for infered, "@" for original
     inferDisplayMode = "_";
     userDefinedConsts = [];
+    /** Trusted body-less declarations imported from the creative sandbox. */
+    sandboxAxioms = [];
+    sandboxAxiomNames = new Set();
+    /** Trusted ordinary-inductive signatures supplied by the creative sandbox. */
+    sandboxInductives = [];
+    /** Transparent definitions supplied by the creative sandbox. */
+    sandboxDefinitions = [];
+    sandboxDefinitionNames = new Set();
+    /** Cross-category order validated by the sandbox Worker. */
+    sandboxDeclarationOrder = undefined;
+    creativeMode;
     /** Names of successfully checked user definitions used by AST rendering. */
     userConstNames = new Set();
     sysDefinedConsts = [];
@@ -214,8 +271,16 @@ export class TTGui {
             }
         }
         this.core.syncSemanticComputeRules?.();
+        // During save restoration the UI is intentionally hidden, but the
+        // sandbox Worker can finish before the first visible type-list render.
+        // Seed the main Core after its computation rules are ready so the
+        // first trusted bridge sees the same complete built-in environment as
+        // the Worker (notably indexed-family indices such as `nat`).
+        if (this.skipRendering)
+            this.updateTypeList(this.unlockedTypes, false);
     }
     constructor(creative, skipRendering) {
+        this.creativeMode = creative;
         this.initializeSemanticResourceScale();
         try {
             this.coreWorker = new TTCoreWorkerClient();
@@ -230,6 +295,7 @@ export class TTGui {
         catch { }
         this.tacticTextMode = this.tacticTextModePreference;
         this.theoremDragger.cols = 1;
+        this.theoremDragger.queryDraggedNames = source => this.syncTheoremWorkspaceFromDom().dragBlockIds(source);
         this.theoremDragger.onExecute = (src, dst) => this.moveTheoremItem(src, dst === "+" ? " " : dst);
         this.unlockedTypes = new Set(creative ? allrules.map(r => r.id) : ["True", "False"]);
         if (!skipRendering)
@@ -1359,6 +1425,14 @@ export class TTGui {
             this.astRenderScopeFolderId = previousScope;
         }
     }
+    /**
+     * Render an AST owned by the creative sandbox without borrowing the first
+     * theorem's scope for hover/type lookup.  The sandbox has no theorem row,
+     * so use the end-of-list position and an explicit global scope.
+     */
+    renderSandboxAst(ast) {
+        return this.renderAstInScope("", ast, [], [], this.getInhabitatArray().length, null);
+    }
     addSpan(parentSpan, text, parseHTML) {
         const span = document.createElement("span");
         if (parseHTML)
@@ -1699,12 +1773,18 @@ export class TTGui {
         return Object.prototype.hasOwnProperty.call(this.core.state.sysTypes ?? {}, name)
             || Object.prototype.hasOwnProperty.call(this.core.state.sysDefs ?? {}, name);
     }
-    updateTypeList(terms) {
+    updateTypeList(terms, render = true) {
         this.invalidateHottDefCtxt();
         const list = this.typeList;
         consts.clear();
-        while (list.lastChild) {
-            list.removeChild(list.lastChild);
+        constructors.clear();
+        destructors.clear();
+        computeEqs.clear();
+        sysmacro.clear();
+        if (render) {
+            while (list.lastChild) {
+                list.removeChild(list.lastChild);
+            }
         }
         const pendingDefinitions = new Map();
         const deferredVariableDisplays = [];
@@ -1769,14 +1849,17 @@ export class TTGui {
                 continue;
             }
             // register in gui type list
-            const itIdx = document.createElement("div");
-            list.appendChild(itIdx);
-            itIdx.classList.add("idx");
-            itIdx.style.width = "30px";
-            itIdx.innerText = TR(rule.postfix);
-            const itVal = document.createElement("div");
-            list.appendChild(itVal);
-            itVal.classList.add("val");
+            let itVal = null;
+            if (render) {
+                const itIdx = document.createElement("div");
+                list.appendChild(itIdx);
+                itIdx.classList.add("idx");
+                itIdx.style.width = "30px";
+                itIdx.innerText = TR(rule.postfix);
+                itVal = document.createElement("div");
+                list.appendChild(itVal);
+                itVal.classList.add("val");
+            }
             const ast = Core.clone(rule.ast);
             // avoid check const for redefined const error
             // const def = this.core.state.sysDefs[vname];
@@ -1786,7 +1869,10 @@ export class TTGui {
             this.core.state.disableSimpleFn = disableSimpleFn;
             // Compute equations are trusted system rewrite rules. Rechecking
             // them on every list render can block startup on meta-heavy rules.
-            if (ast.type !== "===") {
+            // The renderless startup pass only seeds the Core; these checks
+            // exist to populate display annotations and would duplicate a
+            // large amount of main-thread work before the visible rebuild.
+            if (render && ast.type !== "===") {
                 try {
                     this.core.checkType(ast, [], false);
                 }
@@ -1796,7 +1882,7 @@ export class TTGui {
                 }
             }
             // this.core.state.sysDefs[vname] = def;
-            if (ast.type === "var") {
+            if (render && ast.type === "var") {
                 if (ast.checked) {
                     const displayAst = restoreSemanticMetaNamesForDisplay(Core.clone(ast, true));
                     itVal.appendChild(this.ast2HTML("", {
@@ -1813,7 +1899,7 @@ export class TTGui {
                     deferredVariableDisplays.push({ container: itVal, ast });
                 }
             }
-            else {
+            else if (render) {
                 itVal.appendChild(this.ast2HTML("", restoreSemanticMetaNamesForDisplay(Core.clone(ast, true))));
             }
             if (ast.type === ":=") {
@@ -1830,14 +1916,14 @@ export class TTGui {
                     }
                 }
             }
-            const infoArr = [];
-            for (let i = 0; i < 6; i++) {
-                const itInfo = document.createElement("div");
-                list.appendChild(itInfo);
-                itInfo.className = "info";
-                infoArr.push(itInfo);
-                if (!i)
-                    itInfo.innerText = rule.prefix;
+            if (render) {
+                for (let i = 0; i < 6; i++) {
+                    const itInfo = document.createElement("div");
+                    list.appendChild(itInfo);
+                    itInfo.className = "info";
+                    if (!i)
+                        itInfo.innerText = rule.prefix;
+                }
             }
         }
         for (let pass = 0; pass < 4 && pendingDefinitions.size; pass++) {
@@ -1856,21 +1942,101 @@ export class TTGui {
         }
         this.core.elaborateSemanticSystemTypes();
         this.core.syncSemanticDefinitions?.();
-        for (const { container, ast } of deferredVariableDisplays) {
-            if (!ast.checked) {
-                try {
-                    this.core.checkType(ast, [], false);
+        if (render) {
+            for (const { container, ast } of deferredVariableDisplays) {
+                if (!ast.checked) {
+                    try {
+                        this.core.checkType(ast, [], false);
+                    }
+                    catch { }
                 }
-                catch { }
+                const displayType = ast.checked
+                    ? restoreSemanticMetaNamesForDisplay(Core.clone(ast.checked, true))
+                    : wrapVar("_");
+                container.appendChild(this.ast2HTML("", {
+                    type: ":",
+                    nodes: [ast, displayType],
+                    name: ""
+                }));
             }
-            const displayType = ast.checked
-                ? restoreSemanticMetaNamesForDisplay(Core.clone(ast.checked, true))
-                : wrapVar("_");
-            container.appendChild(this.ast2HTML("", {
+            this.renderSandboxAxioms();
+            this.onTypeListUpdated?.();
+        }
+    }
+    renderSandboxAxioms() {
+        // A few DOM-free rendering tests construct a TTGui prototype without
+        // running the constructor, so tolerate absent optional sandbox state.
+        if (!this.typeList)
+            return;
+        const appendEntry = (name, type, postfix, prefix, category, displayOptions = {}) => {
+            // Register trusted names before rendering their types so the
+            // first frame gets the same highlighting as subsequent refreshes.
+            consts.add(name);
+            if (category === "type")
+                consts.add(name);
+            if (category === "constructor")
+                constructors.add(name);
+            if (category === "eliminator")
+                destructors.add(name);
+            const idx = document.createElement("div");
+            idx.className = "idx";
+            idx.style.width = "30px";
+            idx.innerText = postfix;
+            this.typeList.appendChild(idx);
+            const value = document.createElement("div");
+            value.className = "val";
+            const nameAst = { type: "var", name, nodes: [] };
+            const typeAst = prettySandboxInductiveNamesForDisplay(restoreSemanticMetaNamesForDisplay(Core.clone(type, true)), displayOptions);
+            nameAst.checked = typeAst;
+            value.appendChild(this.ast2HTML("", {
                 type: ":",
-                nodes: [ast, displayType],
-                name: ""
+                name: "",
+                nodes: [nameAst, typeAst]
             }));
+            this.typeList.appendChild(value);
+            for (let index = 0; index < 6; index++) {
+                const info = document.createElement("div");
+                info.className = "info";
+                if (index === 0)
+                    info.innerText = prefix;
+                this.typeList.appendChild(info);
+            }
+        };
+        for (const [name, type] of this.sandboxAxioms ?? []) {
+            appendEntry(name, type, "trusted", "sandbox", "axiom");
+        }
+        // Transparent sandbox definitions carry their body in the bridge;
+        // render the inferred type from the Core semantic cache so they look
+        // like ordinary declarations without pretending the body is an axiom
+        // type. Older bridges may omit the cache, in which case the definition
+        // remains usable but has no type row to render yet.
+        for (const [name] of this.sandboxDefinitions ?? []) {
+            const type = this.core.state.defTypes[name]?.type;
+            if (type)
+                appendEntry(name, type, "定义", "sandbox", "axiom");
+        }
+        for (const bundle of this.sandboxInductives ?? []) {
+            const displayOptions = {
+                constructorNames: bundle.metadata?.constructors?.map(ctor => ctor.name)
+                    ?? bundle.constructors?.map(([name]) => name)
+                    ?? []
+            };
+            appendEntry(bundle.type[0], bundle.type[1], "类型", "sandbox inductive", "type", displayOptions);
+            for (const [name, type] of bundle.constructors ?? []) {
+                appendEntry(name, type, "构造", "sandbox inductive", "constructor", displayOptions);
+            }
+            for (const [name, type] of bundle.auxiliaryTypes ?? []) {
+                appendEntry(name, type, "解构", "sandbox inductive", "eliminator", displayOptions);
+            }
+            if (bundle.eliminator) {
+                appendEntry(bundle.eliminator[0], bundle.eliminator[1], "解构", "sandbox inductive", "eliminator", displayOptions);
+            }
+            if (bundle.recursor) {
+                appendEntry(bundle.recursor[0], bundle.recursor[1], "递归", "sandbox inductive", "eliminator", displayOptions);
+            }
+            for (const [name, definition] of bundle.definitions ?? []) {
+                appendEntry(name, definition, "定义", "sandbox inductive", "axiom", displayOptions);
+            }
         }
     }
     getTheoremWorkspace() {
@@ -1941,28 +2107,16 @@ export class TTGui {
         const uuid = globalThis.crypto?.randomUUID?.();
         return prefix + "-" + (uuid ?? ++this.theoremItemSequence);
     }
-    createTheoremDragHandle(wrapper, id) {
-        wrapper.dataset.dragRow = "true";
-        wrapper.dataset.dragId = id;
-        const handle = document.createElement("button");
-        handle.type = "button";
-        handle.className = "inhabitat-modify tt-drag-handle idx";
-        handle.innerText = "↕";
-        handle.title = TR("拖动排序");
-        wrapper.appendChild(handle);
-        this.theoremDragger.attachIdxListener(handle);
-        return handle;
+    createTheoremDragHandle(wrapper, id, rowOptions = {}) {
+        return createWorkspaceDragHandle(wrapper, id, {
+            dragger: this.theoremDragger,
+            title: TR("拖动排序"),
+            rowOptions
+        });
     }
     syncTheoremDomOrder() {
         const addButton = document.getElementById("add-btn");
-        let nextSibling = addButton;
-        for (let i = this.theoremItems.length - 1; i >= 0; i--) {
-            const wrapper = this.theoremItems[i].wrapper;
-            if (wrapper.parentElement !== this.inhabitList || wrapper.nextSibling !== nextSibling) {
-                this.inhabitList.insertBefore(wrapper, nextSibling);
-            }
-            nextSibling = wrapper;
-        }
+        syncWorkspaceDomOrder(this.inhabitList, this.theoremItems.map(item => item.wrapper), addButton);
     }
     appendRestoredTheoremItem(item) {
         this.theoremItems.push(item);
@@ -2159,14 +2313,11 @@ export class TTGui {
         const workspace = this.syncTheoremWorkspaceFromDom();
         this.applyTheoremWorkspaceSnapshot(workspace.snapshot());
         this.syncTheoremDomOrder();
-        const layout = new Map(workspace.layout().map(item => [item.id, item]));
-        for (const item of this.theoremItems) {
-            const state = layout.get(item.id);
-            if (!state)
-                continue;
-            item.wrapper.classList.toggle("hide", state.hidden);
-            item.wrapper.classList.toggle("tt-folder-disabled", state.disabled);
-            item.wrapper.style.setProperty("--tt-folder-depth", String(state.depth));
+        const itemByWrapper = new Map(this.theoremItems.map(item => [item.wrapper, item]));
+        applyWorkspaceLayout(this.theoremItems.map(item => item.wrapper), workspace.layout(), (row, state) => {
+            const item = itemByWrapper.get(row);
+            if (!item)
+                return;
             if (item.kind === "theorem") {
                 item.input.dataset.ttDisabled = String(state.disabled);
                 item.wrapper.classList.toggle("tt-theorem-disabled", state.disabled);
@@ -2178,15 +2329,17 @@ export class TTGui {
                 item.localCheckbox.title = TR(state.canBeLocal
                     ? "局部常量仅在所在文件夹及子文件夹中可见"
                     : "局部常量需放在文件夹中");
-                item.localCheckbox.parentElement.title = item.localCheckbox.title;
-                continue;
+                if (item.localCheckbox.parentElement) {
+                    item.localCheckbox.parentElement.title = item.localCheckbox.title;
+                }
+                return;
             }
             item.title.innerText = item.name;
             item.title.classList.toggle("dir-open", item.open);
             item.title.classList.toggle("dir-close", !item.open);
-            item.wrapper.dataset.dragFolderOpen = String(item.open);
+            row.dataset.dragFolderOpen = String(item.open);
             item.checkbox.checked = item.disabled;
-        }
+        });
     }
     isTypePanelVisible() {
         return document.getElementById("panel-2")?.classList.contains("show") ?? false;
@@ -2377,7 +2530,10 @@ export class TTGui {
         const wrapper = document.createElement("div");
         wrapper.className = "wrapper tt-folder-row";
         wrapper.dataset.dragFolder = "true";
-        this.createTheoremDragHandle(wrapper, id);
+        this.createTheoremDragHandle(wrapper, id, {
+            folder: true,
+            folderOpen: saved?.open ?? true
+        });
         const addTheorem = document.createElement("button");
         addTheorem.type = "button";
         addTheorem.className = "inhabitat-modify";
@@ -2699,6 +2855,13 @@ export class TTGui {
             timeout: Core.timeout,
             semanticResourceScale: this.semanticResourceScale,
             language: langMgr.lang,
+            trustedAxioms: (this.sandboxAxioms ?? []).map(([name, type]) => [name, Core.clone(type)]),
+            trustedInductives: (this.sandboxInductives ?? []).map(bundle => cloneInductiveBundle(bundle)),
+            trustedDefinitions: (this.sandboxDefinitions ?? []).map(([name, definition]) => [
+                name,
+                Core.clone(definition)
+            ]),
+            trustedDeclarationOrder: this.sandboxDeclarationOrder?.map(entry => ({ ...entry })),
         };
     }
     getWorkerDefinitionSlots(definitionEnd, scopeFolderId = null) {
@@ -3913,6 +4076,127 @@ export class TTGui {
         this.warmCoreWorkerWhenEmpty();
         this.revalidateTheorems();
         void this.restorePendingProofSessionsWhenReady();
+    }
+    /**
+     * Install validated sandbox axioms into the creative type-layer context.
+     * Survival mode never accepts this bridge, so sandbox state cannot alter
+     * its unlocks, theorem rows, map gates, or achievements.
+     */
+    setSandboxAxioms(input, options = {}) {
+        if (!this.creativeMode)
+            return;
+        const previousSandboxNames = new Set([
+            ...(this.sandboxAxiomNames ?? []),
+            ...(this.sandboxDefinitionNames ?? [])
+        ]);
+        for (const bundle of this.sandboxInductives ?? []) {
+            previousSandboxNames.add(bundle.type[0]);
+            for (const [name] of bundle.auxiliaryTypes ?? [])
+                previousSandboxNames.add(name);
+            for (const [name] of bundle.constructors ?? [])
+                previousSandboxNames.add(name);
+            if (bundle.eliminator)
+                previousSandboxNames.add(bundle.eliminator[0]);
+            if (bundle.recursor)
+                previousSandboxNames.add(bundle.recursor[0]);
+        }
+        for (const name of previousSandboxNames) {
+            consts.delete(name);
+            constructors.delete(name);
+            destructors.delete(name);
+            macro.delete(name);
+        }
+        for (const name of this.sandboxAxiomNames ?? []) {
+            this.core.setSystemType(name);
+        }
+        // Transparent definitions are a separate projection from axioms and
+        // inductive bundles. Remove the previous projection first, otherwise
+        // a disabled/replaced sandbox definition remains visible to delta
+        // reduction and can trigger a false name conflict on re-install.
+        for (const name of this.sandboxDefinitionNames ?? []) {
+            this.core.setSystemDefinition(name);
+            this.core.clearDefinitionCache(name);
+        }
+        this.sandboxAxioms = [];
+        this.sandboxAxiomNames = new Set();
+        this.sandboxInductives = [];
+        this.sandboxDefinitions = [];
+        this.sandboxDefinitionNames = new Set();
+        this.sandboxDeclarationOrder = undefined;
+        // Inductive bundles are installed as a transaction by Core. Clear the
+        // previous sandbox projection before installing the new bridge so a
+        // disabled/replaced declaration cannot survive as a stale constant.
+        this.core.clearSystemInductives();
+        const bridge = !Array.isArray(input) && input && "axioms" in input
+            ? input
+            : {
+                axioms: Array.isArray(input) ? input : [],
+                inductives: [],
+                definitions: []
+            };
+        const axioms = Array.isArray(bridge.axioms) ? bridge.axioms : [];
+        const inductives = Array.isArray(bridge.inductives) ? bridge.inductives : [];
+        const definitions = Array.isArray(bridge.definitions) ? bridge.definitions : [];
+        const nextAxioms = axioms.map(([name, type]) => [
+            name,
+            Core.clone(type)
+        ]);
+        const nextInductives = inductives.map(bundle => cloneInductiveBundle(bundle));
+        const nextDefinitions = definitions.map(([name, definition]) => [
+            name,
+            Core.clone(definition)
+        ]);
+        const nextOrder = bridge.order === undefined
+            ? undefined
+            : bridge.order.map(entry => ({ kind: entry.kind, name: entry.name }));
+        installTrustedDeclarations(this.core, {
+            trustedAxioms: nextAxioms,
+            trustedInductives: nextInductives,
+            trustedDefinitions: nextDefinitions,
+            trustedDeclarationOrder: nextOrder
+        });
+        this.sandboxAxioms = nextAxioms;
+        this.sandboxAxiomNames = new Set(this.sandboxAxioms.map(([name]) => name));
+        this.sandboxInductives = nextInductives;
+        this.sandboxDefinitions = nextDefinitions;
+        this.sandboxDefinitionNames = new Set(this.sandboxDefinitions.map(([name]) => name));
+        this.sandboxDeclarationOrder = nextOrder;
+        this.core.syncSemanticDefinitions();
+        this.core.syncSemanticTypes();
+        this.invalidateHottDefCtxt();
+        this.definitionRevision++;
+        this.coreWorkerStateRevision++;
+        this.coreWorkerGeneration = -1;
+        this.coreWorkerConfigKey = "";
+        this.coreWorkerConfigurePromise = null;
+        this.coreWorkerLoadedThrough = 0;
+        this.assistWorkerSessionReady = false;
+        this.assistWorkerGeneration = -1;
+        this.assistWorkerConfigKey = "";
+        this.assistWorkerConfigurePromise = null;
+        this.tacticDefinitionsRevision = -1;
+        if (!this.skipRendering) {
+            if (options.revalidate === false) {
+                const inputs = this.getInhabitatArray();
+                const previousUserNames = this.userDefinedConsts
+                    .filter((definition) => !!definition)
+                    .map(definition => definition[0]);
+                this.invalidateTheoremChecks(0, true);
+                this.clearUserDefinitionContext();
+                for (const name of previousUserNames)
+                    macro.delete(name);
+                this.userDefinedConsts = inputs.map(() => null);
+                for (const input of inputs)
+                    input["validationInvalidated"] = true;
+                this.refreshUserConstNames();
+                this.gateQueryCache.clear();
+            }
+            else {
+                this.updateTypeList(this.unlockedTypes);
+                this.revalidateTheorems();
+                void this.restorePendingProofSessionsWhenReady();
+            }
+        }
     }
     warmCoreWorkerWhenEmpty() {
         if (!this.coreWorker)

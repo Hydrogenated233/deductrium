@@ -320,7 +320,7 @@ div.dir-val:not(.dir-info):hover {
 }
 
 .dragging-inside {
-    box-shadow: inset 0 -3px orange;
+    border-bottom: 2px solid orange !important;
 }
 
 .macro-substep {
@@ -738,8 +738,21 @@ div.hintbar {
     overflow-wrap: anywhere;
 }
 
+.sandbox-help {
+    margin: 0.35em 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+
 .fs-proof-help > summary,
 .tactic-help > summary {
+    display: inline-block;
+    cursor: pointer;
+    color: #555;
+    user-select: none;
+}
+
+.sandbox-help > summary {
     display: inline-block;
     cursor: pointer;
     color: #555;
@@ -755,14 +768,32 @@ div.hintbar {
     overflow-wrap: anywhere;
 }
 
+.sandbox-help-content {
+    margin: 0.35em 0 0.5em 1.25em;
+    max-width: 60em;
+    color: #444;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
 .fs-proof-help-content p,
 .tactic-help-content p {
+    margin: 0.25em 0;
+}
+
+.sandbox-help-content p {
     margin: 0.25em 0;
 }
 
 .fs-proof-help-content code,
 .tactic-help-content code {
     white-space: nowrap;
+}
+
+.sandbox-help-content code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 #fs-proof-target {
@@ -1370,6 +1401,15 @@ div.wrapper.error {
     padding-left: calc(var(--tt-folder-depth, 0) * 16px);
 }
 
+.inhabitat .wrapper > .tt-drag-handle {
+    /* Keep the hit target at the list edge while the row contents indent. */
+    transform: translateX(calc(var(--tt-folder-depth, 0) * -16px));
+    touch-action: none;
+    user-select: none;
+    position: relative;
+    z-index: 1;
+}
+
 .tt-drag-handle {
     cursor: grab;
 }
@@ -1474,6 +1514,207 @@ div.wrapper.error {
 
 .hide {
     display: none;
+}
+
+/* Isolated type-theory sandbox.  Keep it dense like the other tool panels so
+   declarations remain scannable on desktop and narrow screens. */
+.sandbox-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1em;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 0.45em;
+}
+
+.sandbox-header h2 {
+    margin: 0;
+    font-size: 1.25em;
+}
+
+.sandbox-header p {
+    margin: 0.3em 0 0;
+}
+
+.sandbox-isolation-badge,
+.sandbox-trusted {
+    color: #176b3a;
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+.sandbox-editor,
+.sandbox-check {
+    margin-top: 0.7em;
+    padding: 0.55em 0;
+    border-bottom: 1px solid #ddd;
+}
+
+.sandbox-editor label,
+.sandbox-check label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.3em;
+}
+
+#sandbox-input {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 4em;
+    resize: vertical;
+    font-family: inherit;
+}
+
+.sandbox-actions,
+.sandbox-check-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35em;
+    margin-top: 0.4em;
+}
+
+.sandbox-status {
+    min-height: 1.4em;
+    margin-top: 0.45em;
+    color: #176b3a;
+}
+
+.sandbox-status.error,
+.sandbox-invalid .sandbox-declaration-status {
+    color: #a22;
+}
+
+.sandbox-declarations {
+    margin-top: 0.65em;
+}
+
+.sandbox-list-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1em;
+    margin-bottom: 0.35em;
+    font-weight: 600;
+}
+
+.sandbox-list-hint {
+    color: #666;
+    font-size: 0.85em;
+    font-weight: normal;
+}
+
+.sandbox-declaration-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 4px;
+    min-height: 28px;
+    padding: 0;
+}
+
+/* Keep workspace visibility authoritative: this rule comes after the row's
+   display declaration, so a collapsed folder can actually hide descendants. */
+.sandbox-declaration-row.hide {
+    display: none;
+}
+
+.sandbox-declaration-row.dragging,
+.sandbox-folder-row.dragging {
+    opacity: 0.55;
+}
+
+.sandbox-declaration-row.drag-over,
+.sandbox-folder-row.drag-over {
+    outline: 2px solid #888;
+    outline-offset: -2px;
+}
+
+.sandbox-folder-row {
+    padding-left: calc(var(--tt-folder-depth, 0) * 16px);
+}
+
+.sandbox-folder-name {
+    flex: 1 1 auto;
+    min-width: 8em;
+    font-weight: 600;
+}
+
+.sandbox-folder-heading {
+    margin-top: 0.45em;
+    color: #555;
+    font-size: 0.9em;
+}
+
+.sandbox-folder-collapsed {
+    border-bottom: 1px solid #ccc;
+}
+
+.sandbox-source {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+    box-sizing: border-box;
+}
+
+.sandbox-source-display {
+    flex: 1 1 auto;
+    min-width: 0;
+    cursor: text;
+    overflow-wrap: anywhere;
+}
+
+.sandbox-kind {
+    color: #555;
+    font-size: 0.85em;
+}
+
+.sandbox-declaration-status {
+    flex: 0 1 14em;
+    min-width: 6em;
+    overflow-wrap: anywhere;
+    word-break: normal;
+    color: #176b3a;
+    font-size: 0.85em;
+}
+
+.sandbox-disabled {
+    opacity: 0.62;
+}
+
+.sandbox-empty {
+    color: #666;
+    margin: 0.5em 0;
+}
+
+#sandbox-check-input {
+    flex: 1 1 18em;
+    min-width: 0;
+}
+
+.sandbox-check-output {
+    min-height: 1.4em;
+    margin-top: 0.35em;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 680px) {
+    .sandbox-header,
+    .sandbox-list-header {
+        flex-direction: column;
+        gap: 0.25em;
+    }
+
+    .sandbox-source {
+        flex-basis: 12em;
+    }
+
+    .sandbox-declaration-row {
+        flex-wrap: wrap;
+    }
+
+    .sandbox-kind,
+    .sandbox-trusted,
+    .sandbox-declaration-status { font-size: 0.8em; }
 }
 
 .blocked {

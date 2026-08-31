@@ -2,11 +2,13 @@
 
 ## Theorem Workspace / 定理工作区
 
-The theorem workspace is the ordered collection of theorem rows and folders in
-the type layer. It owns ordering, folder membership, visibility, local-constant
-scope, disabled-subtree state, and the serialized save shape. Rendering,
-validation execution, and type-theory caches consume workspace decisions but do
-not define them.
+The theorem workspace is the ordered collection of rows and folders in the type
+layer. It owns ordering, folder membership, visibility, local-constant scope,
+disabled-subtree state, and the serialized save shape. Rendering, validation
+execution, and type-theory caches consume workspace decisions but do not define
+them. The type-theory sandbox uses the same workspace contract through an
+adapter, so ordering, folder insertion, collapse/drop behavior, and row
+rendering must not acquire a second set of semantics there.
 
 ## Theorem row
 
@@ -16,23 +18,28 @@ be a local constant when it is inside a folder and marked local.
 
 ## Folder
 
-A folder is an ordered workspace item containing the following theorem rows.
-Its open state controls whether descendants are visible as drop targets; its
-disabled state recursively removes descendants from theorem availability and
-validation without changing their stored text or cached result.
+A folder is an ordered workspace item containing the following rows. In the
+type layer those rows are theorem rows; in the sandbox they are declaration
+rows. Its open state controls whether descendants are visible as drop targets;
+a collapsed folder is not a drop target. Its disabled state recursively
+removes descendants from availability and validation without changing their
+stored text or cached result.
 
 ## Workspace scope
 
-Workspace scope is the set of folders that contain a theorem row. A selected
-folder scope may expose local constants owned by that folder or one of its
-ancestors; a parent folder cannot see helpers local to a child folder. Global
-constants remain available according to their position.
+Workspace scope is the set of folders that contain a workspace row. In the type
+layer, a selected folder scope may expose local constants owned by that folder
+or one of its ancestors; a parent folder cannot see helpers local to a child
+folder. Sandbox declarations instead use declaration dependencies and ordered
+visibility, while still following the same folder membership and drop rules.
+Global constants remain available according to their position.
 
 ## Validation suffix
 
-The validation suffix is the ordered theorem-row range that must be rechecked
+The validation suffix is the ordered workspace-row range that must be rechecked
 after a workspace mutation. A workspace mutation reports the earliest affected
-row so validation scheduling remains an adapter concern.
+row so validation scheduling remains an adapter concern; the type layer applies
+this to theorem rows and the sandbox applies it to declaration rows.
 
 ## Scoped Syntax / 作用域语法
 
@@ -54,6 +61,53 @@ the core command vocabulary (`configure`, `truncate`, `set-definition`,
 Workers and Node process threads are adapters over this interface; request IDs,
 RPC generations, transport queues, recovery snapshots, and proof-assistant
 state remain outside the session.
+
+## Type-theory Sandbox Workspace / 类型论沙盒工作区
+
+The sandbox workspace is the creative-mode authoring workspace for custom
+type-theory declarations. It owns declaration rows, folders, unified visual
+order, enabled/disabled state, validation status, stable IDs, and the sandbox
+save payload. It reuses the theorem-workspace ordering and folder UI contract,
+including non-edit formula highlighting, click-to-edit behavior, expanded-only
+folder drops, and the folder-bottom insertion action. The sandbox workspace is
+not the ordinary theorem list and does not silently add rows to that list.
+
+## Sandbox declaration / 沙盒声明
+
+A sandbox declaration is a structured, sandbox-owned type, term, proposition,
+inductive signature, or HIT signature. It has a stable ID, source spelling,
+kind, dependency IDs, folder membership, validation state, and provenance. A
+stage-1 body-less declaration is explicitly marked `trusted`; that marker means
+the user supplied an axiom and does not mean the game proved it. Generated
+constructors, eliminators, and computation/coherence rules in later phases keep
+their compiler provenance and are accepted only after their phase-specific
+checks.
+
+## Sandbox trusted bridge / 沙盒可信桥接
+
+The trusted bridge is a one-way, explicit projection from the enabled and
+validated sandbox environment into the creative-mode type-layer engine. The
+current transport represents body-less declarations as `trustedAxioms`: the
+creative engine may type-check against them, but they are not ordinary user
+definitions, theorem rows, map data, achievements, or unlock records. The
+projection is rebuilt from sandbox state and can be withdrawn by disabling or
+removing a declaration; it is not a shared mutable global environment.
+
+The bridge is available only in creative mode. Survival mode must not create a
+sandbox engine, consume the bridge, or expose sandbox declarations from a save.
+"隔离" therefore means separate ownership, persistence, authority, and mode
+access; it does not prohibit this explicitly controlled creative-mode bridge.
+
+## Sandbox phase boundary / 沙盒阶段边界
+
+The phase number is a capability boundary, not a syntax shortcut. Stage 1 is
+the trusted-axiom environment. Stage 2 is delivered in two editions: the first
+supports strictly positive ordinary inductive types without indexed induction;
+the second adds indexed signatures, indexed eliminators, and indexed induction.
+Stage 3 starts only after the Stage-2 second-edition checks are complete. Stage
+4 starts with two-dimensional paths and coherence; arbitrary-dimensional HIT
+support is the final experimental extension and must not be assumed by earlier
+phases.
 
 ## Type-theory Proof Pages / 类型论证明页
 

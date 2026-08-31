@@ -6,6 +6,80 @@ import { markExplicitAtSyntax, restoreSemanticMetaNamesForDisplay } from "./pres
 import { theoremInferenceComplete } from "./theorem-validation.js";
 const parser = new ASTParser();
 /**
+ * Install the creative sandbox projection without reordering declarations by
+ * category. Older callers without an explicit order retain the legacy
+ * axioms/inductives/definitions sequence.
+ */
+export function installTrustedDeclarations(core, config) {
+    const axioms = config.trustedAxioms ?? [];
+    const inductives = config.trustedInductives ?? [];
+    const definitions = config.trustedDefinitions ?? [];
+    const axiomByName = new Map(axioms);
+    const inductiveByName = new Map(inductives.map(bundle => [bundle.type[0], bundle]));
+    const definitionByName = new Map(definitions);
+    const allEntries = [
+        ...axioms.map(([name]) => ({ kind: "axiom", name })),
+        ...inductives.map(bundle => ({ kind: "inductive", name: bundle.type[0] })),
+        ...definitions.map(([name]) => ({ kind: "definition", name }))
+    ];
+    const allNames = new Set(allEntries.map(entry => entry.name));
+    const expectedKeys = new Set(allEntries.map(entry => `${entry.kind}:${entry.name}`));
+    if (allNames.size !== allEntries.length || expectedKeys.size !== allEntries.length) {
+        throw new Error("沙盒 bridge 包含重复声明名称");
+    }
+    let ordered = allEntries;
+    if (config.trustedDeclarationOrder !== undefined) {
+        const seen = new Set();
+        ordered = config.trustedDeclarationOrder.map(entry => {
+            const key = `${entry?.kind}:${entry?.name}`;
+            if (!entry || !expectedKeys.has(key)) {
+                throw new Error(`沙盒 bridge 顺序包含未知声明：${entry?.name ?? ""}`);
+            }
+            if (seen.has(key)) {
+                throw new Error(`沙盒 bridge 顺序包含重复声明：${entry.name}`);
+            }
+            seen.add(key);
+            return { kind: entry.kind, name: entry.name };
+        });
+        if (seen.size !== expectedKeys.size) {
+            const missing = allEntries.find(entry => !seen.has(`${entry.kind}:${entry.name}`));
+            throw new Error(`沙盒 bridge 顺序缺少声明：${missing?.name ?? ""}`);
+        }
+    }
+    try {
+        for (const entry of ordered) {
+            if (entry.kind === "axiom") {
+                const type = axiomByName.get(entry.name);
+                if (type)
+                    core.setSystemType(entry.name, core.desugar(Core.clone(type), true));
+                continue;
+            }
+            if (entry.kind === "inductive") {
+                const bundle = inductiveByName.get(entry.name);
+                if (bundle)
+                    core.registerSystemInductive(bundle);
+                continue;
+            }
+            const definition = definitionByName.get(entry.name);
+            if (definition)
+                core.registerSystemDefinition(entry.name, Core.clone(definition));
+        }
+    }
+    catch (error) {
+        // Definitions install their source before checking it, and an earlier
+        // inductive bundle may already be live. Revoke the entire candidate
+        // projection before exposing the failure.
+        core.clearSystemInductives();
+        for (const [name] of definitions) {
+            core.setSystemDefinition(name);
+            core.clearDefinitionCache(name);
+        }
+        for (const [name] of axioms)
+            core.setSystemType(name);
+        throw error;
+    }
+}
+/**
  * DOM-free owner for a configured type-theory Core. This is shared by the
  * worker entry point and any future non-visual callers.
  */
@@ -104,6 +178,11 @@ export class TTCoreEngine {
                 break;
         }
         this.core.elaborateSemanticSystemTypes();
+        // The sandbox Worker validates declarations in workspace order. Keep
+        // that exact order here so definitions and inductives may depend on
+        // any preceding trusted declaration without worker/UI drift.
+        installTrustedDeclarations(this.core, config);
+        this.core.syncSemanticTypes();
         this.core.state.disableSimpleFn = disableSimpleFn;
         this.core.state.disableSimpleEq = disableSimpleEq;
         this.core.state.userDefs = {};

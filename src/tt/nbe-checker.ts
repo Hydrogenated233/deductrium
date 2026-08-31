@@ -1216,6 +1216,11 @@ function universeLevel(type: AST): AST | null {
         : null;
 }
 
+/** Whether a syntax node denotes one of the kernel's Universe sorts. */
+export function isNbeUniverseType(type: AST): boolean {
+    return universeLevel(type) !== null;
+}
+
 function lookupContextType(ast: AST, context: Context): AST | null {
     if (validId(ast.bondVarId)) {
         const binding = context.find(([, , id]) => id === ast.bondVarId);

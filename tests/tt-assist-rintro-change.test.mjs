@@ -18,11 +18,15 @@ const options = {
 };
 
 // `rintro` combines introduction with the existing dependent product eliminator.
-engine.start("Πh:(True X True),True", options);
+engine.start("Πh:(True X False),True", options);
 let snapshot = engine.apply("rintro ⟨ha,hb⟩");
 assert.deepEqual(snapshot.goals[0].context.map(([name]) => name), ["ha", "hb"]);
+assert.deepEqual(snapshot.goals[0].context.map(([name, type]) => [name, type.name]), [
+    ["ha", "True"],
+    ["hb", "False"]
+], "rintro pattern names should retain constructor argument order and types");
 engine.apply("exact true");
-assert.equal(engine.qed().theorem, "(Πh:(True×True),True)");
+assert.equal(engine.qed().theorem, "(Πh:(True×False),True)");
 
 // `change` and `show` accept only definitionally equal targets and are transactional.
 engine.start("Πh:True,True", options);

@@ -174,6 +174,17 @@ export class TheoremWorkspace {
         return id ? this.getDerived().itemIndexById.get(id) ?? -1 : -1;
     }
 
+    /** Item IDs moved together by drag/drop; folders include their complete subtree. */
+    dragBlockIds(id: string | null | undefined) {
+        if (!id) return [];
+        const derived = this.getDerived();
+        const info = derived.itemInfoById.get(id);
+        if (!info) return [];
+        const folder = derived.folderInfoById.get(id);
+        const endIndex = folder?.endIndex ?? info.itemIndex + 1;
+        return this.items.slice(info.itemIndex, endIndex).map(item => item.id);
+    }
+
     theoremIndexBeforeItem(itemIndex: number) {
         const end = Math.max(0, Math.min(Math.floor(itemIndex), this.items.length));
         return this.getDerived().theoremPrefixCounts[end] ?? 0;
@@ -383,6 +394,10 @@ export class TheoremWorkspace {
             - oldTheoremStart;
 
         const insideFolderId = destination.startsWith("inside:") ? destination.slice("inside:".length) : null;
+        const afterId = destination.startsWith("after:") ? destination.slice("after:".length) : null;
+        const afterSubtreeId = destination.startsWith("after-subtree:")
+            ? destination.slice("after-subtree:".length)
+            : null;
         let destinationBoundary: number;
         let destinationParentFolderId: string | null;
 
@@ -399,6 +414,44 @@ export class TheoremWorkspace {
             }
             destinationBoundary = folderInfo.endIndex;
             destinationParentFolderId = insideFolderId;
+        } else if (afterId) {
+            const destinationInfo = derived.itemInfoById.get(afterId);
+            const destinationItem = destinationInfo ? this.items[destinationInfo.itemIndex] : null;
+            if (!destinationInfo || !destinationItem || destinationInfo.hidden) {
+                return this.result(false, false, false, null);
+            }
+            if (destinationInfo.itemIndex >= srcIndex
+                && destinationInfo.itemIndex < srcIndex + movedItemCount) {
+                return this.result(false, false, false, null);
+            }
+            if (destinationItem.kind === "folder") {
+                const folderInfo = derived.folderInfoById.get(afterId);
+                if (!folderInfo || !destinationItem.open) {
+                    return this.result(false, false, false, null);
+                }
+                // The boundary drawn under an expanded folder title means
+                // its first child. Tail insertion remains an explicit API for
+                // the folder-bottom add action, not a drag-hover behavior.
+                destinationBoundary = folderInfo.itemIndex + 1;
+                destinationParentFolderId = afterId;
+            } else {
+                // The row's owner remains the insertion scope even when this
+                // is the last child and the boundary is the folder's end.
+                destinationBoundary = destinationInfo.itemIndex + 1;
+                destinationParentFolderId = destinationInfo.scopeFolderId;
+            }
+        } else if (afterSubtreeId) {
+            const destinationInfo = derived.itemInfoById.get(afterSubtreeId);
+            const folderInfo = derived.folderInfoById.get(afterSubtreeId);
+            if (!destinationInfo || !folderInfo || destinationInfo.hidden) {
+                return this.result(false, false, false, null);
+            }
+            if (destinationInfo.itemIndex >= srcIndex
+                && destinationInfo.itemIndex < srcIndex + movedItemCount) {
+                return this.result(false, false, false, null);
+            }
+            destinationBoundary = folderInfo.endIndex;
+            destinationParentFolderId = folderInfo.parentFolderId;
         } else if (destination === " ") {
             destinationBoundary = this.items.length;
             destinationParentFolderId = derived.insertionParentFolderIds[destinationBoundary] ?? null;
@@ -520,11 +573,40 @@ export class TheoremWorkspace {
 
     private normalizeFolderLengths() {
         this.invalidateDerived();
+        const ends = new Array<number>(this.items.length).fill(-1);
+        const stack: { index: number, end: number }[] = [];
+
+        const closeThrough = (nextIndex: number) => {
+            while (stack.length && nextIndex > stack[stack.length - 1].end) {
+                const closed = stack.pop()!;
+                ends[closed.index] = closed.end;
+                const parent = stack[stack.length - 1];
+                // A stale save can record only the direct child folder row in
+                // the parent's length. Once that child closes, propagate its
+                // complete subtree to the still-open parent.
+                if (parent && closed.index <= parent.end) {
+                    parent.end = Math.max(parent.end, closed.end);
+                }
+            }
+        };
+
+        for (let index = 0; index < this.items.length; index++) {
+            closeThrough(index);
+            const item = this.items[index];
+            if (item.kind !== "folder") continue;
+            const declaredLength = Math.max(0, Number(item.length) || 0);
+            stack.push({
+                index,
+                end: Math.min(this.items.length - 1, index + declaredLength)
+            });
+        }
+        closeThrough(this.items.length);
+
         for (let index = 0; index < this.items.length; index++) {
             const item = this.items[index];
-            if (item.kind === "folder") {
-                item.length = Math.max(0, Math.min(item.length, this.items.length - index - 1));
-            }
+            if (item.kind !== "folder") continue;
+            const end = ends[index] >= index ? ends[index] : index;
+            item.length = Math.max(0, end - index);
         }
     }
 

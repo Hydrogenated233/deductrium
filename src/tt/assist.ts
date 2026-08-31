@@ -79,7 +79,26 @@ export class Assist {
         if (!g) { return ["qed"]; }
         const type = g.type;
         const introVar = (n: string) => !type.name ? Core.getNewName(n, new Set(g.context.map(e => e[0]))) : type.name;
-        if (type.type === "X") {
+        const dynamicInductive = this.getDynamicInductiveMetadata(type);
+        if (dynamicInductive) {
+            tactics.push("constructor");
+            for (const constructor of dynamicInductive.constructors) {
+                const source = dynamicInductive.indexArguments.length
+                    ? this.dynamicConstructorApplication(
+                        constructor,
+                        dynamicInductive.uniformArguments,
+                        g
+                    )
+                    : this.dynamicConstructorSource(
+                        constructor.name,
+                        dynamicInductive.uniformArguments
+                    );
+                if (!source) continue;
+                tactics.push(constructor.argumentTypes.length
+                    ? "apply " + source
+                    : "exact " + source);
+            }
+        } else if (type.type === "X") {
             tactics.push("case");
         } else if (type.type === "+" || type.type === "apply" && type.nodes?.[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout") {
             tactics.push("left");
@@ -176,6 +195,7 @@ export class Assist {
             }
             if (this.isIndType(typ)) {
                 tactics.push("destruct " + val);
+                if (this.getDynamicInductiveMetadata(typ)) tactics.push("induction " + val);
             }
             try {
                 const k = Core.clone(typ);
@@ -237,8 +257,74 @@ export class Assist {
         }
     }
     isIndType(typ: AST) {
-        return (typ.name === "nat" || typ.name === "Bool" || typ.name === "I" || typ.name === "Z" || typ.name === "S1" || typ.name === "S2" || typ.name === "Ord" || typ.name === "True" || typ.name === "False" || (typ.type === "apply" && (typ.nodes[0].name === "Sus" || typ.nodes[0].name === "List" || typ.nodes[0].name === "Option" || typ.nodes[0].name === "Even" || typ.nodes[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout"))
+        const dynamic = !!this.getDynamicInductiveMetadata(typ);
+        return (dynamic || typ.name === "nat" || typ.name === "Bool" || typ.name === "I" || typ.name === "Z" || typ.name === "S1" || typ.name === "S2" || typ.name === "Ord" || typ.name === "True" || typ.name === "False" || (typ.type === "apply" && (typ.nodes[0].name === "Sus" || typ.nodes[0].name === "List" || typ.nodes[0].name === "Option" || typ.nodes[0].name === "Even" || typ.nodes[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout"))
             || typ.type === "+" || typ.type === "[[]]" || typ.type === "X" || typ.type === "S" || typ.type === "W" || (!Assist.disableDestructEq && ((typ.type === "=") || typ.nodes?.[0]?.nodes?.[0]?.name === "eq")));
+    }
+
+    private getDynamicInductiveMetadata(typ: AST) {
+        const application = core.flattenApplyList(typ);
+        const head = application[0];
+        if (head?.type !== "var" || !head.name) return undefined;
+        const metadata = core.getInductiveMetadata?.(head.name);
+        if (!metadata) return undefined;
+        const uniformArguments = application.slice(1, metadata.parameters.length + 1);
+        if (uniformArguments.length !== metadata.parameters.length) return undefined;
+        const indexArguments = application.slice(
+            metadata.parameters.length + 1,
+            metadata.parameters.length + metadata.indices.length + 1
+        );
+        if (indexArguments.length !== metadata.indices.length
+            || application.length !== metadata.parameters.length + metadata.indices.length + 1) {
+            return undefined;
+        }
+        return {
+            ...metadata,
+            uniformArguments: uniformArguments.map(argument => Core.clone(argument)),
+            indexArguments: indexArguments.map(argument => Core.clone(argument))
+        };
+    }
+
+    private dynamicConstructorSource(name: string, uniformArguments: readonly AST[]) {
+        return [name, ...uniformArguments.map(argument => parser.stringify(argument))].join(" ");
+    }
+
+    private dynamicConstructorApplication(
+        constructor: { name: string; argumentTypes: readonly AST[] },
+        uniformArguments: readonly AST[],
+        goal: Goal
+    ) {
+        const source = this.dynamicConstructorSource(constructor.name, uniformArguments);
+        const candidate = parser.parse(
+            source + constructor.argumentTypes.map(() => " _").join("")
+        );
+        const assertion = {
+            type: ":",
+            name: "",
+            nodes: [candidate, Core.clone(goal.type)]
+        } as AST;
+        try {
+            core.withSilentErrors(() =>
+                core.checkType(assertion, goal.context, true, undefined, true, true)
+            );
+            const elaborated = core.flattenApplyList(assertion.nodes[0]);
+            const inferredArguments = elaborated.slice(uniformArguments.length + 1);
+            const prefix: string[] = [];
+            for (const argument of inferredArguments) {
+                if (this.containsInferenceHole(argument)) break;
+                prefix.push(parser.stringify(argument));
+            }
+            return [source, ...prefix].join(" ");
+        } catch {
+            return null;
+        }
+    }
+
+    private universeLevelForType(type: AST, context: Context) {
+        const sort = core.checkType(Core.clone(type), context, false);
+        const application = core.flattenApplyList(sort);
+        if (application[0]?.type !== "var" || application[0].name !== "U") return undefined;
+        return application.length === 2 ? Core.clone(application[1]) : undefined;
     }
     intro(s: string) {
         s = s.trim();
@@ -297,6 +383,7 @@ export class Assist {
                 const temporary = Core.getNewName("h", new Set(goal.context.map(entry => entry[0])));
                 this.intro(temporary);
                 this.destruct(temporary, [pair[1], pair[2]]);
+                this.reorderContextBindings(this.goal[0], [pair[1], pair[2]]);
                 continue;
             }
             throw TR("rintro暂不支持该模式：") + pattern;
@@ -324,6 +411,19 @@ export class Assist {
         }
         push();
         return patterns;
+    }
+
+    private reorderContextBindings(goal: Goal | undefined, names: readonly string[]) {
+        if (!goal || !names.length) return;
+        const requested = new Set(names);
+        const bindings = new Map(goal.context
+            .filter(([name]) => requested.has(name))
+            .map(entry => [entry[0], entry] as const));
+        if (bindings.size !== names.length) return;
+        goal.context = [
+            ...names.map(name => bindings.get(name)),
+            ...goal.context.filter(([name]) => !requested.has(name))
+        ];
     }
 
     /** Change the current goal to a definitionally equal surface type. */
@@ -372,6 +472,23 @@ export class Assist {
     construct() {
         const goal = this.goal[0];
         if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
+        const dynamicInductive = this.getDynamicInductiveMetadata(goal.type);
+        const dynamicConstructor = dynamicInductive?.constructors
+            .map(constructor => ({
+                constructor,
+                source: this.dynamicConstructorApplication(
+                    constructor,
+                    dynamicInductive.uniformArguments,
+                    goal
+                )
+            }))
+            .find(candidate => !!candidate.source);
+        if (dynamicConstructor) {
+            const source = dynamicConstructor.source;
+            return dynamicConstructor.constructor.argumentTypes.length
+                ? this.apply(source)
+                : this.exact(source);
+        }
         if (goal.type.type === "X") return this.case();
         if (goal.type.type === "S") return this.ex("");
         if (goal.type.name === "True") return this.exact("true");
@@ -1473,42 +1590,38 @@ export class Assist {
         return this.destruct(match[1], names);
     }
 
-    private renameInductionBinding(goal: Goal, source: string, destination: string) {
+    private renameInductionBinding(goal: Goal, branchRoot: AST, source: string, destination: string) {
         if (!source || source === destination) return;
         if (goal.context.some(([name]) => name === destination)) {
             throw TR("induction分支名称已存在：" + destination);
         }
         const replacement = wrapVar(destination);
+        let branch = branchRoot;
+        let renamedBinder = false;
+        while (branch?.type === "L" && branch.nodes?.[1]) {
+            if (branch.name === source) {
+                this.replaceFreeVar(branch.nodes[1], source, replacement);
+                branch.name = destination;
+                renamedBinder = true;
+                break;
+            }
+            branch = branch.nodes[1];
+        }
+        if (!renamedBinder) throw TR("无法重命名归纳分支变量：" + source);
         for (const entry of goal.context) {
             if (entry[0] === source) entry[0] = destination;
             this.replaceFreeVar(entry[1], source, replacement);
         }
         this.replaceFreeVar(goal.type, source, replacement);
         this.replaceFreeVar(goal.ast, source, replacement);
+        goal.ast.checked = goal.type;
     }
 
-    private renameInductionBindings(goal: Goal, baseContextNames: Set<string>, inductiveType: AST,
-        names: string[]) {
-        const fresh = goal.context
-            .filter(([name]) => !baseContextNames.has(name))
-            .map(([name, type]) => ({ name, type }));
-        if (fresh.length !== names.length) return;
-
-        // The eliminator exposes constructor arguments in an internal order
-        // where the induction hypothesis may precede the predecessor.  Lean's
-        // `with d dh` convention names the data argument first, then its IH.
-        // Prefer the fresh binding whose type is the inductive type for `d`.
-        const ordered = fresh.slice();
-        if (names.length === 2) {
-            const dataIndex = fresh.findIndex(({ type }) => Core.exactEqual(type, inductiveType));
-            if (dataIndex >= 0) {
-                const [data] = ordered.splice(dataIndex, 1);
-                ordered.unshift(data);
-            }
-        }
-        if (ordered.length !== names.length) return;
+    private renameInductionBindings(goal: Goal, branchRoot: AST,
+        introducedNames: string[], names: string[]) {
+        if (introducedNames.length !== names.length) return;
         for (let index = 0; index < names.length; index++) {
-            this.renameInductionBinding(goal, ordered[index].name, names[index]);
+            this.renameInductionBinding(goal, branchRoot, introducedNames[index], names[index]);
         }
     }
 
@@ -1534,6 +1647,7 @@ export class Assist {
             }
         }
         if (!this.isIndType(nType)) { this.goal.unshift(goal); throw TR("只能解构解锁的归纳类型的变量"); }
+        const dynamicInductive = this.getDynamicInductiveMetadata(nType);
 
         const excludedSet = new Set(goal.context.map(e => e[0]));
         Core.getFreeVars(goal.type, excludedSet);
@@ -1542,14 +1656,20 @@ export class Assist {
         const isEqType = nType.nodes?.[0]?.nodes?.[0]?.name === "eq" || nType.type === "=";
         const isPushoutType = nType.type === "apply"
             && nType.nodes?.[0]?.nodes?.[0]?.nodes?.[0]?.name === "Pushout";
-        let indFnName = "ind_" + ((nType.nodes?.[0]?.name === "Sus" || nType.nodes?.[0]?.name === "List" || nType.nodes?.[0]?.name === "Option" || nType.nodes?.[0]?.name === "Even") ? nType.nodes[0].name : isEqType ? "eq" : nType.type === "+" ? "Sum" : nType.type === "X" ? "Prod" : nType.type === "[[]]" ? "Trunc" : nType.type === "S" ? "Prod" : nType.type === "W" ? "W" : isPushoutType ? "Pushout" : nType.name);
+        let indFnName = dynamicInductive?.eliminatorName
+            ?? "ind_" + ((nType.nodes?.[0]?.name === "Sus" || nType.nodes?.[0]?.name === "List" || nType.nodes?.[0]?.name === "Option" || nType.nodes?.[0]?.name === "Even") ? nType.nodes[0].name : isEqType ? "eq" : nType.type === "+" ? "Sum" : nType.type === "X" ? "Prod" : nType.type === "[[]]" ? "Trunc" : nType.type === "S" ? "Prod" : nType.type === "W" ? "W" : isPushoutType ? "Pushout" : nType.name);
         // x in x=y, just parameter for types 
 
         // nType.nodes?.[0]?.name === "Sus" ? [nType.nodes[1]] :
         const fixedEqEndpoint = nType.nodes?.[0]?.nodes?.[0]?.name === "eq"
             ? nType.nodes[0].nodes[1]
             : nType.type === "=" ? nType.nodes[0] : null;
-        let typeParams = isEqType ? [fixedEqEndpoint] : nType.type === "X" ? [wrapLambda("L", Core.getNewName("x", excludedSet), nType.nodes[0], nType.nodes[1])] : nType.type === "S" || nType.type === "W" ? [wrapLambda("L", nType.name, nType.nodes[0], nType.nodes[1])] : [];
+        let typeParams = dynamicInductive
+            ? dynamicInductive.uniformArguments.map(argument => Core.clone(argument))
+            : isEqType ? [fixedEqEndpoint]
+                : nType.type === "X" ? [wrapLambda("L", Core.getNewName("x", excludedSet), nType.nodes[0], nType.nodes[1])]
+                    : nType.type === "S" || nType.type === "W" ? [wrapLambda("L", nType.name, nType.nodes[0], nType.nodes[1])]
+                        : [];
         if (isPushoutType) {
             const pushoutArgs = core.flattenApplyList(nType).slice(1);
             const [pushoutC, pushoutF, pushoutG] = pushoutArgs;
@@ -1609,8 +1729,37 @@ export class Assist {
             goalWithConds = wrapLambda("P", k, v, goalWithConds);
         }
 
+        if (dynamicInductive?.fullEliminatorName) {
+            const motiveUniverse = this.universeLevelForType(goalWithConds, goal.context);
+            if (motiveUniverse && !(motiveUniverse.type === "var" && motiveUniverse.name === "@0")) {
+                indFnName = dynamicInductive.fullEliminatorName;
+                typeParams = [
+                    motiveUniverse,
+                    ...dynamicInductive.uniformArguments.map(argument => Core.clone(argument))
+                ];
+            }
+        }
+
 
         let C = wrapLambda("L", n, nType, goalWithConds);
+        if (dynamicInductive?.indexArguments.length) {
+            for (let index = dynamicInductive.indexArguments.length - 1; index >= 0; index--) {
+                const indexArgument = dynamicInductive.indexArguments[index];
+                const indexType = core.checkType(Core.clone(indexArgument), goal.context, false);
+                const indexName = Core.getNewName(
+                    dynamicInductive.indices[index]?.name || `i${index}`,
+                    excludedSet
+                );
+                excludedSet.add(indexName);
+                C = wrapLambda("L", indexName, indexType, Core.clone(C, true));
+                C.nodes[1] = this.genReplaceFn(
+                    C.nodes[1],
+                    indexArgument,
+                    indexName,
+                    excludedSet
+                );
+            }
+        }
         if (groupParam) {
             const eqType = core.checkType(groupParam, goal.context, false);
             const newY = Core.getNewName(groupParam.type === "var" ? groupParam.name : indFnName === "ind_Even" ? "n" : "y", excludedSet);
@@ -1659,7 +1808,12 @@ export class Assist {
         const holes = this.flattenParams(headType);
         // grpara is group param
         // ind_xxx :param->C->(C grpara? ctor1)->(C grpara? ctor2)->...->grpara->x:xxx->(C grpara xxx)
-        let ctorNumbers = indFnParams.length - typeParams.length - 1 - (groupParam ? 1 : 0) - 1;
+        let ctorNumbers = indFnParams.length
+            - typeParams.length
+            - 1
+            - (dynamicInductive?.indexArguments.length ?? 0)
+            - (groupParam ? 1 : 0)
+            - 1;
         const indFnBody = [];
         const newGoals: Goal[] = [];
         const introNums: string[][] = [];
@@ -1704,24 +1858,25 @@ export class Assist {
             }
         }
         if (groupParam) indFnBody.push(groupParam);
+        if (dynamicInductive?.indexArguments.length) {
+            indFnBody.push(...dynamicInductive.indexArguments.map(argument => Core.clone(argument)));
+        }
         conds.reverse();
         Core.assign(goal.ast, wrapApply(indFnHead, ...indFnBody, nast, ...conds.map(e => {
             const k = wrapVar(e[0]); k.checked = e[1]; return k;
         })), true);
         let k = 0;
-        // The eliminated variable may be reused by the generated constructor
-        // binding (for nat, the step predecessor is commonly named `n` again).
-        // Exclude it from the old-context set so `induction n with d dh` can
-        // rename both the predecessor and its induction hypothesis.
-        const baseContextNames = new Set(goal.context
-            .map(e => e[0])
-            .filter(name => name !== n));
         for (const g of newGoals) {
             this.goal.unshift(g);
             const intros = introNums[k++];
-            intros.forEach(e => this.intro((n + "_" + e).replaceAll("_x", "")));
+            const branchRoot = g.ast;
+            const introducedNames: string[] = [];
+            intros.forEach(e => {
+                this.intro((n + "_" + e).replaceAll("_x", ""));
+                introducedNames.push(g.context[0][0]);
+            });
             if (inductionNames.length) {
-                this.renameInductionBindings(g, baseContextNames, nType, inductionNames);
+                this.renameInductionBindings(g, branchRoot, introducedNames, inductionNames);
             }
             this.goal.shift();
         }

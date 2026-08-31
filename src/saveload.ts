@@ -4,6 +4,7 @@ import { calcMaxReachOrd } from "./hy/ordinal.js";
 import { SavesParser as HySavesParser } from "./hy/savesparser.js";
 import { TR } from "./lang.js";
 import { SavesParser as TtSavesParser } from "./tt/savesparser.js";
+import { SANDBOX_SAVE_VERSION, sandboxEnabledInMode } from "./tt/sandbox.js";
 const splittor = "-(=)-";
 const dict = {
     ',"aE0","aPair","aPow","aUnion","areg","arepl","asep","ainf",': "a#`",
@@ -44,32 +45,44 @@ const replaceArr2 = replaceArr1.slice(0).reverse();
 
 export class GameSaveLoad {
     storageKey = "deductrium-save";
+    private persistenceSuspended = false;
     constructor(gamemode: "survival" | "creative") {
-        if (gamemode === "creative") {
+        if (sandboxEnabledInMode(gamemode)) {
             this.storageKey = "deductrium-creative-save";
             document.getElementById("gamemode").innerText = TR("[创造模式]");
             const panels = document.querySelectorAll("#panel>button") as NodeListOf<HTMLButtonElement>;
             panels[0].classList.add("hide");
             panels[1].classList.remove("hide");
             panels[2].classList.remove("hide");
-            panels[3].classList.remove("hide");
-            panels[3].click();
+            document.getElementById("progress-btn")?.classList.remove("hide");
+            document.getElementById("sandbox-btn")?.classList.remove("hide");
+            document.getElementById("sandbox-btn")?.removeAttribute("aria-hidden");
+            document.getElementById("panel-4")?.removeAttribute("aria-hidden");
+            document.getElementById("progress-btn")?.click();
         } else {
             document.getElementById("gamemode").innerText = TR("[生存模式]");
+            document.getElementById("sandbox-btn")?.classList.add("hide");
+            document.getElementById("sandbox-btn")?.setAttribute("aria-hidden", "true");
+            document.getElementById("panel-4")?.classList.remove("show");
+            document.getElementById("panel-4")?.setAttribute("aria-hidden", "true");
         }
     }
     stateChangeTimer: number | boolean = false;
     timeOut = 3000;
     stateChange(game: Game) {
+        if (this.persistenceSuspended) return;
         if (this.stateChangeTimer !== false) {
             clearTimeout(this.stateChangeTimer as number);
         }
         this.stateChangeTimer = setTimeout(() => this.flush(game), this.timeOut);
     }
     flush(game: Game) {
+        if (this.persistenceSuspended) {
+            this.cancelPendingSave();
+            return;
+        }
         if (this.stateChangeTimer === false) return;
-        clearTimeout(this.stateChangeTimer as number);
-        this.stateChangeTimer = false;
+        this.cancelPendingSave();
         try {
             this.save(game);
         } catch (error) {
@@ -81,7 +94,7 @@ export class GameSaveLoad {
         try {
             this.clearState(game);
 
-            let [globaldata, hydata, fsdata, ttdata] = this.deserializeStr(str).split(splittor);
+            const [globaldata, hydata, fsdata, ttdata, sandboxdata] = this.deserializeStr(str).split(splittor);
 
             this.deserialize(game, globaldata);
             new HySavesParser().deserialize(game.hyperGui.world, hydata);
@@ -90,6 +103,7 @@ export class GameSaveLoad {
             new FsSavesParser(game.creative).deserialize(game.fsGui, fsdata);
             game.fsGui.enableMIFFT_RP = fs_enableMIFFT_RP;
             new TtSavesParser().deserialize(game.ttGui, ttdata);
+            this.restoreSandbox(game, sandboxdata);
             localStorage.setItem(this.storageKey, str);
             document.getElementById("gamemode").innerText = TR(game.creative ? "[创造模式]" : "[生存模式]");
         } catch (e) {
@@ -111,17 +125,53 @@ export class GameSaveLoad {
         const hydata = new HySavesParser().serialize(game.hyperGui.world);
         const ttdata = new TtSavesParser().serialize(game.ttGui);
         const globaldata = this.serialize(game);
-        const data = this.serializeStr([globaldata, hydata, fsdata, ttdata].join(splittor));
+        const sections = [globaldata, hydata, fsdata, ttdata];
+        const sandboxdata = this.serializeSandbox(game);
+        if (sandboxdata !== undefined) sections.push(sandboxdata);
+        const data = this.serializeStr(sections.join(splittor));
         localStorage.setItem(this.storageKey, data);
         if (!dom) return data;
         dom.value = data;
         dom.focus();
     }
-    reset() {
+    reset(game?: Game) {
         if (confirm(TR("确定要放弃所有游戏进度吗？"))) {
+            // Navigation dispatches pagehide after reset. Permanently suppress
+            // this loader first so that callback cannot recreate the save.
+            this.persistenceSuspended = true;
+            this.cancelPendingSave();
+            game?.sandboxGui?.clearPersistedSave();
             localStorage.removeItem(this.storageKey);
             window.location.reload();
         }
+    }
+
+    private cancelPendingSave() {
+        if (this.stateChangeTimer !== false) clearTimeout(this.stateChangeTimer as number);
+        this.stateChangeTimer = false;
+    }
+
+    private restoreSandbox(game: Game, data?: string) {
+        if (!game.creative || !game.sandboxGui) return;
+        const value = data === undefined || data === ""
+            ? {
+                version: SANDBOX_SAVE_VERSION,
+                declarations: [],
+                folders: [],
+                order: []
+            }
+            : JSON.parse(data.startsWith("%7B") ? decodeURIComponent(data) : data);
+        game.sandboxGui.restoreGameSave(value);
+    }
+
+    private serializeSandbox(game: Game) {
+        if (!game.creative) return undefined;
+        return encodeURIComponent(JSON.stringify(game.sandboxGui?.serializeGameSave() ?? {
+            version: SANDBOX_SAVE_VERSION,
+            declarations: [],
+            folders: [],
+            order: []
+        }));
     }
     clearState(game: Game) {
         game.hyperGui.world.reload();
