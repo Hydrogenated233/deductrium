@@ -579,6 +579,11 @@ export class InferenceProofAssistant {
         const previousRows = page.propositions.slice();
         const systemSnapshot = this.captureFormalSystemState();
         try {
+            // A deferred assistant row is visible to proposition gates before
+            // `entr`/`inln` expands it.  Validate the exact replay path now so
+            // an invalid generalization cannot enter the page as a trusted
+            // atomic step.  The expanded graph is discarded and remains lazy.
+            this.validateDeferredMaterialization();
             this.ensureTautoRules(this.root);
             const data = this.buildDeferredQed(result.macroName, result.deductionName);
             result.deductionName = data.deductionName;
@@ -638,6 +643,21 @@ export class InferenceProofAssistant {
             this.restoreFormalSystemState(systemSnapshot);
             if (previousActive !== page.id) this.fs.inferencePages.activate(previousActive);
             throw error;
+        }
+    }
+
+    /** Check deferred replay transactionally without retaining expanded steps. */
+    private validateDeferredMaterialization(): void {
+        const systemSnapshot = this.captureFormalSystemState();
+        const previousActive = this.fs.inferencePages.activeId;
+        try {
+            this.materializeForDeferred();
+        } finally {
+            this.restoreFormalSystemState(systemSnapshot);
+            if (this.fs.inferencePages.activeId !== previousActive
+                && this.fs.inferencePages.page(previousActive)) {
+                this.fs.inferencePages.activate(previousActive);
+            }
         }
     }
 
@@ -815,16 +835,36 @@ export class InferenceProofAssistant {
         }).join("\u0001");
     }
 
-    private collectExternalPremises(): DeferredAssistantPayload["premises"] {
-        const page = this.fs.inferencePages.page(this.pageId);
-        const result: DeferredAssistantPayload["premises"] = [];
-        const seen = new Set<string>();
+    /**
+     * Collect theorem-list premises once for both named-qed recording and
+     * deferred replay.  Proof-tree traversal order is not the user's premise
+     * order: an `apply` can expose p1 before a later branch consumes p0.  Keep
+     * the first-seen order of distinct pages for cross-page compatibility, but
+     * restore the explicit row order within each page.
+     */
+    private collectExternalPremiseRefs(): {
+        pageId: string;
+        index: number;
+        proposition: Proposition;
+    }[] {
+        const selectedPage = this.fs.inferencePages.page(this.pageId);
+        const result = new Map<string, {
+            pageId: string;
+            index: number;
+            proposition: Proposition;
+            pageOrder: number;
+        }>();
+        const pageOrder = new Map<string, number>();
         const visit = (node: DraftNode | null) => {
             if (!node) return;
             const sources = node.kind === "tauto"
                 ? (node.tautoSources ?? [])
                 : [
-                    node.kind === "haveApply" ? node.haveSource : node.source,
+                    node.kind === "haveApply"
+                        ? node.haveSource
+                        : node.kind === "obtainExists"
+                            ? node.obtainSource
+                            : node.source,
                     ...(node.kind === "haveApply"
                         ? (node.haveArgumentSources ?? []).filter((source): source is SourceRef => !!source)
                         : [])
@@ -832,24 +872,34 @@ export class InferenceProofAssistant {
             for (const source of sources) {
                 if (!source || source.kind !== "page") continue;
                 const key = `${source.pageId}:${source.index}`;
-                if (!seen.has(key)) {
-                    const proposition = this.fs.inferencePages.page(source.pageId)?.propositions[source.index];
-                    if (!proposition) throw new Error(TR("证明助手引用了不存在的推理表定理"));
-                    seen.add(key);
-                    result.push({
-                        pageId: source.pageId,
-                        index: source.index,
-                        value: astmgr.clone(proposition.value)
-                    });
-                }
+                if (result.has(key)) continue;
+                const proposition = this.fs.inferencePages.page(source.pageId)?.propositions[source.index];
+                if (!proposition) throw new Error(TR("证明助手引用了不存在的推理表定理"));
+                if (!pageOrder.has(source.pageId)) pageOrder.set(source.pageId, pageOrder.size);
+                result.set(key, {
+                    pageId: source.pageId,
+                    index: source.index,
+                    proposition,
+                    pageOrder: pageOrder.get(source.pageId)!
+                });
             }
             node.children.forEach(visit);
         };
         visit(this.root);
         // Keep the selected page in the payload even when no external premise
         // is used.  This makes old drafts deterministic across page switches.
-        if (!page) throw new Error(TR("推理表不存在"));
-        return result;
+        if (!selectedPage) throw new Error(TR("推理表不存在"));
+        return [...result.values()]
+            .sort((left, right) => left.pageOrder - right.pageOrder || left.index - right.index)
+            .map(({ pageId, index, proposition }) => ({ pageId, index, proposition }));
+    }
+
+    private collectExternalPremises(): DeferredAssistantPayload["premises"] {
+        return this.collectExternalPremiseRefs().map(({ pageId, index, proposition }) => ({
+            pageId,
+            index,
+            value: astmgr.clone(proposition.value)
+        }));
     }
 
     private buildDeferredQed(name?: string, preferredName?: string): {
@@ -1619,6 +1669,7 @@ export class InferenceProofAssistant {
         if (source.kind === "rule") {
             const deduction = this.requireDeduction(source.name);
             const explicit = this.parseRuleArguments(parts, deduction);
+            const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(explicit);
             const application = this.matchRuleApplication(deduction, node.target, explicit, node);
             this.assertRuleMatchComplete(application, source.name);
             const matchTable = application.matchTable;
@@ -1633,7 +1684,7 @@ export class InferenceProofAssistant {
                 if (this.astContainsPrivateRuleVariable(result)) {
                     if (this.astContainsFunction(result, "#rp")) this.fs.assert.expand(result, false);
                 } else {
-                    astmgr.assign(result, this.normalizeAssertionSyntax(result, true));
+                    astmgr.assign(result, this.normalizeAssertionSyntax(result, !preserveSchematicAssertions));
                 }
                 this.fs.assert.checkGrammer(result, "p");
                 return result;
@@ -1728,6 +1779,7 @@ export class InferenceProofAssistant {
             throw new Error(TR("apply at来源规则必须至少有一个前件"));
         }
         const explicit = this.parseRuleArguments(parts, deduction);
+        const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(explicit);
         const context = this.createRuleMetavariableContext(deduction, hypothesis.proposition, explicit, node);
         const match = this.matchConclusion(
             deduction,
@@ -1744,7 +1796,7 @@ export class InferenceProofAssistant {
             if (this.astContainsPrivateRuleVariable(result)) {
                 if (this.astContainsFunction(result, "#rp")) this.fs.assert.expand(result, false);
             } else {
-                astmgr.assign(result, this.normalizeAssertionSyntax(result, true));
+                astmgr.assign(result, this.normalizeAssertionSyntax(result, !preserveSchematicAssertions));
             }
             this.fs.assert.checkGrammer(result, "p");
             return result;
@@ -2954,10 +3006,13 @@ export class InferenceProofAssistant {
             const pattern = this.renameRuleMetavariables(conclusion, context.internalByOriginal);
             astmgr.replaceByMatchTable(pattern, matchTable);
             if (!this.astContainsPrivateRuleVariable(pattern)) {
-                astmgr.assign(pattern, this.normalizeAssertionSyntax(pattern, true));
+                const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(explicit);
+                astmgr.assign(pattern, this.normalizeAssertionSyntax(pattern, !preserveSchematicAssertions));
             }
-            this.fs.assert.match(astmgr.clone(target), pattern, /^\$/, false,
-                matchTable, replacedTypes, null, []);
+            if (!astmgr.equal(target, pattern)) {
+                this.fs.assert.match(astmgr.clone(target), pattern, /^\$/, false,
+                    matchTable, replacedTypes, null, []);
+            }
         } catch (error) {
             throw new Error(TR("规则结论与当前目标不匹配：") + error);
         }
@@ -2997,9 +3052,26 @@ export class InferenceProofAssistant {
         return { positional, named };
     }
 
+    /** User-supplied assertion terms can still contain theorem-schema `$` names. */
+    private explicitArgumentsContainSchematicAssertions(explicit: RuleExplicitArguments): boolean {
+        const containsSurfacePattern = (ast: AST): boolean => {
+            if (ast.type === "replvar" && ast.name.startsWith("$")
+                && !ast.name.startsWith("$$assistant_rule_")) return true;
+            return !!ast.nodes?.some(containsSurfacePattern);
+        };
+        const containsSchematicAssertion = (ast: AST): boolean => {
+            if (ast.type === "fn" && (ast.name === "#rp" || /^#v*nf$/.test(ast.name))
+                && containsSurfacePattern(ast)) return true;
+            return !!ast.nodes?.some(containsSchematicAssertion);
+        };
+        return explicit.positional.some(containsSchematicAssertion)
+            || [...explicit.named.values()].some(containsSchematicAssertion);
+    }
+
     /** Instantiate a rule for Lean-style `have h := rule args...`. */
     private instantiateRuleForHave(sourceName: string, deduction: Deduction,
         explicit: RuleExplicitArguments, node: DraftNode): RuleHaveInstantiation {
+        const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(explicit);
         const context = this.createRuleMetavariableContext(deduction, deduction.conclusion, explicit, node);
         const matchTable: ReplvarMatchTable = {};
         const replacedTypes: { [name: string]: boolean } = {};
@@ -3034,7 +3106,7 @@ export class InferenceProofAssistant {
             if (this.astContainsPrivateRuleVariable(result)) {
                 throw new Error(TR("have来源规则仍包含未解析的元变量"));
             }
-            astmgr.assign(result, this.normalizeAssertionSyntax(result, true));
+            astmgr.assign(result, this.normalizeAssertionSyntax(result, !preserveSchematicAssertions));
             this.fs.assert.checkGrammer(result, "p");
             return result;
         };
@@ -3564,32 +3636,13 @@ export class InferenceProofAssistant {
             }
         }
 
-        const collectExternalPremises = (node: DraftNode, result = new Map<string, Proposition>()): Map<string, Proposition> => {
-            const sources = node.kind === "tauto"
-                ? (node.tautoSources ?? [])
-                : [
-                    node.kind === "haveApply" ? node.haveSource
-                        : node.kind === "obtainExists" ? node.obtainSource
-                            : node.source,
-                    ...(node.kind === "haveApply"
-                        ? (node.haveArgumentSources ?? []).filter((source): source is SourceRef => !!source)
-                        : [])
-                ];
-            for (const source of sources) {
-                if (!source || source.kind !== "page") continue;
-                const sourcePage = this.fs.inferencePages.page(source.pageId);
-                const proposition = sourcePage?.propositions[source.index];
-                if (proposition) result.set(`${source.pageId}:${source.index}`, proposition);
-            }
-            for (const child of node.children) collectExternalPremises(child, result);
-            return result;
-        };
         const externalPremiseRows = new Map<string, number>();
 
         // Named qed compiles a self-contained chain.  Bring page propositions
         // used by exact into its initial condition rows before any derived row.
         if (includeExternalPremises) {
-            for (const [key, proposition] of collectExternalPremises(this.root)) {
+            for (const { pageId, index, proposition } of this.collectExternalPremiseRefs()) {
+                const key = `${pageId}:${index}`;
                 externalPremiseRows.set(key, propositions.length);
                 propositions.push({ value: astmgr.clone(proposition.value), from: null });
             }
