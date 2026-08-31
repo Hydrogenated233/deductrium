@@ -1313,6 +1313,12 @@ export class FormalSystem {
             throw TR("无法匹配非公理推理规则");
         if (this.deductions["v" + deductionIdx])
             return "v" + deductionIdx;
+        return this.addUniversalClosureDeduction(deductionIdx, from);
+    }
+    addUniversalClosureDeduction(deductionIdx, from) {
+        const d = this.generateDeduction(deductionIdx);
+        if (!d)
+            throw TR(`推理规则 `) + deductionIdx + TR(` 不存在`);
         return this.addDeduction("v" + deductionIdx, {
             type: "meta", name: "⊢",
             nodes: [
@@ -1322,7 +1328,7 @@ export class FormalSystem {
                         {
                             type: "sym", name: "V", nodes: [
                                 this._findNewReplName(deductionIdx),
-                                d.conclusion
+                                astmgr.clone(d.conclusion)
                             ]
                         }
                     ]
@@ -1379,6 +1385,16 @@ export class FormalSystem {
             return "v" + idx;
         }
         const d = this.generateDeduction(idx);
+        // A named proof-assistant theorem is already checked before qed and
+        // carries its own replay recipe.  Treat a closed recorded theorem as
+        // the atomic source of its first universal lift.  Materializing it
+        // here would replace the source with the shared `__assistant` virtual
+        // step; generated helpers such as `v__assistant` are global names and
+        // would otherwise retain the proposition of whichever theorem was
+        // lifted first.
+        if (d?.deferredKind === "assistant" && !d.conditions?.length) {
+            return this.addUniversalClosureDeduction(idx, from);
+        }
         this.materializeDeferredDeduction(idx);
         const s = this._findNewReplName(idx);
         const SmatchTable = { [s.name]: { type: "replvar", name: "#" + s.name } };
