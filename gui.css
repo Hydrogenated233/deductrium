@@ -1537,10 +1537,20 @@ div.wrapper.error {
 }
 
 .sandbox-isolation-badge,
-.sandbox-trusted {
-    color: #176b3a;
+.sandbox-trusted,
+.sandbox-hit {
     font-size: 0.85em;
     white-space: nowrap;
+}
+
+.sandbox-isolation-badge,
+.sandbox-trusted {
+    color: #176b3a;
+}
+
+.sandbox-hit,
+.sandbox-hit-keyword {
+    color: #8a4f00;
 }
 
 .sandbox-editor,
@@ -1714,6 +1724,7 @@ div.wrapper.error {
 
     .sandbox-kind,
     .sandbox-trusted,
+    .sandbox-hit,
     .sandbox-declaration-status { font-size: 0.8em; }
 }
 

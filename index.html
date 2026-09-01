@@ -474,7 +474,9 @@
                     <p>创造模式沙盒可以引用当前类型层已解锁的系统内置常量；名称区分大小写，例如 <code>nat</code>、<code>ind_nat</code>、<code>succ</code>。普通定理行和局部常量不会自动进入沙盒作用域，如需使用请在沙盒中显式声明。</p>
                     <p>普通归纳类型使用 <code>inductive</code> 声明，例如：<code>inductive tri : U | nt : tri | 0t : tri | pt : tri</code>。通过校验后会生成 <code>tri</code>、构造子和 <code>ind_tri</code>。</p>
                     <p>索引归纳把统一参数写在圆括号中，把索引写在方括号中。例如 <code>inductive Vec (A : U) [n : nat] : U | vnil : Vec A 0 | vcons : Pn:nat,A -&gt; Vec A n -&gt; Vec A (succ n)</code>。每个构造子必须显式给出返回索引；系统会生成保留索引约束的 <code>ind_Vec</code> 和 <code>rec_Vec</code>。</p>
+                    <p>一阶路径 HIT 使用 <code>hit</code> 声明，并把点构造子写在路径构造子之前。例如 <code>hit Circle2 : U | base2 : Circle2 | loop2 : base2 = base2</code>。系统会生成 <code>ind_Circle2</code>、<code>rec_Circle2</code>，以及路径的命题计算规则 <code>apd_loop2</code> 和 <code>ap_loop2</code>。</p>
                     <p>构造子的 iota 计算规则由系统自动生成：上例会让 <code>ind_tri C cnt c0t cpt nt</code> 计算为 <code>cnt</code>，对 <code>0t</code>、<code>pt</code> 也分别计算到对应分支。<code>simpl</code>、定义相等检查和 NbE 会自动使用这些规则。</p>
+                    <p>HIT 的点构造子保留 iota 定义计算；路径构造子的 <code>apd_</code>/<code>ap_</code> 规则是需要显式使用的命题，不会注册成定义相等。</p>
                     <p>当前版本不能在输入框中直接注册任意 <code>pattern =&gt; result</code> 计算规则。自定义计算规则必须先通过作用域、类型、严格正性、终止性和冲突检查；未经检查的规则会破坏定义相等，因此暂不接受。</p>
                     <p>沙盒声明是创造模式中的 trusted 公理；停用或删除后，依赖它的声明和类型层引用会一起失效。</p>
                 </div>

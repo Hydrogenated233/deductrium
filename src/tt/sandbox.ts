@@ -24,7 +24,7 @@ export function sandboxEnabledInMode(mode: GameMode): boolean {
     return mode === "creative";
 }
 
-export type SandboxDeclarationKind = "type" | "term" | "proposition" | "definition" | "inductive";
+export type SandboxDeclarationKind = "type" | "term" | "proposition" | "definition" | "inductive" | "hit";
 export type SandboxDeclarationStatus = "unchecked" | "valid" | "invalid" | "disabled";
 
 /** A trusted, body-less declaration owned only by the sandbox environment. */
@@ -42,6 +42,8 @@ export type SandboxDeclaration = {
     folderId: string | null;
     /** Parsed stage-2 signature, present for `kind: "inductive"`. */
     inductive?: SandboxInductiveDeclaration;
+    /** Parsed stage-3 first-order HIT signature, present for `kind: "hit"`. */
+    hit?: SandboxHitDeclaration;
     /** All generated names owned by an inductive declaration. */
     generatedNames?: string[];
 };
@@ -130,8 +132,31 @@ export type SandboxInductiveDeclaration = {
     constructors: SandboxInductiveConstructor[];
 };
 
+export type SandboxHitPathConstructor = {
+    name: string;
+    /** Path-local telescope, with declaration parameters in scope. */
+    arguments: SandboxInductiveBinder[];
+    type: AST;
+    typeSource: string;
+    left: AST;
+    right: AST;
+};
+
+/** Stage-3 first-order HIT signature (parameterized and non-indexed). */
+export type SandboxHitDeclaration = {
+    name: string;
+    parameters: SandboxInductiveBinder[];
+    indices: SandboxInductiveBinder[];
+    universe: string;
+    universeAst: AST;
+    pointConstructors: SandboxInductiveConstructor[];
+    pathConstructors: SandboxHitPathConstructor[];
+};
+
 export type SandboxInductiveMetadata = {
-    version: 2;
+    version: 2 | 3;
+    kind?: "inductive" | "hit1";
+    dimension?: number;
     typeName: string;
     parameterCount: number;
     indexCount: number;
@@ -141,6 +166,13 @@ export type SandboxInductiveMetadata = {
     recursorName: string;
     fullRecursorName: string;
     constructors: { name: string; argumentTypes: AST[]; resultIndices: AST[] }[];
+    pathConstructors?: {
+        name: string;
+        argumentTypes: AST[];
+        left: AST;
+        right: AST;
+        computationName?: string;
+    }[];
 };
 
 /** The read-only projection consumed by the creative type layer. */
@@ -192,6 +224,7 @@ type ParsedSandboxDeclaration = {
     /** Body of a transparent `name := term` declaration. */
     definitionAst?: AST;
     inductive?: SandboxInductiveDeclaration;
+    hit?: SandboxHitDeclaration;
 };
 
 const sandboxNamePattern = String.raw`(?:[A-Za-z_][A-Za-z0-9_']*|[0-9]+[A-Za-z_][A-Za-z0-9_']*)`;
@@ -376,6 +409,56 @@ function renameFreeInductiveNames(ast: AST, replacements: ReadonlyMap<string, st
     };
     visit(clone, bound);
     return clone;
+}
+
+/** Restore parser-only aliases, including aliases that appeared as binders. */
+function restoreSandboxParsedNames(ast: AST, replacements: ReadonlyMap<string, string>): AST {
+    const clone = Core.clone(ast);
+    const visit = (node: AST) => {
+        if (node.type === "var") {
+            node.name = replacements.get(node.name) ?? node.name;
+        } else if (["P", "L", "S", "W"].includes(node.type)) {
+            node.name = replacements.get(node.name) ?? node.name;
+        }
+        for (const child of node.nodes ?? []) visit(child);
+    };
+    visit(clone);
+    return clone;
+}
+
+function replaceSandboxIdentifiers(source: string, replacements: ReadonlyMap<string, string>) {
+    let result = source;
+    const entries = [...replacements.entries()].sort((left, right) => right[0].length - left[0].length);
+    for (const [name, replacement] of entries) {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        result = result.replace(
+            new RegExp(`(?<![A-Za-z0-9_'])${escaped}(?![A-Za-z0-9_'])`, "g"),
+            replacement
+        );
+    }
+    return result;
+}
+
+function sandboxHitParserAliases(source: string, names: readonly string[]) {
+    const hidden = new Map<string, string>();
+    const restored = new Map<string, string>();
+    let sequence = 0;
+    for (const name of names) {
+        if (hidden.has(name)) continue;
+        let alias = `_SandboxHitName${sequence++}`;
+        while (source.includes(alias) || restored.has(alias)) {
+            alias = `_SandboxHitName${sequence++}`;
+        }
+        hidden.set(name, alias);
+        restored.set(alias, name);
+    }
+    return { hidden, restored };
+}
+
+function collectSandboxAstNames(ast: AST, names = new Set<string>()) {
+    if (ast.name) names.add(ast.name);
+    for (const child of ast.nodes ?? []) collectSandboxAstNames(child, names);
+    return names;
 }
 
 function renameRecursiveOccurrence(
@@ -599,6 +682,249 @@ export function parseSandboxInductive(source: string): SandboxInductiveDeclarati
         universe: universeSource,
         universeAst: universe,
         constructors
+    };
+}
+
+function sandboxPathTelescope(type: AST, owner: string) {
+    const arguments_: SandboxInductiveBinder[] = [];
+    const used = new Set<string>();
+    let body = Core.clone(type);
+    while ((body.type === "P" || body.type === "->") && body.nodes?.[0] && body.nodes?.[1]) {
+        let name = body.type === "P" && body.name ? body.name : `x${arguments_.length}`;
+        if (body.type === "->") {
+            const unavailable = collectSandboxAstNames(body.nodes[1], new Set(used));
+            const base = name;
+            for (let suffix = 1; unavailable.has(name); suffix++) name = `${base}_${suffix}`;
+        }
+        if (used.has(name)) {
+            throw new Error(`路径构造子 ${owner} 的参数名称重复：${name}`);
+        }
+        used.add(name);
+        arguments_.push({
+            name,
+            type: Core.clone(body.nodes[0]),
+            typeSource: parser.stringify(body.nodes[0])
+        });
+        body = Core.clone(body.nodes[1]);
+    }
+    return { arguments: arguments_, body };
+}
+
+function elaborateHitEndpoint(
+    endpoint: AST,
+    signatureName: string,
+    parameters: readonly SandboxInductiveBinder[],
+    pointConstructors: readonly SandboxInductiveConstructor[],
+    pathName: string,
+    boundNames: ReadonlySet<string>
+) {
+    const terms = flattenApplication(endpoint);
+    const headName = terms[0]?.type === "var" ? terms[0].name : "";
+    if (boundNames.has(headName)) {
+        throw new Error(`路径构造子 ${pathName} 的端点 ${headName} 被局部参数遮蔽`);
+    }
+    const point = pointConstructors.find(constructor => constructor.name === headName);
+    if (!point) {
+        throw new Error(
+            `路径构造子 ${pathName} 的路径端点必须由 ${signatureName} 的点构造子形成`
+        );
+    }
+    const supplied = terms.slice(1);
+    const pointArgumentCount = point.argumentAsts.length;
+    const fullArgumentCount = parameters.length + pointArgumentCount;
+    let arguments_: AST[];
+    if (supplied.length === pointArgumentCount) {
+        arguments_ = [
+            ...parameters.map(parameter => sandboxVar(parameter.name)),
+            ...supplied.map(argument => Core.clone(argument))
+        ];
+    } else if (supplied.length === fullArgumentCount) {
+        for (let index = 0; index < parameters.length; index++) {
+            const argument = supplied[index];
+            if (argument?.type !== "var" || argument.name !== parameters[index].name) {
+                throw new Error(
+                    `路径构造子 ${pathName} 的端点必须保持统一参数 ${parameters[index].name}`
+                );
+            }
+        }
+        arguments_ = supplied.map(argument => Core.clone(argument));
+    } else {
+        throw new Error(
+            `路径构造子 ${pathName} 的端点 ${headName} 参数数量错误：需要 ${pointArgumentCount} 个点参数`
+        );
+    }
+    return sandboxConstructorTerm(headName, arguments_);
+}
+
+/** Parse a parameterized, non-indexed first-order higher inductive declaration. */
+export function parseSandboxHit(source: string): SandboxHitDeclaration {
+    const text = normalizeSandboxSource(source);
+    const [rawHeader, ...rawConstructors] = splitInductiveSections(text);
+    const header = new RegExp(String.raw`^hit\s+(${sandboxNamePattern})([\s\S]*)$`, "i")
+        .exec(rawHeader);
+    if (!header) {
+        throw new Error("一阶 HIT 声明必须使用 hit 名称 [(参数 : 类型)] : Universe 格式");
+    }
+    const declaredName = header[1];
+    const constructorParts = rawConstructors
+        .map(part => part.trim())
+        .filter(Boolean)
+        .map(raw => {
+            const match = new RegExp(
+                String.raw`^(${sandboxNamePattern})\s*(?::\s*([\s\S]*))?$`
+            ).exec(raw);
+            if (!match) throw new Error(`HIT 构造子格式错误：${raw}`);
+            return { raw, name: match[1], typeSource: match[2]?.trim() };
+        });
+    // ASTParser reserves leading P/S/W/L/X as binder tokens. Parse every
+    // declaration-owned identifier through a fresh, source-absent alias so
+    // names such as `Point` remain legal in path endpoints. Fresh aliases also
+    // prevent the old fixed `_SandboxHitSelf` placeholder from capturing a
+    // user declaration with that exact spelling.
+    const aliases = sandboxHitParserAliases(
+        text,
+        [declaredName, ...constructorParts.map(part => part.name)]
+    );
+    const hideReferences = (value: string) => replaceSandboxIdentifiers(value, aliases.hidden);
+    const restoreReferences = (ast: AST) => restoreSandboxParsedNames(ast, aliases.restored);
+    const hiddenDeclaredName = aliases.hidden.get(declaredName)!;
+    const hideDeclaredName = (value: string) => replaceSandboxIdentifiers(
+        value,
+        new Map([[declaredName, hiddenDeclaredName]])
+    );
+
+    const pointSections: string[] = [];
+    const pathSections: { raw: string; name: string; type: AST; typeSource: string }[] = [];
+    let sawPath = false;
+    for (const part of constructorParts) {
+        const constructorName = part.name;
+        const typeSource = part.typeSource;
+        if (!typeSource) {
+            if (sawPath) throw new Error("点构造子必须写在路径构造子之前");
+            pointSections.push(part.raw);
+            continue;
+        }
+        let type: AST;
+        try {
+            type = restoreReferences(parser.parse(hideReferences(typeSource)));
+        } catch (error) {
+            throw new Error(`构造子 ${constructorName} 类型格式错误：${String(error)}`);
+        }
+        const tail = sandboxPathTelescope(type, constructorName).body;
+        if (tail.type === "=") {
+            sawPath = true;
+            pathSections.push({ raw: part.raw, name: constructorName, type, typeSource });
+        } else {
+            if (sawPath) throw new Error("点构造子必须写在路径构造子之前");
+            pointSections.push(part.raw);
+        }
+    }
+    if (!pathSections.length) throw new Error("一阶 HIT 至少需要一个一阶路径构造子");
+
+    const ordinarySource = hideDeclaredName([
+        rawHeader.replace(/^hit\b/i, "inductive"),
+        ...pointSections
+    ].join(" | "));
+    const internalOrdinary = parseSandboxInductive(ordinarySource);
+    const ordinary: SandboxInductiveDeclaration = {
+        ...internalOrdinary,
+        name: declaredName,
+        parameters: internalOrdinary.parameters.map(parameter => ({
+            ...parameter,
+            type: restoreReferences(parameter.type)
+        })),
+        indices: internalOrdinary.indices.map(index => ({
+            ...index,
+            type: restoreReferences(index.type)
+        })),
+        universeAst: restoreReferences(internalOrdinary.universeAst),
+        constructors: internalOrdinary.constructors.map(constructor => {
+            const type = restoreReferences(constructor.type);
+            return {
+                ...constructor,
+                type,
+                typeSource: parser.stringify(type),
+                argumentAsts: constructor.argumentAsts.map(argument => {
+                    const argumentType = restoreReferences(argument.type);
+                    return {
+                        ...argument,
+                        type: argumentType,
+                        typeSource: parser.stringify(argumentType),
+                        recursiveTelescope: argument.recursiveTelescope?.map(binder => {
+                            const binderType = restoreReferences(binder.type);
+                            return {
+                                ...binder,
+                                type: binderType,
+                                typeSource: parser.stringify(binderType)
+                            };
+                        }) ?? null,
+                        recursiveResultIndices: argument.recursiveResultIndices?.map(restoreReferences) ?? null
+                    };
+                }),
+                result: restoreReferences(constructor.result),
+                resultIndices: constructor.resultIndices.map(restoreReferences)
+            };
+        })
+    };
+    if (ordinary.indices.length) throw new Error("一阶 HIT 第一版暂不支持索引");
+    for (const constructor of ordinary.constructors) {
+        if (constructor.argumentAsts.some(argument => argument.recursiveTelescope !== null)) {
+            throw new Error(`一阶 HIT 暂不支持递归点构造子：${constructor.name}`);
+        }
+    }
+
+    const names = new Set([ordinary.name, ...ordinary.constructors.map(constructor => constructor.name)]);
+    const parameterNames = new Set(ordinary.parameters.map(parameter => parameter.name));
+    const pathConstructors: SandboxHitPathConstructor[] = [];
+    for (const path of pathSections) {
+        if (names.has(path.name)) throw new Error(`HIT 构造子名称冲突：${path.name}`);
+        names.add(path.name);
+        const { arguments: arguments_, body } = sandboxPathTelescope(path.type, path.name);
+        if (body.type !== "=" || !body.nodes?.[0] || !body.nodes?.[1]) {
+            throw new Error(`路径构造子 ${path.name} 必须以等式为结论`);
+        }
+        for (const argument of arguments_) {
+            if (parameterNames.has(argument.name)) {
+                throw new Error(`路径构造子 ${path.name} 的参数不能遮蔽统一参数：${argument.name}`);
+            }
+            if (containsSandboxName(argument.type, ordinary.name)) {
+                throw new Error(`路径构造子 ${path.name} 的参数不能递归引用 ${ordinary.name}`);
+            }
+        }
+        const endpointBoundNames = new Set([
+            ...ordinary.parameters.map(parameter => parameter.name),
+            ...arguments_.map(argument => argument.name)
+        ]);
+        const left = elaborateHitEndpoint(
+            body.nodes[0], ordinary.name, ordinary.parameters, ordinary.constructors, path.name,
+            endpointBoundNames
+        );
+        const right = elaborateHitEndpoint(
+            body.nodes[1], ordinary.name, ordinary.parameters, ordinary.constructors, path.name,
+            endpointBoundNames
+        );
+        const elaboratedType = sandboxWrapPis(arguments_, {
+            type: "=",
+            name: "",
+            nodes: [Core.clone(left), Core.clone(right)]
+        });
+        pathConstructors.push({
+            name: path.name,
+            arguments: arguments_,
+            type: elaboratedType,
+            typeSource: parser.stringify(elaboratedType),
+            left,
+            right
+        });
+    }
+    return {
+        name: ordinary.name,
+        parameters: ordinary.parameters,
+        indices: [],
+        universe: ordinary.universe,
+        universeAst: ordinary.universeAst,
+        pointConstructors: ordinary.constructors,
+        pathConstructors
     };
 }
 
@@ -1090,9 +1416,555 @@ export function lowerSandboxInductive(signature: SandboxInductiveDeclaration): S
     } as SandboxInductiveBundle;
 }
 
+function sandboxInsertPis(type: AST, depth: number, binders: readonly SandboxInductiveBinder[]) {
+    const root = Core.clone(type);
+    let cursor = root;
+    for (let index = 0; index < depth; index++) {
+        if ((cursor.type !== "P" && cursor.type !== "->") || !cursor.nodes?.[1]) {
+            throw new Error("HIT 消去器类型结构与点构造 lowering 不一致");
+        }
+        cursor = cursor.nodes[1];
+    }
+    const tail = Core.clone(cursor);
+    const replacement = sandboxWrapPis(binders, tail);
+    Object.assign(cursor, replacement);
+    return root;
+}
+
+function sandboxHitBranchValue(
+    endpoint: AST,
+    parameters: readonly SandboxInductiveBinder[],
+    pointConstructors: readonly SandboxInductiveConstructor[],
+    branchNames: readonly string[]
+) {
+    const terms = flattenApplication(endpoint);
+    const constructorName = terms[0]?.name;
+    const constructorIndex = pointConstructors.findIndex(ctor => ctor.name === constructorName);
+    if (constructorIndex < 0) throw new Error(`未知的 HIT 点构造子端点：${constructorName || ""}`);
+    const arguments_ = terms.slice(1 + parameters.length).map(argument => Core.clone(argument));
+    return arguments_.length
+        ? sandboxApply(sandboxVar(branchNames[constructorIndex]), ...arguments_)
+        : sandboxVar(branchNames[constructorIndex]);
+}
+
+function sandboxEquality(left: AST, right: AST): AST {
+    return { type: "=", name: "", nodes: [left, right] };
+}
+
+function sandboxRenameHitPathArguments(
+    path: SandboxHitPathConstructor,
+    reserved: ReadonlySet<string>
+): SandboxHitPathConstructor {
+    const chosen = new Set(reserved);
+    const occupied = new Set(reserved);
+    for (const argument of path.arguments) {
+        occupied.add(argument.name);
+        collectSandboxAstNames(argument.type, occupied);
+    }
+    collectSandboxAstNames(path.left, occupied);
+    collectSandboxAstNames(path.right, occupied);
+    const replacements = new Map<string, string>();
+    const arguments_: SandboxInductiveBinder[] = [];
+    for (const argument of path.arguments) {
+        const type = renameFreeInductiveNames(argument.type, replacements);
+        let name = argument.name;
+        if (chosen.has(name)) name = sandboxFreshName(`path_${name}`, occupied);
+        else occupied.add(name);
+        chosen.add(name);
+        replacements.set(argument.name, name);
+        arguments_.push({ name, type, typeSource: parser.stringify(type) });
+    }
+    const left = renameFreeInductiveNames(path.left, replacements);
+    const right = renameFreeInductiveNames(path.right, replacements);
+    const type = sandboxWrapPis(arguments_, sandboxEquality(Core.clone(left), Core.clone(right)));
+    return {
+        name: path.name,
+        arguments: arguments_,
+        type,
+        typeSource: parser.stringify(type),
+        left,
+        right
+    };
+}
+
+function sandboxRenameHitUniformParameters(
+    signature: SandboxHitDeclaration,
+    reserved: ReadonlySet<string>
+): SandboxHitDeclaration {
+    const occupied = new Set(reserved);
+    const collectBinder = (binder: SandboxInductiveBinder) => {
+        occupied.add(binder.name);
+        collectSandboxAstNames(binder.type, occupied);
+    };
+    for (const parameter of signature.parameters) collectBinder(parameter);
+    collectSandboxAstNames(signature.universeAst, occupied);
+    for (const constructor of signature.pointConstructors) {
+        occupied.add(constructor.name);
+        collectSandboxAstNames(constructor.type, occupied);
+        for (const argument of constructor.argumentAsts) collectBinder(argument);
+        collectSandboxAstNames(constructor.result, occupied);
+        for (const index of constructor.resultIndices) collectSandboxAstNames(index, occupied);
+    }
+    for (const path of signature.pathConstructors) {
+        occupied.add(path.name);
+        collectSandboxAstNames(path.type, occupied);
+        for (const argument of path.arguments) collectBinder(argument);
+        collectSandboxAstNames(path.left, occupied);
+        collectSandboxAstNames(path.right, occupied);
+    }
+
+    const replacements = new Map<string, string>();
+    const parameters = signature.parameters.map(parameter => {
+        const type = renameFreeInductiveNames(parameter.type, replacements);
+        const name = reserved.has(parameter.name)
+            ? sandboxFreshName(`param_${parameter.name}`, occupied)
+            : parameter.name;
+        occupied.add(name);
+        replacements.set(parameter.name, name);
+        return { name, type, typeSource: parser.stringify(type) };
+    });
+    if ([...replacements].every(([name, replacement]) => name === replacement)) {
+        return signature;
+    }
+    const rename = (ast: AST) => renameFreeInductiveNames(ast, replacements);
+    const renameBinder = <T extends SandboxInductiveBinder>(binder: T): T => {
+        const type = rename(binder.type);
+        return { ...binder, type, typeSource: parser.stringify(type) };
+    };
+    const pointConstructors = signature.pointConstructors.map(constructor => {
+        const type = rename(constructor.type);
+        const argumentAsts = constructor.argumentAsts.map(argument => ({
+            ...renameBinder(argument),
+            recursiveTelescope: argument.recursiveTelescope?.map(renameBinder) ?? null,
+            recursiveResultIndices: argument.recursiveResultIndices?.map(rename) ?? null
+        }));
+        return {
+            ...constructor,
+            type,
+            typeSource: parser.stringify(type),
+            arguments: argumentAsts.map(argument => argument.typeSource),
+            argumentAsts,
+            result: rename(constructor.result),
+            resultIndices: constructor.resultIndices.map(rename)
+        };
+    });
+    const pathConstructors = signature.pathConstructors.map(path => {
+        const type = rename(path.type);
+        return {
+            ...path,
+            arguments: path.arguments.map(renameBinder),
+            type,
+            typeSource: parser.stringify(type),
+            left: rename(path.left),
+            right: rename(path.right)
+        };
+    });
+    const universeAst = rename(signature.universeAst);
+    return {
+        ...signature,
+        parameters,
+        universe: parser.stringify(universeAst),
+        universeAst,
+        pointConstructors,
+        pathConstructors
+    };
+}
+
+/** Lower a first-order HIT while keeping path computation propositional. */
+export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInductiveBundle {
+    if (signature.indices.length) throw new Error("一阶 HIT 第一版暂不支持索引");
+    if (!signature.pathConstructors.length) throw new Error("一阶 HIT 至少需要一个一阶路径构造子");
+    for (const constructor of signature.pointConstructors) {
+        if (constructor.argumentAsts.some(argument => argument.recursiveTelescope !== null)) {
+            throw new Error(`一阶 HIT 暂不支持递归点构造子：${constructor.name}`);
+        }
+    }
+    const uniformParameterReserved = new Set([
+        signature.name,
+        ...signature.pointConstructors.map(constructor => constructor.name),
+        ...signature.pathConstructors.flatMap(path => [
+            path.name,
+            `apd_${path.name}`,
+            `@apd_${path.name}`,
+            `ap_${path.name}`,
+            `@ap_${path.name}`
+        ]),
+        `ind_${signature.name}`,
+        `@ind_${signature.name}`,
+        `rec_${signature.name}`,
+        `@rec_${signature.name}`,
+        "U",
+        "U@",
+        "eq",
+        "trans",
+        "apd",
+        "ap"
+    ]);
+    signature = sandboxRenameHitUniformParameters(signature, uniformParameterReserved);
+    const ordinary: SandboxInductiveDeclaration = {
+        name: signature.name,
+        parameters: signature.parameters,
+        indices: [],
+        universe: signature.universe,
+        universeAst: signature.universeAst,
+        constructors: signature.pointConstructors
+    };
+    const base = lowerSandboxInductive(ordinary);
+    const fullEliminatorEntry = base.auxiliaryTypes?.find(([name]) => name === `@ind_${signature.name}`);
+    const fullRecursorEntry = base.auxiliaryTypes?.find(([name]) => name === `@rec_${signature.name}`);
+    if (!fullEliminatorEntry || !fullRecursorEntry || !base.eliminator || !base.recursor) {
+        throw new Error("HIT lowering 缺少普通归纳消去器骨架");
+    }
+    const motiveBinder = extractSandboxPiBinder(base.eliminator[1], signature.parameters.length);
+    const fullUniverseBinder = extractSandboxPiBinder(fullEliminatorEntry[1], 0);
+    const pointBranchBinders = extractSandboxPiBinders(
+        base.eliminator[1], signature.parameters.length + 1, signature.pointConstructors.length
+    );
+    const recursorPointBinders = extractSandboxPiBinders(
+        base.recursor[1], signature.parameters.length + 1, signature.pointConstructors.length
+    );
+    const motiveName = motiveBinder.name;
+    const motiveUniverseName = fullUniverseBinder.name;
+    const branchNames = pointBranchBinders.map(binder => binder.name);
+    const recursorBranchNames = recursorPointBinders.map(binder => binder.name);
+    const reserved = new Set([
+        ...uniformParameterReserved,
+        ...signature.parameters.map(parameter => parameter.name),
+        motiveName,
+        motiveUniverseName,
+        ...branchNames,
+        ...recursorBranchNames,
+        signature.name,
+        ...signature.pointConstructors.map(constructor => constructor.name),
+        ...signature.pathConstructors.map(path => path.name),
+        `ind_${signature.name}`,
+        `@ind_${signature.name}`,
+        `rec_${signature.name}`,
+        `@rec_${signature.name}`
+    ]);
+    signature = {
+        ...signature,
+        pathConstructors: signature.pathConstructors.map(path =>
+            sandboxRenameHitPathArguments(path, reserved)
+        )
+    };
+    const coherenceScope = new Set([
+        ...reserved,
+        ...signature.pathConstructors.flatMap(path =>
+            path.arguments.map(argument => argument.name)
+        )
+    ]);
+    const pathMethodNames = signature.pathConstructors.map((_, index) =>
+        sandboxFreshName(`p${index}`, coherenceScope)
+    );
+    const recursorPathMethodNames = signature.pathConstructors.map((_, index) =>
+        sandboxFreshName(`q${index}`, coherenceScope)
+    );
+    const parameterVars = signature.parameters.map(parameter => sandboxVar(parameter.name));
+
+    const dependentPathBinders: SandboxInductiveBinder[] = [];
+    const recursorPathBinders: SandboxInductiveBinder[] = [];
+    for (let index = 0; index < signature.pathConstructors.length; index++) {
+        const path = signature.pathConstructors[index];
+        const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
+        const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
+        const leftBranch = sandboxHitBranchValue(
+            path.left, signature.parameters, signature.pointConstructors, branchNames
+        );
+        const rightBranch = sandboxHitBranchValue(
+            path.right, signature.parameters, signature.pointConstructors, branchNames
+        );
+        const dependentType = sandboxWrapPis(path.arguments, sandboxEquality(
+            sandboxApply(sandboxVar("trans"), sandboxVar(motiveName), pathTerm, leftBranch),
+            rightBranch
+        ));
+        dependentPathBinders.push({
+            name: pathMethodNames[index],
+            type: dependentType,
+            typeSource: parser.stringify(dependentType)
+        });
+
+        const leftRecursorBranch = sandboxHitBranchValue(
+            path.left, signature.parameters, signature.pointConstructors, recursorBranchNames
+        );
+        const rightRecursorBranch = sandboxHitBranchValue(
+            path.right, signature.parameters, signature.pointConstructors, recursorBranchNames
+        );
+        const recursorType = sandboxWrapPis(
+            path.arguments,
+            sandboxEquality(leftRecursorBranch, rightRecursorBranch)
+        );
+        recursorPathBinders.push({
+            name: recursorPathMethodNames[index],
+            type: recursorType,
+            typeSource: parser.stringify(recursorType)
+        });
+    }
+
+    const publicEliminatorType = sandboxInsertPis(
+        base.eliminator![1],
+        signature.parameters.length + 1 + signature.pointConstructors.length,
+        dependentPathBinders
+    );
+    const fullEliminatorType = sandboxInsertPis(
+        fullEliminatorEntry[1],
+        1 + signature.parameters.length + 1 + signature.pointConstructors.length,
+        dependentPathBinders
+    );
+    const publicRecursorType = sandboxInsertPis(
+        base.recursor[1],
+        signature.parameters.length + 1 + signature.pointConstructors.length,
+        recursorPathBinders
+    );
+    const fullRecursorType = sandboxInsertPis(
+        fullRecursorEntry[1],
+        1 + signature.parameters.length + 1 + signature.pointConstructors.length,
+        recursorPathBinders
+    );
+
+    // Keep computation-rule metavariables disjoint from ordinary lowering's
+    // `?pN` parameter patterns and generated branch names.
+    const pathPatternVariables = pathMethodNames.map((_, index) => sandboxVar(`?hitPath${index}`));
+    const recursorPathPatternVariables = recursorPathMethodNames.map((_, index) =>
+        sandboxVar(`?hitRecPath${index}`)
+    );
+    const computeRules = Object.fromEntries(
+        Object.entries(base.computeRules ?? {}).map(([head, rules]) => [
+            head,
+            rules.map(rule => {
+                const pattern = rule.pattern.map(term => Core.clone(term));
+                const full = head.startsWith("@");
+                const insertion = 1 + (full ? 1 : 0) + signature.parameters.length + 1
+                    + signature.pointConstructors.length;
+                pattern.splice(
+                    insertion,
+                    0,
+                    ...(head.includes("rec_")
+                        ? recursorPathPatternVariables
+                        : pathPatternVariables).map(term => Core.clone(term))
+                );
+                return { pattern, result: Core.clone(rule.result) };
+            })
+        ])
+    ) as Record<string, { pattern: AST[]; result: AST }[]>;
+
+    const pathTypes: [string, AST][] = signature.pathConstructors.map(path => [
+        path.name,
+        sandboxWrapPis(signature.parameters, Core.clone(path.type))
+    ]);
+    const computationTypes: [string, AST][] = [];
+    for (let index = 0; index < signature.pathConstructors.length; index++) {
+        const path = signature.pathConstructors[index];
+        const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
+        const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
+        const dependentHead = sandboxApply(
+            sandboxVar(`ind_${signature.name}`),
+            ...parameterVars,
+            sandboxVar(motiveName),
+            ...branchNames.map(name => sandboxVar(name)),
+            ...pathMethodNames.map(name => sandboxVar(name))
+        );
+        const fullDependentHead = sandboxApply(
+            sandboxVar(`@ind_${signature.name}`),
+            sandboxVar(motiveUniverseName),
+            ...parameterVars,
+            sandboxVar(motiveName),
+            ...branchNames.map(name => sandboxVar(name)),
+            ...pathMethodNames.map(name => sandboxVar(name))
+        );
+        const recursorHead = sandboxApply(
+            sandboxVar(`rec_${signature.name}`),
+            ...parameterVars,
+            sandboxVar(motiveName),
+            ...recursorBranchNames.map(name => sandboxVar(name)),
+            ...recursorPathMethodNames.map(name => sandboxVar(name))
+        );
+        const fullRecursorHead = sandboxApply(
+            sandboxVar(`@rec_${signature.name}`),
+            sandboxVar(motiveUniverseName),
+            ...parameterVars,
+            sandboxVar(motiveName),
+            ...recursorBranchNames.map(name => sandboxVar(name)),
+            ...recursorPathMethodNames.map(name => sandboxVar(name))
+        );
+        const pathMethodValue = sandboxApply(sandboxVar(pathMethodNames[index]), ...pathArguments);
+        const recursorPathMethodValue = sandboxApply(
+            sandboxVar(recursorPathMethodNames[index]), ...pathArguments
+        );
+
+        const publicApdBody = sandboxWrapPis(path.arguments, sandboxEquality(
+            sandboxApply(sandboxVar("apd"), dependentHead, pathTerm),
+            pathMethodValue
+        ));
+        let publicApdType = sandboxWrapPis(dependentPathBinders, publicApdBody);
+        const pointBranchBinders = extractSandboxPiBinders(
+            base.eliminator![1], signature.parameters.length + 1, signature.pointConstructors.length
+        );
+        publicApdType = sandboxWrapPis(pointBranchBinders, publicApdType);
+        publicApdType = sandboxPi(
+            motiveName,
+            extractSandboxPiBinder(base.eliminator![1], signature.parameters.length).type,
+            publicApdType
+        );
+        publicApdType = sandboxWrapPis(signature.parameters, publicApdType);
+
+        let fullApdType = sandboxWrapPis(path.arguments, sandboxEquality(
+            sandboxApply(sandboxVar("apd"), fullDependentHead, pathTerm),
+            Core.clone(pathMethodValue)
+        ));
+        fullApdType = sandboxWrapPis(dependentPathBinders, fullApdType);
+        const fullPointBranchBinders = extractSandboxPiBinders(
+            fullEliminatorEntry[1], 1 + signature.parameters.length + 1,
+            signature.pointConstructors.length
+        );
+        fullApdType = sandboxWrapPis(fullPointBranchBinders, fullApdType);
+        fullApdType = sandboxPi(
+            motiveName,
+            extractSandboxPiBinder(fullEliminatorEntry[1], 1 + signature.parameters.length).type,
+            fullApdType
+        );
+        fullApdType = sandboxWrapPis(signature.parameters, fullApdType);
+        fullApdType = sandboxPi(motiveUniverseName, sandboxVar("U@"), fullApdType);
+
+        let publicApType = sandboxWrapPis(path.arguments, sandboxEquality(
+            sandboxApply(sandboxVar("ap"), recursorHead, pathTerm),
+            recursorPathMethodValue
+        ));
+        publicApType = sandboxWrapPis(recursorPathBinders, publicApType);
+        const recursorPointBinders = extractSandboxPiBinders(
+            base.recursor[1], signature.parameters.length + 1, signature.pointConstructors.length
+        );
+        publicApType = sandboxWrapPis(recursorPointBinders, publicApType);
+        publicApType = sandboxPi(
+            motiveName,
+            extractSandboxPiBinder(base.recursor[1], signature.parameters.length).type,
+            publicApType
+        );
+        publicApType = sandboxWrapPis(signature.parameters, publicApType);
+
+        let fullApType = sandboxWrapPis(path.arguments, sandboxEquality(
+            sandboxApply(sandboxVar("ap"), fullRecursorHead, pathTerm),
+            Core.clone(recursorPathMethodValue)
+        ));
+        fullApType = sandboxWrapPis(recursorPathBinders, fullApType);
+        const fullRecursorPointBinders = extractSandboxPiBinders(
+            fullRecursorEntry[1], 1 + signature.parameters.length + 1,
+            signature.pointConstructors.length
+        );
+        fullApType = sandboxWrapPis(fullRecursorPointBinders, fullApType);
+        fullApType = sandboxPi(
+            motiveName,
+            extractSandboxPiBinder(fullRecursorEntry[1], 1 + signature.parameters.length).type,
+            fullApType
+        );
+        fullApType = sandboxWrapPis(signature.parameters, fullApType);
+        fullApType = sandboxPi(motiveUniverseName, sandboxVar("U@"), fullApType);
+
+        computationTypes.push(
+            [`apd_${path.name}`, publicApdType],
+            [`@apd_${path.name}`, fullApdType],
+            [`ap_${path.name}`, publicApType],
+            [`@ap_${path.name}`, fullApType]
+        );
+    }
+
+    const generatedNames = [
+        signature.name,
+        ...signature.pointConstructors.map(constructor => constructor.name),
+        ...signature.pathConstructors.map(path => path.name),
+        `ind_${signature.name}`,
+        `@ind_${signature.name}`,
+        `rec_${signature.name}`,
+        `@rec_${signature.name}`,
+        ...signature.pathConstructors.flatMap(path => [
+            `apd_${path.name}`,
+            `@apd_${path.name}`,
+            `ap_${path.name}`,
+            `@ap_${path.name}`
+        ])
+    ];
+    return {
+        type: [base.type[0], Core.clone(base.type[1])],
+        constructors: base.constructors.map(([name, type]) => [name, Core.clone(type)]),
+        auxiliaryTypes: [
+            ...pathTypes,
+            [`@ind_${signature.name}`, fullEliminatorType],
+            [`@rec_${signature.name}`, fullRecursorType],
+            ...computationTypes
+        ],
+        eliminator: [`ind_${signature.name}`, publicEliminatorType],
+        recursor: [`rec_${signature.name}`, publicRecursorType],
+        computeRules,
+        metadata: {
+            version: 3,
+            kind: "hit1",
+            dimension: 1,
+            typeName: signature.name,
+            parameterCount: signature.parameters.length,
+            indexCount: 0,
+            indices: [],
+            eliminatorName: `ind_${signature.name}`,
+            fullEliminatorName: `@ind_${signature.name}`,
+            recursorName: `rec_${signature.name}`,
+            fullRecursorName: `@rec_${signature.name}`,
+            constructors: signature.pointConstructors.map(constructor => ({
+                name: constructor.name,
+                argumentTypes: constructor.argumentAsts.map(argument => Core.clone(argument.type)),
+                resultIndices: []
+            })),
+            pathConstructors: signature.pathConstructors.map(path => ({
+                name: path.name,
+                argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
+                left: Core.clone(path.left),
+                right: Core.clone(path.right),
+                computationName: `apd_${path.name}`
+            }))
+        },
+        generatedNames
+    } as SandboxInductiveBundle;
+}
+
+function extractSandboxPiBinder(type: AST, depth: number): SandboxInductiveBinder {
+    let cursor = type;
+    for (let index = 0; index < depth; index++) {
+        if ((cursor.type !== "P" && cursor.type !== "->") || !cursor.nodes?.[1]) {
+            throw new Error("HIT 消去器 binder 结构不完整");
+        }
+        cursor = cursor.nodes[1];
+    }
+    if ((cursor.type !== "P" && cursor.type !== "->") || !cursor.nodes?.[0]) {
+        throw new Error("HIT 消去器 binder 结构不完整");
+    }
+    return {
+        name: cursor.type === "P" && cursor.name ? cursor.name : `x${depth}`,
+        type: Core.clone(cursor.nodes[0]),
+        typeSource: parser.stringify(cursor.nodes[0])
+    };
+}
+
+function extractSandboxPiBinders(type: AST, depth: number, count: number) {
+    return Array.from({ length: count }, (_, index) =>
+        extractSandboxPiBinder(type, depth + index)
+    );
+}
+
 export function parseSandboxDeclaration(source: string): ParsedSandboxDeclaration {
     const text = normalizeSandboxSource(source);
     if (!text) throw new Error("声明不能为空");
+    if (/^hit\s/i.test(text)) {
+        const hit = parseSandboxHit(text);
+        const typeAst = sandboxWrapPis(
+            [...hit.parameters, ...hit.indices],
+            Core.clone(hit.universeAst)
+        );
+        return {
+            ast: undefined,
+            name: hit.name,
+            typeAst,
+            typeSource: parser.stringify(typeAst),
+            hit
+        };
+    }
     if (/^inductive\s/i.test(text)) {
         const inductive = parseSandboxInductive(text);
         return {
@@ -1151,6 +2023,23 @@ export function createSandboxDeclaration(source: string, id: string): SandboxDec
     const text = normalizeSandboxSource(source);
     try {
         const parsed = parseSandboxDeclaration(text);
+        if (parsed.hit) {
+            const generatedNames = sandboxHitGeneratedNames(parsed.hit);
+            return {
+                id,
+                name: parsed.hit.name,
+                kind: "hit",
+                source: text,
+                typeSource: parsed.hit.universe,
+                enabled: true,
+                trusted: true,
+                status: "unchecked",
+                dependencies: collectHitDependencies(parsed.hit),
+                folderId: null,
+                hit: parsed.hit,
+                generatedNames
+            };
+        }
         if (parsed.inductive) {
             const generatedNames = sandboxInductiveGeneratedNames(parsed.inductive);
             return {
@@ -1215,6 +2104,24 @@ function sandboxInductiveGeneratedNames(signature: SandboxInductiveDeclaration) 
     ];
 }
 
+function sandboxHitGeneratedNames(signature: SandboxHitDeclaration) {
+    return [
+        signature.name,
+        ...signature.pointConstructors.map(ctor => ctor.name),
+        ...signature.pathConstructors.map(ctor => ctor.name),
+        `ind_${signature.name}`,
+        `@ind_${signature.name}`,
+        `rec_${signature.name}`,
+        `@rec_${signature.name}`,
+        ...signature.pathConstructors.flatMap(path => [
+            `apd_${path.name}`,
+            `@apd_${path.name}`,
+            `ap_${path.name}`,
+            `@ap_${path.name}`
+        ])
+    ];
+}
+
 function collectInductiveDependencies(signature: SandboxInductiveDeclaration) {
     const own = new Set(sandboxInductiveGeneratedNames(signature));
     for (const parameter of signature.parameters) own.add(parameter.name);
@@ -1230,6 +2137,24 @@ function collectInductiveDependencies(signature: SandboxInductiveDeclaration) {
     collect(signature.universeAst);
     for (const ctor of signature.constructors) {
         collect(ctor.type);
+    }
+    return [...names];
+}
+
+function collectHitDependencies(signature: SandboxHitDeclaration) {
+    const own = new Set(sandboxHitGeneratedNames(signature));
+    for (const parameter of signature.parameters) own.add(parameter.name);
+    const names = new Set<string>();
+    const collect = (ast: AST) => {
+        for (const name of collectFreeNames(ast)) {
+            if (!own.has(name)) names.add(name);
+        }
+    };
+    for (const parameter of signature.parameters) collect(parameter.type);
+    collect(signature.universeAst);
+    for (const constructor of signature.pointConstructors) collect(constructor.type);
+    for (const path of signature.pathConstructors) {
+        collect(path.type);
     }
     return [...names];
 }
@@ -1485,7 +2410,12 @@ export class SandboxEnvironment {
         for (const candidate of this.declarations) {
             try {
                 const parsed = parseSandboxDeclaration(candidate.source);
-                if (parsed.inductive) {
+                if (parsed.hit) {
+                    for (const name of sandboxHitGeneratedNames(parsed.hit)) {
+                        allNames.add(name);
+                        declarationByName.set(name, candidate);
+                    }
+                } else if (parsed.inductive) {
                     for (const name of sandboxInductiveGeneratedNames(parsed.inductive)) {
                         allNames.add(name);
                         declarationByName.set(name, candidate);
@@ -1535,6 +2465,7 @@ export class SandboxEnvironment {
             declaration.error = undefined;
             declaration.dependencies = [];
             declaration.inductive = undefined;
+            declaration.hit = undefined;
             declaration.generatedNames = undefined;
             const rowState = layout.get(declaration.id);
             if (rowState?.disabled) {
@@ -1553,7 +2484,12 @@ export class SandboxEnvironment {
                 parsed = parseSandboxDeclaration(declaration.source);
                 declaration.name = parsed.name;
                 declaration.typeSource = parsed.typeSource;
-                if (parsed.inductive) {
+                if (parsed.hit) {
+                    declaration.kind = "hit";
+                    declaration.hit = parsed.hit;
+                    declaration.generatedNames = sandboxHitGeneratedNames(parsed.hit);
+                    declaration.dependencies = collectHitDependencies(parsed.hit);
+                } else if (parsed.inductive) {
                     declaration.kind = "inductive";
                     declaration.inductive = parsed.inductive;
                     declaration.generatedNames = sandboxInductiveGeneratedNames(parsed.inductive);
@@ -1615,7 +2551,11 @@ export class SandboxEnvironment {
             }
 
             try {
-                if (parsed.inductive) {
+                if (parsed.hit) {
+                    const bundle = lowerSandboxHit(parsed.hit);
+                    this.engine.core.registerSystemInductive(bundle);
+                    declaration.generatedNames = [...bundle.generatedNames];
+                } else if (parsed.inductive) {
                     const bundle = lowerSandboxInductive(parsed.inductive);
                     this.engine.core.registerSystemInductive(bundle);
                     declaration.generatedNames = [...bundle.generatedNames];
@@ -1716,6 +2656,13 @@ export class SandboxEnvironment {
         for (const declaration of ordered) {
             const state = layout.get(declaration.id);
             if (!declaration.enabled || declaration.status !== "valid" || state?.disabled) continue;
+            if (declaration.hit) {
+                try {
+                    inductives.push(lowerSandboxHit(declaration.hit));
+                    order.push({ kind: "inductive", name: declaration.name });
+                } catch { }
+                continue;
+            }
             if (declaration.inductive) {
                 try {
                     inductives.push(lowerSandboxInductive(declaration.inductive));
@@ -1729,7 +2676,7 @@ export class SandboxEnvironment {
                     const body = this.definitionBodies.get(declaration.name) ?? parsed.definitionAst;
                     definitions.push([declaration.name, Core.clone(body)]);
                     order.push({ kind: "definition", name: declaration.name });
-                } else if (!parsed.inductive && parsed.typeAst) {
+                } else if (!parsed.inductive && !parsed.hit && parsed.typeAst) {
                     const type = this.axiomTypes.get(declaration.name);
                     if (type) {
                         axioms.push([declaration.name, Core.clone(type)]);
@@ -1742,7 +2689,56 @@ export class SandboxEnvironment {
     }
 
     check(source: string): SandboxCheckResult {
-        const result = this.engine.check(source);
+        let result = this.engine.check(source);
+        // A common sandbox query writes a telescope before a final type
+        // assertion: `PA:U,...,term : T`.  The surface parser places `:`
+        // outside the telescope, leaving T's binder names apparently free.
+        // Retry with the assertion scoped under those binders; this changes
+        // only the sandbox query convenience layer, not Core syntax.
+        if (!result.ok) {
+            try {
+                const ast = parser.parse(normalizeSandboxSource(source));
+                if (ast.type === ":" && ast.nodes?.[0] && ast.nodes?.[1]) {
+                    const binders: { type: "P" | "->"; name: string; domain: AST }[] = [];
+                    let term = ast.nodes[0];
+                    while ((term.type === "P" || term.type === "->")
+                        && term.nodes?.[0] && term.nodes?.[1]) {
+                        binders.push({
+                            type: term.type,
+                            name: term.name,
+                            domain: Core.clone(term.nodes[0])
+                        });
+                        term = term.nodes[1];
+                    }
+                    if (binders.length) {
+                        let lambda: AST = Core.clone(term);
+                        let expected: AST = Core.clone(ast.nodes[1]);
+                        for (let index = binders.length - 1; index >= 0; index--) {
+                            const name = binders[index].name || `_sandbox${index}`;
+                            lambda = {
+                                type: "L",
+                                name,
+                                nodes: [Core.clone(binders[index].domain), lambda]
+                            };
+                            expected = {
+                                type: "P",
+                                name,
+                                nodes: [Core.clone(binders[index].domain), expected]
+                            };
+                        }
+                        const inferred = this.engine.checkAst(lambda);
+                        if (inferred.ok && inferred.type) {
+                            const equality = this.engine.checkAst({
+                                type: "===",
+                                name: "",
+                                nodes: [Core.clone(inferred.type), expected]
+                            });
+                            if (equality.ok) result = inferred;
+                        }
+                    }
+                }
+            } catch { }
+        }
         return { ...result, source };
     }
 
@@ -1957,6 +2953,10 @@ export class SandboxEnvironment {
                 const rowState = layout.get(declaration.id);
                 if (declaration.status !== "valid" || !declaration.enabled || rowState?.disabled) continue;
                 const parsed = parseSandboxDeclaration(declaration.source);
+                if (parsed.hit) {
+                    nextEngine.core.registerSystemInductive(lowerSandboxHit(parsed.hit));
+                    continue;
+                }
                 if (parsed.inductive) {
                     nextEngine.core.registerSystemInductive(lowerSandboxInductive(parsed.inductive));
                     continue;

@@ -8,8 +8,10 @@ import {
     SandboxSave,
     SandboxBridge,
     SandboxEnvironmentOptions,
+    SandboxHitDeclaration,
     SandboxInductiveDeclaration,
-    createSandboxDeclaration
+    createSandboxDeclaration,
+    parseSandboxDeclaration
 } from "./sandbox.js";
 import { SandboxWorkerClient } from "./sandbox-worker-client.js";
 import { ListDragger } from "../fs/itemdragger.js";
@@ -33,24 +35,57 @@ export type SandboxBridgeChangeOptions = {
     revalidate?: boolean;
 };
 
+function sandboxStructuredDisplayDeclaration(declaration: SandboxDeclaration) {
+    if (declaration.hit || declaration.inductive) {
+        return { hit: declaration.hit, inductive: declaration.inductive };
+    }
+    if (!declaration.source || !["hit", "inductive"].includes(String(declaration.kind))) {
+        return {};
+    }
+    try {
+        const parsed = parseSandboxDeclaration(declaration.source);
+        return { hit: parsed.hit, inductive: parsed.inductive };
+    } catch {
+        return {};
+    }
+}
+
+function sandboxHitDisplayDeclaration(declaration: SandboxDeclaration) {
+    return sandboxStructuredDisplayDeclaration(declaration).hit;
+}
+
+export function sandboxDeclarationDisplayKind(declaration: SandboxDeclaration) {
+    return String(declaration.kind) === "hit"
+        ? { kind: "HIT", trust: "一阶路径归纳", trustClass: "sandbox-hit" }
+        : { kind: declaration.kind, trust: "trusted", trustClass: "sandbox-trusted" };
+}
+
 export function sandboxInductiveDisplaySources(declaration: SandboxDeclaration) {
-    const signature = declaration.inductive;
-    if (declaration.kind !== "inductive" || !signature) return null;
+    const structured = sandboxStructuredDisplayDeclaration(declaration);
+    const hit = structured.hit;
+    const signature = declaration.kind === "inductive" ? structured.inductive : hit;
+    if (!signature) return null;
     const parameters = signature.parameters
         .map(parameter => ` (${parameter.name} : ${parameter.typeSource})`)
         .join("");
-    const indices = signature.indices
+    const indices = (signature.indices ?? [])
         .map(index => ` [${index.name} : ${index.typeSource}]`)
         .join("");
+    const constructors = hit
+        ? [...hit.pointConstructors, ...hit.pathConstructors]
+        : declaration.inductive?.constructors ?? [];
     return [
         `${signature.name}${parameters}${indices} : ${signature.universe}`,
-        ...signature.constructors.map(ctor => `${ctor.name} : ${ctor.typeSource}`)
+        ...constructors.map(ctor => `${ctor.name} : ${ctor.typeSource}`)
     ];
 }
 
-function sandboxInductiveHeaderAst(signature: SandboxInductiveDeclaration) {
+function sandboxInductiveHeaderAst(signature: Pick<
+    SandboxInductiveDeclaration | SandboxHitDeclaration,
+    "name" | "parameters" | "universeAst"
+> & { indices?: SandboxInductiveDeclaration["indices"] }) {
     let type = Core.clone(signature.universeAst);
-    const binders = [...signature.parameters, ...signature.indices];
+    const binders = [...signature.parameters, ...(signature.indices ?? [])];
     for (let index = binders.length - 1; index >= 0; index--) {
         type = {
             type: "P",
@@ -423,10 +458,11 @@ export class TTSandboxGui {
 
         const kind = document.createElement("span");
         kind.className = "sandbox-kind";
-        kind.textContent = declaration.kind;
+        const displayKind = sandboxDeclarationDisplayKind(declaration);
+        kind.textContent = displayKind.kind;
         const trust = document.createElement("span");
-        trust.className = "sandbox-trusted";
-        trust.textContent = "trusted";
+        trust.className = displayKind.trustClass;
+        trust.textContent = displayKind.trust;
         const state = document.createElement("span");
         state.className = "sandbox-declaration-status";
         state.textContent = declaration.status === "invalid"
@@ -493,8 +529,10 @@ export class TTSandboxGui {
         try {
             const inductiveSources = sandboxInductiveDisplaySources(declaration);
             if (inductiveSources) {
+                const hit = sandboxHitDisplayDeclaration(declaration);
                 const keyword = document.createElement("span");
-                keyword.textContent = "inductive ";
+                keyword.className = hit ? "sandbox-hit-keyword" : "";
+                keyword.textContent = hit ? "hit " : "inductive ";
                 display.appendChild(keyword);
                 inductiveSources.forEach((source, index) => {
                     if (index > 0) {
@@ -503,7 +541,7 @@ export class TTSandboxGui {
                         display.appendChild(separator);
                     }
                     const ast = index === 0
-                        ? sandboxInductiveHeaderAst(declaration.inductive)
+                        ? sandboxInductiveHeaderAst(hit ?? declaration.inductive!)
                         : parser.parse(source);
                     if (this.renderAst) display.appendChild(this.renderAst(ast));
                     else {

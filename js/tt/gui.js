@@ -48,6 +48,8 @@ export function cloneInductiveBundle(bundle) {
         metadata: bundle.metadata
             ? {
                 version: bundle.metadata.version,
+                kind: bundle.metadata.kind,
+                dimension: bundle.metadata.dimension,
                 typeName: bundle.metadata.typeName,
                 parameterCount: bundle.metadata.parameterCount,
                 indexCount: bundle.metadata.indexCount,
@@ -63,10 +65,30 @@ export function cloneInductiveBundle(bundle) {
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
                     resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
+                })),
+                pathConstructors: bundle.metadata.pathConstructors?.map(ctor => ({
+                    name: ctor.name,
+                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    left: Core.clone(ctor.left),
+                    right: Core.clone(ctor.right),
+                    computationName: ctor.computationName
                 }))
             }
             : undefined
     };
+}
+/** Classify a generated sandbox entry without relying on name-prefix guesses. */
+export function sandboxInductiveEntryPresentation(bundle, name, fallback) {
+    const prefix = bundle.metadata?.kind === "hit1" ? "sandbox HIT" : "sandbox inductive";
+    const paths = bundle.metadata?.pathConstructors ?? [];
+    const publicName = name.startsWith("@") ? name.slice(1) : name;
+    if (paths.some(path => path.name === publicName)) {
+        return { postfix: "构造", prefix, category: "constructor" };
+    }
+    if (paths.some(path => path.computationName === publicName || `ap_${path.name}` === publicName)) {
+        return { postfix: "计算", prefix, category: "compute" };
+    }
+    return { ...fallback, prefix };
 }
 export class TTGui {
     puzzleDefs = new Set;
@@ -1978,6 +2000,8 @@ export class TTGui {
                 constructors.add(name);
             if (category === "eliminator")
                 destructors.add(name);
+            if (category === "compute")
+                computeEqs.add(name);
             const idx = document.createElement("div");
             idx.className = "idx";
             idx.style.width = "30px";
@@ -2016,26 +2040,41 @@ export class TTGui {
                 appendEntry(name, type, "定义", "sandbox", "axiom");
         }
         for (const bundle of this.sandboxInductives ?? []) {
+            const bundlePrefix = bundle.metadata?.kind === "hit1"
+                ? "sandbox HIT"
+                : "sandbox inductive";
             const displayOptions = {
                 constructorNames: bundle.metadata?.constructors?.map(ctor => ctor.name)
                     ?? bundle.constructors?.map(([name]) => name)
                     ?? []
             };
-            appendEntry(bundle.type[0], bundle.type[1], "类型", "sandbox inductive", "type", displayOptions);
+            appendEntry(bundle.type[0], bundle.type[1], "类型", bundlePrefix, "type", displayOptions);
             for (const [name, type] of bundle.constructors ?? []) {
-                appendEntry(name, type, "构造", "sandbox inductive", "constructor", displayOptions);
+                const presentation = sandboxInductiveEntryPresentation(bundle, name, {
+                    postfix: "构造",
+                    category: "constructor"
+                });
+                appendEntry(name, type, presentation.postfix, presentation.prefix, presentation.category, displayOptions);
             }
             for (const [name, type] of bundle.auxiliaryTypes ?? []) {
-                appendEntry(name, type, "解构", "sandbox inductive", "eliminator", displayOptions);
+                const presentation = sandboxInductiveEntryPresentation(bundle, name, {
+                    postfix: "解构",
+                    category: "eliminator"
+                });
+                appendEntry(name, type, presentation.postfix, presentation.prefix, presentation.category, displayOptions);
             }
             if (bundle.eliminator) {
-                appendEntry(bundle.eliminator[0], bundle.eliminator[1], "解构", "sandbox inductive", "eliminator", displayOptions);
+                appendEntry(bundle.eliminator[0], bundle.eliminator[1], "解构", bundlePrefix, "eliminator", displayOptions);
             }
             if (bundle.recursor) {
-                appendEntry(bundle.recursor[0], bundle.recursor[1], "递归", "sandbox inductive", "eliminator", displayOptions);
+                appendEntry(bundle.recursor[0], bundle.recursor[1], "递归", bundlePrefix, "eliminator", displayOptions);
             }
             for (const [name, definition] of bundle.definitions ?? []) {
-                appendEntry(name, definition, "定义", "sandbox inductive", "axiom", displayOptions);
+                const presentation = sandboxInductiveEntryPresentation(bundle, name, {
+                    postfix: "定义",
+                    category: "axiom"
+                });
+                appendEntry(name, definition, presentation.postfix, presentation.prefix, presentation.category, displayOptions);
             }
         }
     }
@@ -4099,11 +4138,14 @@ export class TTGui {
                 previousSandboxNames.add(bundle.eliminator[0]);
             if (bundle.recursor)
                 previousSandboxNames.add(bundle.recursor[0]);
+            for (const [name] of bundle.definitions ?? [])
+                previousSandboxNames.add(name);
         }
         for (const name of previousSandboxNames) {
             consts.delete(name);
             constructors.delete(name);
             destructors.delete(name);
+            computeEqs.delete(name);
             macro.delete(name);
         }
         for (const name of this.sandboxAxiomNames ?? []) {

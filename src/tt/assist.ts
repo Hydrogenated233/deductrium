@@ -1808,12 +1808,26 @@ export class Assist {
         const holes = this.flattenParams(headType);
         // grpara is group param
         // ind_xxx :param->C->(C grpara? ctor1)->(C grpara? ctor2)->...->grpara->x:xxx->(C grpara xxx)
-        let ctorNumbers = indFnParams.length
+        const inferredBranchCount = indFnParams.length
             - typeParams.length
             - 1
             - (dynamicInductive?.indexArguments.length ?? 0)
             - (groupParam ? 1 : 0)
             - 1;
+        // Ordinary inductive metadata lists exactly the branch-producing point
+        // constructors. A first-order HIT additionally carries one eliminator
+        // coherence argument per path constructor; those are proof goals too,
+        // but must never be exposed as data constructors by `constructor` or
+        // its recommendations above. Keep the arity-derived count as the
+        // compatibility path for legacy and built-in eliminators.
+        const metadataBranchCount = dynamicInductive?.kind === "hit1"
+            ? dynamicInductive.constructors.length + (dynamicInductive.pathConstructors?.length ?? 0)
+            : undefined;
+        const ctorNumbers = metadataBranchCount ?? inferredBranchCount;
+        if (ctorNumbers < 0 || holes.length < ctorNumbers) {
+            this.goal.unshift(goal);
+            throw TR("归纳消去器分支元数据与类型不一致");
+        }
         const indFnBody = [];
         const newGoals: Goal[] = [];
         const introNums: string[][] = [];

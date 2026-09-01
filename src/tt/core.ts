@@ -431,6 +431,10 @@ export type CoreSystemInductiveBundle = {
     metadata?: {
         /** Version 2 distinguishes uniform parameters from family indices. */
         version?: number;
+        /** Ordinary inductive data or a first-order higher inductive type. */
+        kind?: "inductive" | "hit1";
+        /** Highest path dimension represented by this metadata. */
+        dimension?: number;
         typeName: string;
         parameterCount?: number;
         indexCount?: number;
@@ -445,6 +449,19 @@ export type CoreSystemInductiveBundle = {
             name: string;
             argumentTypes: AST[];
             resultIndices?: AST[];
+        }[];
+        /**
+         * Path constructors are eliminator coherence data, not point/data
+         * constructors. Their constants are installed separately (normally as
+         * auxiliary types), and this metadata never creates definitional
+         * compute rules for them.
+         */
+        pathConstructors?: readonly {
+            name: string;
+            argumentTypes: AST[];
+            left: AST;
+            right: AST;
+            computationName?: string;
         }[];
     };
 }
@@ -462,6 +479,31 @@ type RegisteredSystemInductive = {
     previousRules: Map<string, { pattern: AST[]; result: AST }[] | undefined>;
     metadata?: RegisteredInductiveMetadata;
 };
+
+function sameGeneratedAst(left: AST, right: AST): boolean {
+    if (left === right) return true;
+    if (!left || !right || left.type !== right.type || left.name !== right.name) return false;
+    const leftNodes = left.nodes ?? [];
+    const rightNodes = right.nodes ?? [];
+    return leftNodes.length === rightNodes.length
+        && leftNodes.every((node, index) => sameGeneratedAst(node, rightNodes[index]));
+}
+
+function generatedEqualityEndpoints(ast: AST): readonly [AST, AST] | undefined {
+    if (ast.type === "=" && ast.nodes?.[0] && ast.nodes?.[1]) {
+        return [ast.nodes[0], ast.nodes[1]];
+    }
+    const arguments_: AST[] = [];
+    let head = ast;
+    while (head.type === "apply" && head.nodes?.[0] && head.nodes?.[1]) {
+        arguments_.push(head.nodes[1]);
+        head = head.nodes[0];
+    }
+    arguments_.reverse();
+    if (head.type !== "var" || (head.name !== "eq" && head.name !== "@eq")
+        || arguments_.length < 2) return undefined;
+    return [arguments_[arguments_.length - 2], arguments_[arguments_.length - 1]];
+}
 
 type DefinitionCacheInspection = {
     type: AST;
@@ -773,6 +815,42 @@ export class Core {
             }
             names.add(name);
         }
+        if (bundle.metadata?.typeName && bundle.metadata.typeName !== bundle.type[0]) {
+            throw new Error(
+                `归纳类型 metadata 名称与 bundle 不一致：${bundle.metadata.typeName} != ${bundle.type[0]}`
+            );
+        }
+        const bundlePointConstructorNames = bundle.constructors.map(([name]) => name);
+        const metadataPointConstructorNames = (bundle.metadata?.constructors ?? [])
+            .map(ctor => ctor.name);
+        const pointConstructorNames = new Set([
+            ...bundlePointConstructorNames,
+            ...metadataPointConstructorNames
+        ]);
+        const pathConstructorNames = new Set<string>();
+        for (const path of bundle.metadata?.pathConstructors ?? []) {
+            if (!path.name || pathConstructorNames.has(path.name)) {
+                throw new Error(`路径构造子 metadata 名称冲突：${path.name || ""}`);
+            }
+            if (pointConstructorNames.has(path.name)) {
+                throw new Error(`路径构造子不能作为点构造子注册：${path.name}`);
+            }
+            pathConstructorNames.add(path.name);
+        }
+        if (bundle.metadata?.kind === "hit1") {
+            if (bundle.metadata.dimension !== 1) {
+                throw new Error(`一阶 HIT metadata 维度必须为 1：${bundle.metadata.dimension ?? ""}`);
+            }
+            if (!bundle.metadata.pathConstructors?.length) {
+                throw new Error("一阶 HIT metadata 至少需要一个路径构造子");
+            }
+            if (bundlePointConstructorNames.length !== metadataPointConstructorNames.length
+                || bundlePointConstructorNames.some((name, index) =>
+                    metadataPointConstructorNames[index] !== name
+                )) {
+                throw new Error("一阶 HIT metadata 点构造子与 bundle 不一致");
+            }
+        }
         // A trusted bundle must never silently overwrite a system/user entry.
         // Sandbox validation normally catches this earlier, but keeping the
         // check at the Core boundary prevents stale declarations after a
@@ -799,6 +877,20 @@ export class Core {
                     result: this.desugar(Core.clone(rule.result), true)
                 }));
         }
+        for (const path of bundle.metadata?.pathConstructors ?? []) {
+            for (const head of new Set([
+                path.name,
+                path.computationName,
+                `apd_${path.name}`,
+                `@apd_${path.name}`,
+                `ap_${path.name}`,
+                `@ap_${path.name}`
+            ])) {
+                if (head && normalizedRules[head]?.length) {
+                    throw new Error(`路径构造子不能注册为定义计算规则：${head}`);
+                }
+            }
+        }
 
         let familyType = normalizedEntries[0][1];
         const familyBinders: { name: string; type: AST }[] = [];
@@ -820,6 +912,129 @@ export class Core {
         }
         const parameters = familyBinders.slice(0, parameterCount);
         const indices = familyBinders.slice(parameterCount);
+
+        if (bundle.metadata?.kind === "hit1") {
+            const metadata = bundle.metadata;
+            if (indexCount !== 0) throw new Error("一阶 HIT metadata 暂不支持索引");
+
+            const auxiliaryTypes = new Map<string, AST>();
+            for (const [name, type] of bundle.auxiliaryTypes ?? []) {
+                auxiliaryTypes.set(name, this.desugar(Core.clone(type), true));
+            }
+            const pointTypes = new Map<string, AST>();
+            for (const [name, type] of bundle.constructors) {
+                pointTypes.set(name, this.desugar(Core.clone(type), true));
+            }
+            const normalizedMetadataAst = (ast: AST) => this.desugar(Core.clone(ast), true);
+            const consumeTelescope = (
+                source: AST,
+                domains: readonly AST[],
+                label: string
+            ) => {
+                let cursor = source;
+                for (let index = 0; index < domains.length; index++) {
+                    if ((cursor.type !== "P" && cursor.type !== "->")
+                        || !cursor.nodes?.[0] || !cursor.nodes?.[1]
+                        || !sameGeneratedAst(cursor.nodes[0], domains[index])) {
+                        throw new Error(`${label} telescope 与 metadata 不一致`);
+                    }
+                    cursor = cursor.nodes[1];
+                }
+                return cursor;
+            };
+            const requirePublicSlot = (
+                label: string,
+                metadataName: string | undefined,
+                entry: readonly [string, AST] | undefined
+            ) => {
+                if (!metadataName || !entry || entry[0] !== metadataName) {
+                    throw new Error(`一阶 HIT metadata ${label}槽位与 bundle 不一致`);
+                }
+            };
+            const requireFullSlot = (
+                label: string,
+                metadataName: string | undefined,
+                publicName: string | undefined
+            ) => {
+                const expectedName = publicName ? `@${publicName}` : "";
+                if (!metadataName || metadataName !== expectedName
+                    || !auxiliaryTypes.has(metadataName)) {
+                    throw new Error(`一阶 HIT metadata ${label}槽位与 bundle 不一致`);
+                }
+            };
+
+            for (let index = 0; index < metadata.constructors.length; index++) {
+                const constructor = metadata.constructors[index];
+                const constructorType = pointTypes.get(constructor.name);
+                if (!constructorType) {
+                    throw new Error(`一阶 HIT metadata 点构造子槽位不存在：${constructor.name}`);
+                }
+                const expectedDomains = [
+                    ...parameters.map(parameter => parameter.type),
+                    ...constructor.argumentTypes.map(normalizedMetadataAst)
+                ];
+                const result = consumeTelescope(
+                    constructorType,
+                    expectedDomains,
+                    `一阶 HIT 点构造子 ${constructor.name}`
+                );
+                const expectedResult = wrapApply(
+                    wrapVar(metadata.typeName),
+                    ...parameters.map(parameter => wrapVar(parameter.name)),
+                    ...(constructor.resultIndices ?? []).map(normalizedMetadataAst)
+                );
+                if (!sameGeneratedAst(result, expectedResult)) {
+                    throw new Error(`一阶 HIT 点构造子 ${constructor.name} 结论与 metadata 不一致`);
+                }
+            }
+
+            for (const path of metadata.pathConstructors ?? []) {
+                const pathType = auxiliaryTypes.get(path.name);
+                if (!pathType) {
+                    throw new Error(`一阶 HIT metadata 路径构造子不存在：${path.name}`);
+                }
+                const conclusion = consumeTelescope(pathType, [
+                    ...parameters.map(parameter => parameter.type),
+                    ...path.argumentTypes.map(normalizedMetadataAst)
+                ], `一阶 HIT 路径构造子 ${path.name}`);
+                const endpoints = generatedEqualityEndpoints(conclusion);
+                if (!endpoints
+                    || !sameGeneratedAst(endpoints[0], normalizedMetadataAst(path.left))
+                    || !sameGeneratedAst(endpoints[1], normalizedMetadataAst(path.right))) {
+                    throw new Error(`一阶 HIT 路径构造子 ${path.name} 端点与 metadata 不一致`);
+                }
+
+                const computationNames = [
+                    `apd_${path.name}`,
+                    `@apd_${path.name}`,
+                    `ap_${path.name}`,
+                    `@ap_${path.name}`
+                ];
+                if (path.computationName !== computationNames[0]) {
+                    throw new Error(`一阶 HIT metadata 计算定理不存在：${path.computationName ?? ""}`);
+                }
+                for (const computationName of computationNames) {
+                    const computationType = auxiliaryTypes.get(computationName);
+                    if (!computationType) {
+                        if (computationName === path.computationName) {
+                            throw new Error(`一阶 HIT metadata 计算定理不存在：${computationName}`);
+                        }
+                        throw new Error(`一阶 HIT metadata 路径计算项槽位不存在：${computationName}`);
+                    }
+                    let conclusion = computationType;
+                    while ((conclusion.type === "P" || conclusion.type === "->")
+                        && conclusion.nodes?.[1]) conclusion = conclusion.nodes[1];
+                    if (!generatedEqualityEndpoints(conclusion)) {
+                        throw new Error(`一阶 HIT 路径计算项 ${computationName} 不是等式命题`);
+                    }
+                }
+            }
+
+            requirePublicSlot("公开消去器", metadata.eliminatorName, bundle.eliminator);
+            requireFullSlot("完整消去器", metadata.fullEliminatorName, metadata.eliminatorName);
+            requirePublicSlot("公开递归器", metadata.recursorName, bundle.recursor);
+            requireFullSlot("完整递归器", metadata.fullRecursorName, metadata.recursorName);
+        }
 
         const previousTypes = new Map<string, AST | undefined>();
         for (const [name] of normalizedEntries) previousTypes.set(name, this.state.sysTypes[name]);
@@ -877,6 +1092,8 @@ export class Core {
         const metadata = bundle.metadata
             ? {
                 version: bundle.metadata.version,
+                kind: bundle.metadata.kind,
+                dimension: bundle.metadata.dimension,
                 typeName: bundle.metadata.typeName,
                 parameterCount,
                 indexCount,
@@ -890,6 +1107,13 @@ export class Core {
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
                     resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
+                })),
+                pathConstructors: bundle.metadata.pathConstructors?.map(ctor => ({
+                    name: ctor.name,
+                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    left: Core.clone(ctor.left),
+                    right: Core.clone(ctor.right),
+                    computationName: ctor.computationName
                 }))
             }
             : undefined;
@@ -936,6 +1160,8 @@ export class Core {
         if (!metadata) return undefined;
         return {
             version: metadata.version,
+            kind: metadata.kind,
+            dimension: metadata.dimension,
             typeName: metadata.typeName,
             parameterCount: metadata.parameterCount,
             indexCount: metadata.indexCount,
@@ -955,6 +1181,13 @@ export class Core {
                 name: ctor.name,
                 argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
                 resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
+            })),
+            pathConstructors: metadata.pathConstructors?.map(ctor => ({
+                name: ctor.name,
+                argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                left: Core.clone(ctor.left),
+                right: Core.clone(ctor.right),
+                computationName: ctor.computationName
             }))
         };
     }
