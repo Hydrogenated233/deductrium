@@ -52,6 +52,10 @@ const listCase = queryGenericTheorem("nil: List ?1", "List False", "?1");
 assert.equal(querySemantically(listCase, "List False"), true,
     "nil: List ?1 should satisfy a List False gate by fuzzy matching");
 
+const sumCase = queryGenericTheorem("inl true : True+?0", "True+False", "?0");
+assert.equal(querySemantically(sumCase, "True+False"), true,
+    "a sum inhabitant with a schematic summand should satisfy a concrete sum gate");
+
 const equalityCase = queryGenericTheorem("rfl: ?a = ?a", "False = False", "?a");
 assert.equal(querySemantically(equalityCase, "False = False"), true,
     "an equality axiom with ?a should match a concrete equality gate");

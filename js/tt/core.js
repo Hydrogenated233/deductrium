@@ -1932,7 +1932,9 @@ export class Core {
         nextId = preparedCandidate.nextId;
         const preparedTarget = prepareSemanticTypePattern(targetSource, context, nextId, false);
         nextId = preparedTarget.nextId;
-        if (!fitsSemanticNbeBudget(candidateSource, Core.semanticTypeAssertionMaxNodes, false, context, false, new Set(preparedCandidate.sourceMetas.map(meta => meta.name))) || !fitsSemanticNbeBudget(targetSource, Core.semanticTypeAssertionMaxNodes, false, context))
+        // Surface notation such as `+` desugars to constants with implicit
+        // universe holes. They are local elaboration details, not user metas.
+        if (!fitsSemanticNbeBudget(candidateSource, Core.semanticTypeAssertionMaxNodes, false, context, true, new Set(preparedCandidate.sourceMetas.map(meta => meta.name))) || !fitsSemanticNbeBudget(targetSource, Core.semanticTypeAssertionMaxNodes, false, context, true))
             return false;
         const result = this.semanticTypeChecker.tryDefinitionalEquality(candidateSource, targetSource, context, {
             maxSteps: Core.semanticTypeAssertionMaxSteps,

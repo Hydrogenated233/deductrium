@@ -2243,18 +2243,21 @@ export class Core {
             false
         );
         nextId = preparedTarget.nextId;
+        // Surface notation such as `+` desugars to constants with implicit
+        // universe holes. They are local elaboration details, not user metas.
         if (!fitsSemanticNbeBudget(
             candidateSource,
             Core.semanticTypeAssertionMaxNodes,
             false,
             context,
-            false,
+            true,
             new Set(preparedCandidate.sourceMetas.map(meta => meta.name))
         ) || !fitsSemanticNbeBudget(
             targetSource,
             Core.semanticTypeAssertionMaxNodes,
             false,
-            context
+            context,
+            true
         )) return false;
         const result = this.semanticTypeChecker.tryDefinitionalEquality(
             candidateSource,
