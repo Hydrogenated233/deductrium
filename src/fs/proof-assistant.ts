@@ -22,6 +22,13 @@ export type InferenceProofHypothesisKind = "intro" | "variable" | "have" | "page
 export interface InferenceProofHypothesis {
     name: string;
     proposition?: AST;
+    /**
+     * Unnormalized proposition retained for replay/materialization.  The
+     * assistant may simplify assertion syntax in `proposition` for tactics
+     * and rendering, but rules such as .Vcn/.Ecn need the original #nf/#rp
+     * dependency when qed later lifts the proof through binders.
+     */
+    formalProposition?: AST;
     /** Original binder for a variable introduced from a universal quantifier. */
     binder?: AST;
     kind: InferenceProofHypothesisKind;
@@ -161,17 +168,24 @@ type RewriteStep = {
 
 interface DraftNode {
     id: number;
+    /** Normalized target used by tactics and the proof-assistant UI. */
     target: AST;
+    /** Exact target used only while materializing the completed proof tree. */
+    formalTarget: AST;
     hypotheses: InferenceProofHypothesis[];
     kind: "pending" | "apply" | "applyAt" | "have" | "haveApply" | "obtainExists" | "revert" | "exact" | "tauto";
     children: DraftNode[];
     ruleName?: string;
     replaceValues?: AST[];
+    /** Rule arguments with presentation-only assertion simplifications restored. */
+    formalReplaceValues?: AST[];
     source?: SourceRef;
     /** Local hypothesis rewritten by Lean-style `apply rule at h`. */
     applyAtHypothesis?: string;
     /** Instantiated conclusion/source proposition used by implication apply. */
     appliedProposition?: AST;
+    /** Unnormalized instantiated conclusion used by materialization. */
+    formalAppliedProposition?: AST;
     /** Number of leading children required by a shared rule's `⊢` conditions. */
     ruleConditionCount?: number;
     /** Theorem-list premises used by a conditional tauto proof. */
@@ -185,12 +199,15 @@ interface DraftNode {
     /** Sources used for implication arguments; `null` entries are term arguments. */
     haveArgumentSources?: (SourceRef | null)[];
     haveProposition?: AST;
+    formalHaveProposition?: AST;
     /** Existential source and local names introduced by `obtain <x,hx> := h`. */
     obtainSource?: SourceRef;
     obtainVariableName?: string;
     obtainHypothesisName?: string;
     obtainBinder?: AST;
     obtainBody?: AST;
+    formalObtainBinder?: AST;
+    formalObtainBody?: AST;
     obtainEmpRule?: string;
     obtainEeRule?: string;
     revertSource?: SourceRef;
@@ -227,6 +244,13 @@ export class InferenceProofAssistant {
     private availableRuleNames?: Set<string>;
     private availableFastMetaRules?: string;
     private allowMcpt = true;
+    /**
+     * Only proofs whose stated goal contains user-visible assertion syntax need
+     * a second, unsimplified materialization track.  Keeping ordinary proofs on
+     * the historic normalized path avoids exposing internal a4/#rp wrappers to
+     * conditionalization and universal generalization.
+     */
+    private preserveFormalAssertions = false;
     private nextNodeId = 1;
     private committed = false;
     private readonly sessionToken = Symbol("inference-proof-session");
@@ -253,6 +277,7 @@ export class InferenceProofAssistant {
     start(target: AST | string, options: Pick<InferenceProofOptions, "history"> = {}): InferenceProofSnapshot {
         const ast = this.parseProposition(target);
         this.theorem = astmgr.clone(ast);
+        this.preserveFormalAssertions = this.containsSchematicAssertion(ast);
         this.targetSource = parser.stringifyTight(ast);
         this.nextNodeId = 1;
         this.root = this.makeNode(ast, []);
@@ -795,14 +820,18 @@ export class InferenceProofAssistant {
         return {
             id: node.id,
             target: astmgr.clone(node.target),
+            formalTarget: astmgr.clone(node.formalTarget),
             hypotheses: this.cloneHypotheses(node.hypotheses),
             kind: node.kind,
             children: node.children.map(child => this.cloneDraftNode(child)),
             ruleName: node.ruleName,
             replaceValues: node.replaceValues?.map(value => astmgr.clone(value)),
+            formalReplaceValues: node.formalReplaceValues?.map(value => astmgr.clone(value)),
             source: this.cloneSource(node.source),
             applyAtHypothesis: node.applyAtHypothesis,
             appliedProposition: node.appliedProposition ? astmgr.clone(node.appliedProposition) : undefined,
+            formalAppliedProposition: node.formalAppliedProposition
+                ? astmgr.clone(node.formalAppliedProposition) : undefined,
             ruleConditionCount: node.ruleConditionCount,
             tautoSources: node.tautoSources?.map(source => this.cloneSource(source)!),
             tautoTheorem: node.tautoTheorem ? astmgr.clone(node.tautoTheorem) : undefined,
@@ -811,11 +840,17 @@ export class InferenceProofAssistant {
             haveArguments: node.haveArguments?.map(value => astmgr.clone(value)),
             haveArgumentSources: node.haveArgumentSources?.map(source => this.cloneSource(source) ?? null),
             haveProposition: node.haveProposition ? astmgr.clone(node.haveProposition) : undefined,
+            formalHaveProposition: node.formalHaveProposition
+                ? astmgr.clone(node.formalHaveProposition) : undefined,
             obtainSource: this.cloneSource(node.obtainSource),
             obtainVariableName: node.obtainVariableName,
             obtainHypothesisName: node.obtainHypothesisName,
             obtainBinder: node.obtainBinder ? astmgr.clone(node.obtainBinder) : undefined,
             obtainBody: node.obtainBody ? astmgr.clone(node.obtainBody) : undefined,
+            formalObtainBinder: node.formalObtainBinder
+                ? astmgr.clone(node.formalObtainBinder) : undefined,
+            formalObtainBody: node.formalObtainBody
+                ? astmgr.clone(node.formalObtainBody) : undefined,
             obtainEmpRule: node.obtainEmpRule,
             obtainEeRule: node.obtainEeRule,
             revertSource: this.cloneSource(node.revertSource),
@@ -1187,21 +1222,35 @@ export class InferenceProofAssistant {
     private introNode(node: DraftNode, name: string): void {
         if (name && !/^[^\s,]+$/.test(name)) throw new Error(TR("intro名称无效"));
         const target = node.target;
+        // Rule instantiation can leave an outer #rp that only substituted an
+        // already-eliminated quantifier variable.  It prevents the tactic
+        // layer from seeing the leading V, but it carries no remaining formal
+        // dependency.  Strip that one inert shell without simplifying nested
+        // #nf/#rp terms required by explicit .Vcn/.Ecn materialization.
+        const formalTarget = this.stripInertFormalReplacement(node.formalTarget);
+        node.formalTarget = astmgr.clone(formalTarget);
         if (target.type !== "sym" || ![">", "V"].includes(target.name)) {
             throw new Error(TR("intro只能处理蕴含或全称量词"));
+        }
+        if (formalTarget.type !== "sym" || formalTarget.name !== target.name
+            || formalTarget.nodes?.length !== 2) {
+            throw new Error(TR("intro目标的形式化结构无效"));
         }
         this.assertIntroMetaRule(target);
         if (target.name === ">") {
             const proposition = astmgr.clone(target.nodes[0]);
+            const formalProposition = astmgr.clone(formalTarget.nodes[0]);
             const hypothesis: InferenceProofHypothesis = {
                 name: name || this.nextHypothesisName(node),
                 proposition,
+                formalProposition,
                 kind: "intro"
             };
             this.assertUniqueHypothesis(node, hypothesis.name);
             node.hypotheses = [...node.hypotheses, hypothesis];
             node.introBindings.push(hypothesis);
             node.target = astmgr.clone(target.nodes[1]);
+            node.formalTarget = astmgr.clone(formalTarget.nodes[1]);
             return;
         }
 
@@ -1211,6 +1260,9 @@ export class InferenceProofAssistant {
         if (!/^[^\s,]+$/.test(replacement)) throw new Error(TR("intro名称无效"));
         this.assertUniqueHypothesis(node, replacement);
         node.target = this.substituteBound(target.nodes[1], binder.name, replacement);
+        const formalBinder = formalTarget.nodes[0];
+        if (formalBinder.type !== "replvar") throw new Error(TR("全称量词形式化约束变量无效"));
+        node.formalTarget = this.substituteBound(formalTarget.nodes[1], formalBinder.name, replacement);
         const hypothesis: InferenceProofHypothesis = {
             name: replacement,
             binder: astmgr.clone(binder),
@@ -1241,6 +1293,18 @@ export class InferenceProofAssistant {
                 if (!value) throw new Error(TR("无法从目标推断规则参数") + name);
                 return astmgr.clone(value);
             });
+            node.formalReplaceValues = this.preserveFormalAssertions
+                ? this.deriveFormalReplaceValues(source.replaceValues, node.target, node.formalTarget)
+                : source.replaceValues.map(value => astmgr.clone(value));
+            const formalMatchTable = this.withFormalRuleMatchValues(
+                deduction, match.context, match.matchTable, node.formalReplaceValues
+            );
+            node.formalAppliedProposition = this.preserveFormalAssertions
+                ? this.stripInertFormalRuleAssertion(
+                    this.instantiateRuleAst(deduction.conclusion, match.context, formalMatchTable)
+                )
+                : astmgr.clone(normalizedTarget);
+            this.fs.assert.checkGrammer(node.formalAppliedProposition, "p");
         }
         node.target = normalizedTarget;
         node.kind = "exact";
@@ -1687,7 +1751,9 @@ export class InferenceProofAssistant {
         if (source.kind === "rule") {
             const deduction = this.requireDeduction(source.name);
             const explicit = this.parseRuleArguments(parts, deduction);
-            const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(explicit);
+            const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(
+                explicit, deduction
+            );
             const application = this.matchRuleApplication(deduction, node.target, explicit, node);
             this.assertRuleMatchComplete(application, source.name);
             const matchTable = application.matchTable;
@@ -1697,15 +1763,31 @@ export class InferenceProofAssistant {
                 if (!value) throw new Error(TR("无法从目标推断规则参数") + name);
                 return astmgr.clone(value);
             });
-            const instantiate = (value: AST) => {
+            const formalReplaceValues = this.preserveFormalAssertions
+                ? this.deriveFormalReplaceValues(replaceValues, node.target, node.formalTarget)
+                : replaceValues.map(value => astmgr.clone(value));
+            const formalMatchTable = this.withFormalRuleMatchValues(
+                deduction, application.context, matchTable, formalReplaceValues
+            );
+            const instantiate = (value: AST, preserveSurfaceAssertions = false) => {
                 const result = this.instantiateRuleAst(value, application.context, matchTable);
                 if (this.astContainsPrivateRuleVariable(result)) {
                     if (this.astContainsFunction(result, "#rp")) this.fs.assert.expand(result, false);
                 } else {
-                    astmgr.assign(result, this.normalizeAssertionSyntax(result, !preserveSchematicAssertions));
+                    astmgr.assign(result, this.normalizeAssertionSyntax(
+                        result, !(preserveSchematicAssertions || preserveSurfaceAssertions)
+                    ));
                 }
                 this.fs.assert.checkGrammer(result, "p");
                 return result;
+            };
+            const instantiateFormal = (value: AST) => {
+                const result = this.instantiateRuleAst(value, application.context, formalMatchTable);
+                if (this.astContainsPrivateRuleVariable(result)) {
+                    throw new Error(TR("推理规则仍包含未解析的元变量"));
+                }
+                this.fs.assert.checkGrammer(result, "p");
+                return this.stripInertFormalRuleAssertion(result);
             };
             const conditions = [
                 ...application.context.conditions,
@@ -1715,34 +1797,69 @@ export class InferenceProofAssistant {
             ].map(condition => {
                 return instantiate(condition);
             });
+            const formalConditions = this.preserveFormalAssertions
+                ? [
+                    ...application.context.conditions,
+                    ...implicationPremises.map(condition => this.renameRuleMetavariables(
+                        astmgr.clone(condition), application.context.internalByOriginal
+                    ))
+                ].map(instantiateFormal)
+                : conditions.map(condition => astmgr.clone(condition));
             node.kind = "apply";
             node.source = source;
             node.ruleName = source.name;
             node.replaceValues = replaceValues;
-            node.appliedProposition = instantiate(deduction.conclusion);
+            node.formalReplaceValues = formalReplaceValues;
+            // Tactics operate on normalized child goals, but the emitted rule
+            // must retain an explicit #rp/#nf conclusion.  In particular,
+            // `use` followed by an explicit .Vcn/.Ecn needs that formal
+            // bridge when qed conditionally lifts the proof graph.
+            node.appliedProposition = instantiate(
+                deduction.conclusion, this.containsSchematicAssertion(node.target)
+            );
+            node.formalAppliedProposition = this.preserveFormalAssertions
+                ? instantiateFormal(deduction.conclusion)
+                : astmgr.clone(node.appliedProposition);
             node.ruleConditionCount = deduction.conditions.length;
-            node.children = conditions.map(condition => this.makeNode(condition, this.cloneHypotheses(node.hypotheses)));
+            node.children = conditions.map((condition, index) => this.makeNode(
+                condition, this.cloneHypotheses(node.hypotheses), formalConditions[index]
+            ));
             return;
         }
 
         if (parts.length) throw new Error(TR("对假设或定理使用apply时不能附加参数"));
         const proposition = this.getSourceProposition(source, node);
+        const formalProposition = this.getSourceFormalProposition(source, node);
         const application = this.matchPropositionApplication(proposition, node.target);
         const matchTable = application.matchTable;
         const appliedProposition = astmgr.clone(proposition);
         astmgr.replaceByMatchTable(appliedProposition, matchTable);
+        const formalAppliedProposition = astmgr.clone(formalProposition);
+        astmgr.replaceByMatchTable(formalAppliedProposition, matchTable);
         const instantiatedPremises = application.premises.map(premise => {
             const result = astmgr.clone(premise);
             astmgr.replaceByMatchTable(result, matchTable);
             return result;
         });
+        const formalPremises: AST[] = [];
+        let formalConclusion = astmgr.clone(formalAppliedProposition);
+        for (let index = 0; index < instantiatedPremises.length; index++) {
+            if (formalConclusion.type !== "sym" || formalConclusion.name !== ">"
+                || formalConclusion.nodes?.length !== 2) {
+                throw new Error(TR("证明来源的形式化蕴含层数无效"));
+            }
+            formalPremises.push(astmgr.clone(formalConclusion.nodes[0]));
+            formalConclusion = astmgr.clone(formalConclusion.nodes[1]);
+        }
         if (!instantiatedPremises.length) {
             this.assertSameProposition(appliedProposition, node.target);
             node.kind = "exact";
             node.source = source;
             node.ruleName = undefined;
             node.replaceValues = undefined;
+            node.formalReplaceValues = undefined;
             node.appliedProposition = undefined;
+            node.formalAppliedProposition = formalAppliedProposition;
             node.ruleConditionCount = undefined;
             node.children = [];
             return;
@@ -1751,9 +1868,13 @@ export class InferenceProofAssistant {
         node.source = source;
         node.ruleName = undefined;
         node.replaceValues = undefined;
+        node.formalReplaceValues = undefined;
         node.appliedProposition = appliedProposition;
+        node.formalAppliedProposition = formalAppliedProposition;
         node.ruleConditionCount = 0;
-        node.children = instantiatedPremises.map(condition => this.makeNode(condition, this.cloneHypotheses(node.hypotheses)));
+        node.children = instantiatedPremises.map((condition, index) => this.makeNode(
+            condition, this.cloneHypotheses(node.hypotheses), formalPremises[index]
+        ));
     }
 
     /** Lean-style `apply source at h`, transforming a local proposition. */
@@ -1797,7 +1918,9 @@ export class InferenceProofAssistant {
             throw new Error(TR("apply at来源规则必须至少有一个前件"));
         }
         const explicit = this.parseRuleArguments(parts, deduction);
-        const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(explicit);
+        const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(
+            explicit, deduction
+        );
         const context = this.createRuleMetavariableContext(deduction, hypothesis.proposition, explicit, node);
         const match = this.matchConclusion(
             deduction,
@@ -1924,6 +2047,7 @@ export class InferenceProofAssistant {
                 subgoal.ruleName = source.name;
                 subgoal.replaceValues = instantiated.replaceValues.map(value => astmgr.clone(value));
                 subgoal.appliedProposition = astmgr.clone(instantiated.conclusion);
+                subgoal.formalAppliedProposition = astmgr.clone(instantiated.conclusion);
                 subgoal.ruleConditionCount = deduction.conditions.length;
                 subgoal.children = instantiated.conditions.map(condition =>
                     this.makeNode(condition, this.cloneHypotheses(node.hypotheses)));
@@ -1931,33 +2055,38 @@ export class InferenceProofAssistant {
                 continuationHypotheses.push({
                     name,
                     proposition: astmgr.clone(instantiated.conclusion),
+                    formalProposition: astmgr.clone(instantiated.conclusion),
                     kind: "have",
                     sourceNodeId: subgoal.id
                 });
-                const continuation = this.makeNode(node.target, continuationHypotheses);
+                const continuation = this.makeNode(node.target, continuationHypotheses, node.formalTarget);
                 node.kind = "have";
                 node.haveName = name;
                 node.children = [subgoal, continuation];
                 return;
             }
             const sourceProposition = this.getSourceProposition(source, node);
+            const formalSourceProposition = this.getSourceFormalProposition(source, node);
             const application = this.instantiateHaveApplication(sourceProposition, terms, node);
             const args = application.arguments;
             const proposition = application.proposition;
+            const formalProposition = this.instantiateFormalHaveApplication(formalSourceProposition, args);
             this.fs.assert.checkGrammer(proposition, "p");
             const continuationHypotheses = this.cloneHypotheses(node.hypotheses);
             continuationHypotheses.push({
                 name,
                 proposition: astmgr.clone(proposition),
+                formalProposition: astmgr.clone(formalProposition),
                 kind: "have"
             });
-            const continuation = this.makeNode(node.target, continuationHypotheses);
+            const continuation = this.makeNode(node.target, continuationHypotheses, node.formalTarget);
             node.kind = "haveApply";
             node.haveName = name;
             node.haveSource = this.cloneSource(source);
             node.haveArguments = args.map(arg => astmgr.clone(arg));
             node.haveArgumentSources = application.sources.map(source => this.cloneSource(source) ?? null);
             node.haveProposition = astmgr.clone(proposition);
+            node.formalHaveProposition = astmgr.clone(formalProposition);
             node.children = [continuation];
             return;
         }
@@ -1985,12 +2114,18 @@ export class InferenceProofAssistant {
     }
 
     private createHaveGoal(node: DraftNode, name: string, proposition: AST,
-        consumedHypothesis?: string): void {
-        const subgoal = this.makeNode(proposition, this.cloneHypotheses(node.hypotheses));
+        consumedHypothesis?: string, formalProposition: AST = proposition): void {
+        const subgoal = this.makeNode(proposition, this.cloneHypotheses(node.hypotheses), formalProposition);
         const continuationHypotheses = this.cloneHypotheses(node.hypotheses)
             .filter(hypothesis => hypothesis.name !== consumedHypothesis);
-        continuationHypotheses.push({ name, proposition: astmgr.clone(proposition), kind: "have", sourceNodeId: subgoal.id });
-        const continuation = this.makeNode(node.target, continuationHypotheses);
+        continuationHypotheses.push({
+            name,
+            proposition: astmgr.clone(proposition),
+            formalProposition: astmgr.clone(formalProposition),
+            kind: "have",
+            sourceNodeId: subgoal.id
+        });
+        const continuation = this.makeNode(node.target, continuationHypotheses, node.formalTarget);
         node.kind = "have";
         node.haveName = name;
         node.children = [subgoal, continuation];
@@ -2016,12 +2151,13 @@ export class InferenceProofAssistant {
         const source = this.resolveSource(sourceText, node);
         if (source.kind === "rule") throw new Error(TR("obtain只支持假设或页面命题来源"));
         const proposition = this.getSourceProposition(source, node);
+        const formalProposition = this.getSourceFormalProposition(source, node);
         if (proposition.type !== "sym" || proposition.nodes?.length !== 2) {
             throw new Error(TR("obtain来源必须是合取、等价或析取命题"));
         }
 
         if (proposition.name === "E") {
-            this.obtainExistential(node, firstName, secondName, source, proposition);
+            this.obtainExistential(node, firstName, secondName, source, proposition, formalProposition);
             return;
         }
 
@@ -2052,7 +2188,7 @@ export class InferenceProofAssistant {
 
     /** Introduce a witness variable and its proposition from an existential source. */
     private obtainExistential(node: DraftNode, variableName: string, hypothesisName: string,
-        source: SourceRef, proposition: AST): void {
+        source: SourceRef, proposition: AST, formalProposition: AST = proposition): void {
         if (source.kind === "rule") throw new Error(TR("obtain只支持假设或页面命题来源"));
         const empRule = this.resolveStrategyRule(".Emp");
         if (!empRule) this.missingStrategyRule(".Emp", "obtain存在量词需要解锁存在量词消去规则或提供等价推理规则");
@@ -2067,6 +2203,15 @@ export class InferenceProofAssistant {
         const body = astmgr.clone(proposition.nodes[1]);
         const witnessProposition = this.substituteBound(body, binderName, variableName);
         this.fs.assert.checkGrammer(witnessProposition, "p");
+        if (formalProposition.type !== "sym" || formalProposition.name !== "E"
+            || formalProposition.nodes?.length !== 2) {
+            throw new Error(TR("obtain来源的形式化存在量词无效"));
+        }
+        const formalBinder = astmgr.clone(formalProposition.nodes[0]);
+        const formalBinderName = this.fs.assert.getVarName(formalBinder);
+        if (!formalBinderName) throw new Error(TR("obtain来源的形式化存在变量无效"));
+        const formalBody = astmgr.clone(formalProposition.nodes[1]);
+        const formalWitnessProposition = this.substituteBound(formalBody, formalBinderName, variableName);
 
         const variable: InferenceProofHypothesis = {
             name: variableName,
@@ -2076,12 +2221,13 @@ export class InferenceProofAssistant {
         const witnessHypothesis: InferenceProofHypothesis = {
             name: hypothesisName,
             proposition: astmgr.clone(witnessProposition),
+            formalProposition: astmgr.clone(formalWitnessProposition),
             kind: "intro"
         };
         const continuationHypotheses = this.cloneHypotheses(node.hypotheses)
             .filter(hypothesis => source.kind !== "hypothesis" || hypothesis.name !== source.name);
         continuationHypotheses.push(variable, witnessHypothesis);
-        const continuation = this.makeNode(node.target, continuationHypotheses);
+        const continuation = this.makeNode(node.target, continuationHypotheses, node.formalTarget);
         // The child proof is generalized back to
         // `Vx:(P x > target)` during materialization, then `.Emp`/`.Ee`
         // consume the original existential source.
@@ -2093,6 +2239,8 @@ export class InferenceProofAssistant {
         node.obtainHypothesisName = hypothesisName;
         node.obtainBinder = binder;
         node.obtainBody = body;
+        node.formalObtainBinder = formalBinder;
+        node.formalObtainBody = formalBody;
         node.obtainEmpRule = empRule.name;
         node.obtainEeRule = eeRule.name;
         node.children = [continuation];
@@ -2524,6 +2672,12 @@ export class InferenceProofAssistant {
         const oldFastMetaRules = this.fs.fastmetarules;
         const existingNames = new Set(Object.keys(this.fs.deductions));
         const candidates: GeneratedRuleSelection[] = [];
+        // A generated conditional/quantified rule must retain the assertion
+        // wrappers carried by the proof graph.  Rigid normalization can erase
+        // the binder-renaming dependency in an explicit .Vcn/.Ecn step, making
+        // an otherwise valid c-prefix rule appear to have different conditions.
+        const preserveSchematicAssertions = [target, ...expectedConditions, ...explicitValues]
+            .some(value => this.containsSchematicAssertion(value));
         try {
             this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
             for (const candidateName of this.generatedRuleCandidates(baseName, prefixes)) {
@@ -2548,7 +2702,7 @@ export class InferenceProofAssistant {
                         if (this.astContainsPrivateRuleVariable(result)) {
                             if (this.astContainsFunction(result, "#rp")) this.fs.assert.expand(result, false);
                         } else {
-                            astmgr.assign(result, this.normalizeAssertionSyntax(result, true));
+                            astmgr.assign(result, this.normalizeAssertionSyntax(result, !preserveSchematicAssertions));
                         }
                         this.fs.assert.checkGrammer(result, "p");
                         return result;
@@ -2676,6 +2830,42 @@ export class InferenceProofAssistant {
             return astmgr.clone(proposition.value);
         }
         return astmgr.clone(this.requireDeduction(source.name).conclusion);
+    }
+
+    /**
+     * Return the source spelling that the materializer must replay.  Local
+     * hypotheses can have a simplified presentation proposition while their
+     * formal proposition still contains an assertion substitution.
+     */
+    private getSourceFormalProposition(source: SourceRef, node: DraftNode): AST {
+        if (source.kind !== "hypothesis") return this.getSourceProposition(source, node);
+        const hypothesis = node.hypotheses.find(item => item.name === source.name)
+            ?? this.findPendingHaveForNode(node, source.name);
+        if (!hypothesis) throw new Error(TR("未找到证明来源") + source.name);
+        if (hypothesis.kind === "have" && !this.isHypothesisAvailable(hypothesis)) {
+            throw new Error(TR("该假设尚未完成"));
+        }
+        if (!hypothesis.proposition) throw new Error(TR("全称变量不能作为命题证明来源：") + source.name);
+        return astmgr.clone(hypothesis.formalProposition ?? hypothesis.proposition);
+    }
+
+    /** Apply already-validated `have` arguments without presentation normalization. */
+    private instantiateFormalHaveApplication(proposition: AST, terms: readonly AST[]): AST {
+        let current = astmgr.clone(proposition);
+        for (const term of terms) {
+            if (current.type === "sym" && current.name === "V" && current.nodes?.length === 2) {
+                const binderName = this.fs.assert.getVarName(current.nodes[0]);
+                if (!binderName) throw new Error(TR("have来源命题的全称量词变量无效"));
+                current = this.substituteBoundValue(current.nodes[1], binderName, term);
+                continue;
+            }
+            if (current.type === "sym" && current.name === ">" && current.nodes?.length === 2) {
+                current = astmgr.clone(current.nodes[1]);
+                continue;
+            }
+            throw new Error(TR("have应用参数过多，来源命题不是足够的全称或蕴涵命题"));
+        }
+        return current;
     }
 
     private matchPropositionApplication(proposition: AST, target: AST): {
@@ -3070,26 +3260,47 @@ export class InferenceProofAssistant {
         return { positional, named };
     }
 
-    /** User-supplied assertion terms can still contain theorem-schema `$` names. */
-    private explicitArgumentsContainSchematicAssertions(explicit: RuleExplicitArguments): boolean {
-        const containsSurfacePattern = (ast: AST): boolean => {
-            if (ast.type === "replvar" && ast.name.startsWith("$")
-                && !ast.name.startsWith("$$assistant_rule_")) return true;
-            return !!ast.nodes?.some(containsSurfacePattern);
-        };
-        const containsSchematicAssertion = (ast: AST): boolean => {
-            if (ast.type === "fn" && (ast.name === "#rp" || /^#v*nf$/.test(ast.name))
-                && containsSurfacePattern(ast)) return true;
-            return !!ast.nodes?.some(containsSchematicAssertion);
-        };
-        return explicit.positional.some(containsSchematicAssertion)
-            || [...explicit.named.values()].some(containsSchematicAssertion);
+    /**
+     * User-supplied assertion terms can still contain theorem-schema `$` names.
+     * Rules such as `.Vcn` also carry assertion wrappers in their own
+     * declaration. When their explicit arguments are schematic `$` names,
+     * preserve those wrappers too; otherwise rigid simplification erases the
+     * `#rp/#nf` dependency before qed can lift the step through a binder.
+     */
+    private explicitArgumentsContainSchematicAssertions(explicit: RuleExplicitArguments,
+        deduction?: Deduction): boolean {
+        const values = [...explicit.positional, ...explicit.named.values()];
+        if (values.some(value => this.containsSchematicAssertion(value))) return true;
+        if (!deduction) return false;
+        const ruleCarriesAssertion = this.astContainsFunction(deduction.conclusion, "#rp")
+            || this.astContainsFunction(deduction.conclusion, "#nf")
+            || deduction.conditions.some(condition =>
+                this.astContainsFunction(condition, "#rp")
+                || this.astContainsFunction(condition, "#nf"));
+        // The surrounding target is deliberately ignored here.  A target may
+        // contain an assertion wrapper merely because an existential witness
+        // is being introduced (for example `.Erp`); preserving that wrapper
+        // would leave `use` with a non-quantifier goal.  Only explicit `$`
+        // arguments (such as `.Vcn $x=...`) opt into schematic preservation.
+        return ruleCarriesAssertion && values.some(value => this.containsSurfacePattern(value));
+    }
+
+    private containsSurfacePattern(ast: AST): boolean {
+        if (ast.type === "replvar" && ast.name.startsWith("$")
+            && !ast.name.startsWith("$$assistant_rule_")) return true;
+        return !!ast.nodes?.some(child => this.containsSurfacePattern(child));
+    }
+
+    private containsSchematicAssertion(ast: AST): boolean {
+        if (ast.type === "fn" && (ast.name === "#rp" || /^#v*nf$/.test(ast.name))
+            && this.containsSurfacePattern(ast)) return true;
+        return !!ast.nodes?.some(child => this.containsSchematicAssertion(child));
     }
 
     /** Instantiate a rule for Lean-style `have h := rule args...`. */
     private instantiateRuleForHave(sourceName: string, deduction: Deduction,
         explicit: RuleExplicitArguments, node: DraftNode): RuleHaveInstantiation {
-        const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(explicit);
+        const preserveSchematicAssertions = this.explicitArgumentsContainSchematicAssertions(explicit, deduction);
         const context = this.createRuleMetavariableContext(deduction, deduction.conclusion, explicit, node);
         const matchTable: ReplvarMatchTable = {};
         const replacedTypes: { [name: string]: boolean } = {};
@@ -3229,6 +3440,41 @@ export class InferenceProofAssistant {
         return result;
     }
 
+    /**
+     * Recover rule arguments before presentation normalization.  Tactics match
+     * a normalized target, whereas materialization must replay the exact
+     * assertion bridge the user constructed (for example `.Vcn` after `use`).
+     * The normalized and formal targets still share their outer syntax, so map
+     * every rule argument occurring in the normalized target to its formal
+     * counterpart without changing tactic-side matching semantics.
+     */
+    private deriveFormalReplaceValues(values: readonly AST[], normalized: AST, formal: AST): AST[] {
+        const result = values.map(value => astmgr.clone(value));
+        const visit = (normalNode: AST, formalNode: AST): void => {
+            for (const [index, value] of values.entries()) {
+                if (astmgr.equal(normalNode, value)) result[index] = astmgr.clone(formalNode);
+            }
+            if (normalNode.type !== formalNode.type || normalNode.name !== formalNode.name
+                || normalNode.nodes?.length !== formalNode.nodes?.length) return;
+            normalNode.nodes?.forEach((child, index) => visit(child, formalNode.nodes![index]));
+        };
+        visit(normalized, formal);
+        return result;
+    }
+
+    /** Replace the private matcher entries for a rule with formal replay values. */
+    private withFormalRuleMatchValues(deduction: Deduction, context: RuleMetavariableContext,
+        matchTable: ReplvarMatchTable, formalValues: readonly AST[]): ReplvarMatchTable {
+        const result: ReplvarMatchTable = {};
+        for (const [name, value] of Object.entries(matchTable)) result[name] = astmgr.clone(value);
+        deduction.replaceNames.forEach((name, index) => {
+            const internal = context.internalByOriginal.get(name);
+            const value = formalValues[index];
+            if (internal && value) result[internal] = astmgr.clone(value);
+        });
+        return result;
+    }
+
     private inferRuleMetavariables(context: RuleMetavariableContext, matchTable: ReplvarMatchTable,
         patterns: AST[], node?: DraftNode, inferenceCandidates?: AST[]): void {
         const candidates: AST[] = [];
@@ -3309,6 +3555,41 @@ export class InferenceProofAssistant {
             if (astmgr.equal(before, normalized)) break;
         }
         return normalized;
+    }
+
+    /**
+     * Remove only top-level #rp wrappers whose source no longer occurs freely
+     * in their body.  Unlike normalizeAssertionSyntax(..., true), this never
+     * descends into the body, so a meaningful nested binder-conversion remains
+     * available when qed materializes the proof tree.
+     */
+    private stripInertFormalReplacement(ast: AST): AST {
+        let result = astmgr.clone(ast);
+        for (;;) {
+            let params: ReturnType<NonNullable<typeof this.fs.assert.getRpParams>> | false = false;
+            try { params = this.fs.assert.getRpParams(result); } catch { break; }
+            if (!params) break;
+            const [body, source] = params;
+            if (source.type !== "replvar" || this.containsRigidFreeName(body, source.name)) break;
+            result = astmgr.clone(body);
+        }
+        return result;
+    }
+
+    /**
+     * Rule instantiation may add a top-level `#rp` around an implication
+     * premise even though the substituted name is already absent.  Remove only
+     * that wrapper before storing the materialization graph.  Deliberately do
+     * not recurse through binders: an explicit `.Vcn`/`.Ecn` conversion uses
+     * nested `#nf/#rp` syntax that is part of the player's proof.
+     */
+    private stripInertFormalRuleAssertion(ast: AST): AST {
+        const result = astmgr.clone(ast);
+        if (result.type === "sym" && result.name === ">" && result.nodes?.length === 2) {
+            result.nodes[0] = this.stripInertFormalReplacement(result.nodes[0]);
+            return result;
+        }
+        return this.stripInertFormalReplacement(result);
     }
 
     /** Simplify assertion wrappers once their `$` names are fixed syntax. */
@@ -3428,10 +3709,11 @@ export class InferenceProofAssistant {
         }
     }
 
-    private makeNode(target: AST, hypotheses: InferenceProofHypothesis[]): DraftNode {
+    private makeNode(target: AST, hypotheses: InferenceProofHypothesis[], formalTarget: AST = target): DraftNode {
         return {
             id: this.nextNodeId++,
             target: astmgr.clone(target),
+            formalTarget: astmgr.clone(formalTarget),
             hypotheses,
             kind: "pending",
             children: [],
@@ -3466,6 +3748,7 @@ export class InferenceProofAssistant {
         return hypotheses.map(h => ({
             name: h.name,
             proposition: h.proposition ? astmgr.clone(h.proposition) : undefined,
+            formalProposition: h.formalProposition ? astmgr.clone(h.formalProposition) : undefined,
             binder: h.binder ? astmgr.clone(h.binder) : undefined,
             kind: h.kind,
             sourceNodeId: h.sourceNodeId
@@ -3774,11 +4057,16 @@ export class InferenceProofAssistant {
                 const oldFastMetarules = this.fs.fastmetarules;
                 try {
                     this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
-                    const expectedConditions = conditions.map(condition => condition.proposition);
+                    // Conditionalization must select a generated rule against
+                    // the propositions actually emitted by its dependencies.
+                    // In particular, an explicit .Vcn/.Ecn bridge carries a
+                    // meaningful #nf/#rp assertion that c.Vcn/c.Ecn must see.
+                    // selectGeneratedRule already normalizes ordinary rows,
+                    // while retaining schematic assertions when present.
                     const selection = this.selectGeneratedRule(
                         row.from.deductionIdx,
                         desired,
-                        expectedConditions,
+                        conditions.map(condition => condition.proposition),
                         ["c", "<", ">"]
                     );
                     if (!selection) throw new Error(TR("无法生成匹配intro目标的最短条件演绎规则"));
@@ -3820,7 +4108,14 @@ export class InferenceProofAssistant {
                 // proposition before matching generated `v*` rules.  This
                 // removes capture-safe #rp wrappers introduced by a4 and
                 // keeps equivalent conditions in the same surface shape.
-                const desired = this.normalizeAssertionSyntax(quantify(row.value), true);
+                // Preserve a user-visible #nf/#rp bridge such as `.Vcn` while
+                // lifting it through a binder.  Ordinary a4-generated wrappers
+                // remain implementation detail and need rigid normalization for
+                // the usual v/c rule search to succeed.
+                const quantifiedValue = quantify(row.value);
+                const desired = this.normalizeAssertionSyntax(
+                    quantifiedValue, !this.containsSchematicAssertion(quantifiedValue)
+                );
 
                 if (!row.from) {
                     if (this.containsFreeName(row.value, binding.name)) {
@@ -3895,6 +4190,7 @@ export class InferenceProofAssistant {
             if (!node.haveSource || node.haveSource.kind === "rule" || !node.haveProposition) {
                 throw new Error(TR("have应用节点缺少局部或页面命题来源"));
             }
+            const formalHaveProposition = node.formalHaveProposition ?? node.haveProposition;
             const sourceAbsoluteIndex = sourceAbsoluteRow(node.haveSource, hypothesisRows);
             let currentRow = sourceAbsoluteIndex;
             let currentProposition = astmgr.clone(propositionAt(currentRow).value);
@@ -3913,8 +4209,8 @@ export class InferenceProofAssistant {
                     conditionIdxs: [absolute(identity.index), currentRow],
                     replaceValues: []
                 });
-                this.assertSameProposition(result.proposition, node.haveProposition);
-                return { index: result.index, proposition: astmgr.clone(node.haveProposition) };
+                this.assertSameProposition(result.proposition, formalHaveProposition);
+                return { index: result.index, proposition: astmgr.clone(formalHaveProposition) };
             }
 
             const argumentSources = node.haveArgumentSources ?? [];
@@ -3963,8 +4259,8 @@ export class InferenceProofAssistant {
                 }
                 throw new Error(TR("have应用参数过多，来源命题不是足够的全称或蕴涵命题"));
             }
-            this.assertSameProposition(currentProposition, node.haveProposition);
-            return { index: currentRow - basePropositionCount, proposition: astmgr.clone(node.haveProposition) };
+            this.assertSameProposition(currentProposition, formalHaveProposition);
+            return { index: currentRow - basePropositionCount, proposition: astmgr.clone(formalHaveProposition) };
         };
 
         let emit: (node: DraftNode, incomingRows: Map<string, number>) => EmitResult;
@@ -3977,7 +4273,10 @@ export class InferenceProofAssistant {
             for (const hypothesis of node.introBindings) {
                 if (hypothesis.proposition) {
                     const index = propositions.length;
-                    propositions.push({ value: astmgr.clone(hypothesis.proposition), from: null });
+                    propositions.push({
+                        value: astmgr.clone(hypothesis.formalProposition ?? hypothesis.proposition),
+                        from: null
+                    });
                     hypothesisRows.set(hypothesis.name, index);
                     introEntries.push({ binding: hypothesis, index });
                 } else {
@@ -3989,7 +4288,9 @@ export class InferenceProofAssistant {
                     const intro = introEntries[index];
                     if (intro.binding.proposition) {
                         if (intro.index === undefined) throw new Error(TR("intro临时假设行缺失"));
-                        result = dischargeHypothesis(result, intro.binding.proposition, intro.index);
+                        result = dischargeHypothesis(
+                            result, intro.binding.formalProposition ?? intro.binding.proposition, intro.index
+                        );
                     } else if (intro.binding.kind === "variable") {
                         result = quantifyResult(result, intro.binding);
                     }
@@ -4011,14 +4312,17 @@ export class InferenceProofAssistant {
                     || sourceValue.nodes?.length !== 2) {
                     throw new Error(TR("obtain存在量词来源已改变"));
                 }
-                const binderName = this.fs.assert.getVarName(node.obtainBinder);
+                const formalBinder = node.formalObtainBinder ?? node.obtainBinder;
+                const formalBody = node.formalObtainBody ?? node.obtainBody;
+                const formalTarget = node.formalTarget;
+                const binderName = this.fs.assert.getVarName(formalBinder);
                 const sourceBinderName = this.fs.assert.getVarName(sourceValue.nodes[0]);
                 if (!binderName || !sourceBinderName
-                    || !astmgr.equal(node.obtainBody, sourceValue.nodes[1])
+                    || !astmgr.equal(formalBody, sourceValue.nodes[1])
                     || binderName !== sourceBinderName) {
                     throw new Error(TR("obtain存在量词来源与证明节点不匹配"));
                 }
-                if (this.containsFreeName(node.target, node.obtainVariableName)) {
+                if (this.containsFreeName(formalTarget, node.obtainVariableName)) {
                     throw new Error(TR("obtain生成的见证变量不能出现在最终目标中"));
                 }
 
@@ -4028,10 +4332,10 @@ export class InferenceProofAssistant {
                 const expectedUniversal = {
                     type: "sym",
                     name: "V",
-                    nodes: [astmgr.clone(node.obtainBinder), {
+                    nodes: [astmgr.clone(formalBinder), {
                         type: "sym",
                         name: ">",
-                        nodes: [astmgr.clone(node.obtainBody), astmgr.clone(node.target)]
+                        nodes: [astmgr.clone(formalBody), astmgr.clone(formalTarget)]
                     }]
                 } as AST;
                 this.assertSameProposition(continuation.proposition, expectedUniversal);
@@ -4039,19 +4343,19 @@ export class InferenceProofAssistant {
                 const existentialTarget = {
                     type: "sym",
                     name: "E",
-                    nodes: [astmgr.clone(node.obtainBinder), astmgr.clone(node.target)]
+                    nodes: [astmgr.clone(formalBinder), astmgr.clone(formalTarget)]
                 } as AST;
                 const empResult = appendDerived(existentialTarget, {
                     deductionIdx: node.obtainEmpRule ?? ".Emp",
                     conditionIdxs: [absolute(continuation.index), sourceIndex],
                     replaceValues: []
                 });
-                const result = appendDerived(node.target, {
+                const result = appendDerived(formalTarget, {
                     deductionIdx: node.obtainEeRule ?? ".Ee",
                     conditionIdxs: [absolute(empResult.index)],
                     replaceValues: []
                 });
-                return finish({ index: result.index, proposition: astmgr.clone(node.target) });
+                return finish({ index: result.index, proposition: astmgr.clone(formalTarget) });
             }
             if (node.kind === "revert") {
                 if (node.children.length !== 1 || !node.revertSource) {
@@ -4065,8 +4369,8 @@ export class InferenceProofAssistant {
                 if (node.revertSource.kind === "rule") throw new Error(TR("revert证明来源不能是推理规则"));
                 const sourceIndex = sourceAbsoluteRow(node.revertSource, hypothesisRows);
                 this.assertSameProposition(implication.nodes[0], propositionAt(sourceIndex).value);
-                this.assertSameProposition(implication.nodes[1], node.target);
-                const result = appendDerived(node.target, {
+                this.assertSameProposition(implication.nodes[1], node.formalTarget);
+                const result = appendDerived(node.formalTarget, {
                     deductionIdx: "mp",
                     conditionIdxs: [absolute(implicationResult.index), sourceIndex],
                     replaceValues: []
@@ -4107,9 +4411,10 @@ export class InferenceProofAssistant {
                         absolute(hypothesisIndex),
                         ...premiseResults.map(result => absolute(result.index))
                     ],
-                    replaceValues: (node.replaceValues ?? []).map(value => astmgr.clone(value))
+                    replaceValues: (node.formalReplaceValues ?? node.replaceValues ?? [])
+                        .map(value => astmgr.clone(value))
                 };
-                const transformed = appendDerived(node.appliedProposition, step);
+                const transformed = appendDerived(node.formalAppliedProposition ?? node.appliedProposition, step);
                 const continuationRows = new Map(hypothesisRows);
                 continuationRows.set(node.applyAtHypothesis, transformed.index);
                 return finish(emit(continuation, continuationRows));
@@ -4118,7 +4423,7 @@ export class InferenceProofAssistant {
                 const children = node.children.map(child => emit(child, hypothesisRows));
                 if (node.source && node.source.kind !== "rule") {
                     if (!node.appliedProposition) throw new Error(TR("apply证明节点缺少蕴含来源"));
-                    let implication = astmgr.clone(node.appliedProposition);
+                    let implication = astmgr.clone(node.formalAppliedProposition ?? node.appliedProposition);
                     let implicationRow = sourceAbsoluteRow(node.source, hypothesisRows);
                     for (let index = 0; index < children.length; index++) {
                         if (implication.type !== "sym" || implication.name !== ">" || implication.nodes?.length !== 2) {
@@ -4137,8 +4442,8 @@ export class InferenceProofAssistant {
                         implicationRow = absolute(resultIndex);
                         implication = conclusion;
                     }
-                    this.assertSameProposition(implication, node.target);
-                    return finish({ index: implicationRow - basePropositionCount, proposition: astmgr.clone(node.target) });
+                    this.assertSameProposition(implication, node.formalTarget);
+                    return finish({ index: implicationRow - basePropositionCount, proposition: astmgr.clone(implication) });
                 }
                 if (!node.ruleName) throw new Error(TR("apply证明节点缺少推理规则"));
                 const ruleConditionCount = node.ruleConditionCount ?? children.length;
@@ -4146,9 +4451,10 @@ export class InferenceProofAssistant {
                 const ruleStep: DeductionStep = {
                     deductionIdx: node.ruleName,
                     conditionIdxs: children.slice(0, ruleConditionCount).map(child => absolute(child.index)),
-                    replaceValues: (node.replaceValues ?? []).map(value => astmgr.clone(value))
+                    replaceValues: (node.formalReplaceValues ?? node.replaceValues ?? [])
+                        .map(value => astmgr.clone(value))
                 };
-                let implication = astmgr.clone(node.appliedProposition ?? node.target);
+                let implication = astmgr.clone(node.formalAppliedProposition ?? node.appliedProposition ?? node.formalTarget);
                 let resultIndex = propositions.length;
                 propositions.push({ value: astmgr.clone(implication), from: ruleStep });
                 steps.push(ruleStep);
@@ -4170,12 +4476,13 @@ export class InferenceProofAssistant {
                     implicationRow = absolute(resultIndex);
                     implication = conclusion;
                 }
-                this.assertSameProposition(implication, node.target);
-                return finish({ index: resultIndex, proposition: astmgr.clone(node.target) });
+                this.assertSameProposition(implication, node.formalTarget);
+                return finish({ index: resultIndex, proposition: astmgr.clone(implication) });
             }
             if (node.kind === "tauto") {
                 const sources = node.tautoSources ?? [];
                 const checkedTheorem = node.tautoTheorem ?? node.target;
+                const formalTarget = node.formalTarget;
                 const sourceIndices = sources.map(source => {
                     if (source.kind === "rule") throw new Error(TR("tauto前提不能来自推理规则"));
                     return sourceAbsoluteRow(source, hypothesisRows);
@@ -4185,40 +4492,43 @@ export class InferenceProofAssistant {
                     conditionIdxs: sourceIndices,
                     replaceValues: [],
                     info: "tauto",
-                    assistant: this.createAtomicTautoPayload(node.target, checkedTheorem, sources)
+                    assistant: this.createAtomicTautoPayload(formalTarget, checkedTheorem, sources)
                 };
                 const index = propositions.length;
-                propositions.push({ value: astmgr.clone(node.target), from: step, deferredKind: "assistant" });
+                propositions.push({ value: astmgr.clone(formalTarget), from: step, deferredKind: "assistant" });
                 steps.push(step);
-                return finish({ index, proposition: astmgr.clone(node.target) });
+                return finish({ index, proposition: astmgr.clone(formalTarget) });
             }
             if (node.kind === "exact" && node.source) {
                 if (node.source.kind === "rule") {
                     const step: DeductionStep = {
                         deductionIdx: node.source.name,
                         conditionIdxs: [],
-                        replaceValues: node.source.replaceValues.map(value => astmgr.clone(value))
+                        replaceValues: (node.formalReplaceValues ?? node.source.replaceValues)
+                            .map(value => astmgr.clone(value))
                     };
                     const index = propositions.length;
-                    propositions.push({ value: astmgr.clone(node.target), from: step });
+                    const proposition = astmgr.clone(node.formalAppliedProposition ?? node.formalTarget);
+                    propositions.push({ value: proposition, from: step });
                     steps.push(step);
-                    return finish({ index, proposition: astmgr.clone(node.target) });
+                    return finish({ index, proposition });
                 }
                 const sourceAbsoluteIndex = sourceAbsoluteRow(node.source, hypothesisRows);
                 if (sourceAbsoluteIndex >= basePropositionCount) {
                     return finish({
                         index: sourceAbsoluteIndex - basePropositionCount,
-                        proposition: astmgr.clone(node.target)
+                        proposition: astmgr.clone(propositionAt(sourceAbsoluteIndex).value)
                     });
                 }
-                const idStep: DeductionStep = { deductionIdx: ".i", conditionIdxs: [], replaceValues: [astmgr.clone(node.target)] };
+                const proposition = astmgr.clone(propositionAt(sourceAbsoluteIndex).value);
+                const idStep: DeductionStep = { deductionIdx: ".i", conditionIdxs: [], replaceValues: [proposition] };
                 const idIndex = propositions.length;
-                propositions.push({ value: { type: "sym", name: ">", nodes: [astmgr.clone(node.target), astmgr.clone(node.target)] }, from: idStep });
+                propositions.push({ value: { type: "sym", name: ">", nodes: [astmgr.clone(proposition), astmgr.clone(proposition)] }, from: idStep });
                 const mpStep: DeductionStep = { deductionIdx: "mp", conditionIdxs: [absolute(idIndex), sourceAbsoluteIndex], replaceValues: [] };
                 const index = propositions.length;
-                propositions.push({ value: astmgr.clone(node.target), from: mpStep });
+                propositions.push({ value: proposition, from: mpStep });
                 steps.push(idStep, mpStep);
-                return finish({ index, proposition: astmgr.clone(node.target) });
+                return finish({ index, proposition });
             }
             throw new Error(TR("证明树中仍有未完成目标"));
         };
