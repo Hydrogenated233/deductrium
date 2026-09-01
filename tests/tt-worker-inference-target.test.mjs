@@ -4,6 +4,7 @@ import { ASTParser } from "../js/tt/astparser.js";
 import { TTCoreSession } from "../js/tt/core-session.js";
 import { initTypeSystem } from "../js/tt/initial.js";
 import {
+    theoremInferenceComplete,
     theoremInferenceStatus,
     theoremInferenceTarget
 } from "../js/tt/theorem-validation.js";
@@ -55,6 +56,16 @@ assert.equal(theoremInferenceStatus(unresolvedTerm.inferenceComplete), "incomple
     "finish() must keep genuinely unresolved terms marked as infering");
 assert.equal(theoremInferenceStatus(undefined), "legacy",
     "callers without the new Worker signal must retain the legacy inference probe");
+
+const nbeInternalMetavariable = session.validate(3,
+    parser.parse("add_zero:=(λx:nat.rfl):(Πx:nat,eq (add x 0) x)"));
+assert.equal(nbeInternalMetavariable.ok, true, nbeInternalMetavariable.error);
+assert.equal(nbeInternalMetavariable.inferenceComplete, true,
+    "NbE-private metavariables introduced for refl must not mark a completed theorem as infering");
+assert.equal(theoremInferenceComplete(theoremInferenceTarget(
+    nbeInternalMetavariable.ast,
+    nbeInternalMetavariable.filledDefinition
+)), true, "the legacy inference fallback must also ignore NbE-private metavariables");
 
 function hasInferenceHole(ast, seen = new WeakSet()) {
     if (!ast || seen.has(ast)) return false;

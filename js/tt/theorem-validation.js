@@ -1,11 +1,22 @@
 /** Determine whether every legacy inference hole has enough checked metadata. */
 export function theoremInferenceComplete(ast) {
     const seen = new WeakSet();
-    const visit = (node) => {
+    const visit = (node, parent = null, childIndex = -1) => {
         if (!node || seen.has(node))
             return true;
         seen.add(node);
-        if (node.type === "var" && (node.name === "_" || node.name?.startsWith("?"))) {
+        const isPrivateNbeVariable = node.name?.match(/^\?nbe\d+$/) !== null;
+        // NbE may materialize a private metavariable for the implicit equality
+        // argument of `refl`.  That particular slot is an implementation
+        // detail; private metavariables elsewhere still represent unresolved
+        // inference and must keep the declaration in the `infering` state.
+        const isReflImplicitArgument = isPrivateNbeVariable
+            && parent?.type === "apply"
+            && childIndex > 0
+            && (parent.nodes?.[0]?.type === "var")
+            && (parent.nodes?.[0]?.name === "refl" || parent.nodes?.[0]?.name === "@refl");
+        if (node.type === "var" && !isReflImplicitArgument
+            && (node.name === "_" || node.name?.startsWith("?"))) {
             if (!node.checked)
                 return false;
             const checkedType = node.checked.type === ":"
@@ -17,10 +28,10 @@ export function theoremInferenceComplete(ast) {
                 && checkedType.nodes?.[0]?.name === "U")
                 return true;
             return node.checked.type === ":"
-                ? visit(node.checked.nodes?.[0])
+                ? visit(node.checked.nodes?.[0], node.checked, 0)
                 : false;
         }
-        return (node.nodes ?? []).every(visit);
+        return (node.nodes ?? []).every((child, index) => visit(child, node, index));
     };
     return visit(ast);
 }
