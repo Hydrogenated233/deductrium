@@ -1914,7 +1914,20 @@ export class Assist {
         if (n?.startsWith("?") || n === "_") n = null;
         try {
             let val = n ? markExplicitAtSyntax(parser.parse(n)) : wrapVar("(?#0)");
-            Core.assign(goal.ast, wrapApply(wrapVar("pair"), dfn, val, wrapVar("(?#0)")), true);
+            // Instantiate the primitive constructor with the dependent
+            // family explicitly.  The surface `pair` alias leaves its
+            // universe/family parameters to NBE inference; with an indexed
+            // witness that can create two incompatible constraints for the
+            // same metavariable in the second component.
+            Core.assign(goal.ast, wrapApply(
+                wrapVar("@pair"),
+                wrapVar("_"),
+                wrapVar("_"),
+                Core.clone(dfn.nodes[0]),
+                dfn,
+                val,
+                wrapVar("(?#0)")
+            ), true);
             goal.ast.checked = goal.type;
             if (n) {
                 core.checkType(goal.ast.nodes[0], goal.context, false);
@@ -1982,16 +1995,36 @@ export class Assist {
         const goal = this.goal.shift();
         if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
         if (goal.type.type !== "X") throw TR("case策略只能作用于积类型");
-        Core.assign(goal.ast, { type: ",", name: "", nodes: [wrapVar("(?#0)"), wrapVar("(?#0)")] }, true);
+        // `X` is the surface product notation for a Sigma with a constant
+        // family.  Use the primitive constructor with that family made
+        // explicit; the shorthand `pair` alias leaves the family to NBE
+        // inference and is ambiguous in dependent branches.
+        const family = wrapLambda(
+            "L",
+            "_",
+            Core.clone(goal.type.nodes[0]),
+            Core.clone(goal.type.nodes[1])
+        );
+        Core.assign(goal.ast, wrapApply(
+            wrapVar("@pair"),
+            wrapVar("_"),
+            wrapVar("_"),
+            Core.clone(goal.type.nodes[0]),
+            family,
+            wrapVar("(?#0)"),
+            wrapVar("(?#0)")
+        ), true);
+        const firstComponentHole = goal.ast.nodes[0].nodes[1];
+        const secondComponentHole = goal.ast.nodes[1];
         const anotherGoal: Goal = {
-            ast: goal.ast.nodes[1],
+            ast: secondComponentHole,
             context: goal.context.slice(0),
             type: goal.type.nodes[1],
             depend: goal.depend
         };
         anotherGoal.ast.checked = anotherGoal.type;
         goal.ast.checked = goal.type;
-        goal.ast = goal.ast.nodes[0];
+        goal.ast = firstComponentHole;
         goal.type = goal.type.nodes[0];
         goal.ast.checked = goal.type;
         goal.depend = null;

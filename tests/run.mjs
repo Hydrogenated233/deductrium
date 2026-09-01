@@ -133,6 +133,7 @@ const tests = [
     "./tt-universe-equivalence.test.mjs",
     "./tt-assist-engine.test.mjs",
     "./tt-issue-25-zero-add-qed.test.mjs",
+    "./tt-issue-26-dependent-pair-qed.test.mjs",
     "./tt-assist-qed-stale-bond-ids.test.mjs",
     "./tt-assist-self-loop-destruct.test.mjs",
     "./tt-assist-surface-presentation.test.mjs",
