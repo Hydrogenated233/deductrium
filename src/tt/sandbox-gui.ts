@@ -309,9 +309,11 @@ export class TTSandboxGui {
         this.validateButton?.addEventListener("click", () => void this.requestValidation(false));
         this.stopValidationButton?.addEventListener("click", () => this.cancelValidation());
         rootButton(this.root, "#sandbox-export")?.addEventListener("click", () => this.exportSave());
+        rootButton(this.root, "#sandbox-copy")?.addEventListener("click", () => void this.copySave());
         rootButton(this.root, "#sandbox-import-trigger")?.addEventListener("click", () => {
             (this.root.querySelector("#sandbox-import") as HTMLInputElement)?.click();
         });
+        rootButton(this.root, "#sandbox-clear")?.addEventListener("click", () => this.clearWorkspace());
         this.root.querySelector("#sandbox-import")?.addEventListener("change", event => {
             const file = (event.target as HTMLInputElement).files?.[0];
             if (!file) return;
@@ -943,6 +945,61 @@ export class TTSandboxGui {
         link.download = "deductrium-type-theory-sandbox.json";
         link.click();
         URL.revokeObjectURL(url);
+    }
+
+    /** Copy the same versioned package produced by Export. */
+    private async copySave() {
+        const text = JSON.stringify(this.toSave(), null, 2);
+        try {
+            const clipboard = globalThis.navigator?.clipboard;
+            if (!clipboard?.writeText) throw new Error("Clipboard API unavailable");
+            await clipboard.writeText(text);
+            this.setStatus("沙盒包已复制", false);
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            this.setStatus(`复制沙盒包失败：${reason}`, true);
+        }
+    }
+
+    /** Clear source state and revoke the trusted projection immediately. */
+    private clearWorkspace() {
+        if (!this.declarations.length && !this.folders.length) {
+            this.setStatus("沙盒已经为空", false);
+            return;
+        }
+        if (!confirm("确定清空所有沙盒声明和文件夹吗？此操作不能撤销。")) return;
+
+        this.cancelValidation(false);
+        // Invalidate even a legacy/mock request that did not expose a
+        // cancellable handle, and discard the Worker's old configured save.
+        this.validationRequest++;
+        this.worker.terminate();
+        this.validationHandle = null;
+        this.validationCanRestoreBridge = false;
+        this.updateValidationControls(false);
+
+        this.declarations = [];
+        this.folders = [];
+        this.order = [];
+        this.pendingFolderId = null;
+        this.fallback = null;
+        this.workspace.replace([]);
+        const bridge = emptyBridge();
+        this.lastTrustedBridge = bridge;
+        let bridgeError: unknown;
+        try {
+            this.onAxiomsChange?.(bridge, { revalidate: true });
+        } catch (error) {
+            bridgeError = error;
+        }
+        this.persist();
+        this.render();
+        if (bridgeError) {
+            const reason = bridgeError instanceof Error ? bridgeError.message : String(bridgeError);
+            this.setStatus(`沙盒已清空，但撤回类型层声明失败：${reason}`, true);
+            return;
+        }
+        this.setStatus("沙盒已清空", false);
     }
 
     private setStatus(message: string, error: boolean) {

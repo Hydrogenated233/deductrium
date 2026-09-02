@@ -53,6 +53,85 @@ cloned.metadata.pathConstructors[0].right.name = "mutatedRight";
 assert.equal(cloned.metadata.pathConstructors[0].left.name, "baseDisplay");
 assert.equal(bundle.metadata.pathConstructors[0].right.name, "baseDisplay");
 
+const hit2Bundle = {
+    type: ["Hit2Display", parse("U")],
+    constructors: [["baseSquare", parse("Hit2Display")]],
+    auxiliaryTypes: [
+        ["loopSquareA", parse("baseSquare = baseSquare")],
+        ["loopSquareB", parse("baseSquare = baseSquare")],
+        ["squarePath", parse("loopSquareA = loopSquareB")],
+        ["@apd_squarePath", parse("True")]
+    ],
+    definitions: [["ap_squarePath", parse("true")]],
+    metadata: {
+        version: 4,
+        kind: "hit2",
+        dimension: 2,
+        typeName: "Hit2Display",
+        eliminatorName: "ind_Hit2Display",
+        constructors: [{ name: "baseSquare", argumentTypes: [] }],
+        pathConstructors: [
+            {
+                name: "loopSquareA",
+                argumentTypes: [],
+                left: parse("baseSquare"),
+                right: parse("baseSquare"),
+                computationName: "apd_loopSquareA"
+            },
+            {
+                name: "loopSquareB",
+                argumentTypes: [],
+                left: parse("baseSquare"),
+                right: parse("baseSquare"),
+                computationName: "apd_loopSquareB"
+            }
+        ],
+        twoPathConstructors: [{
+            name: "squarePath",
+            argumentTypes: [parse("True")],
+            left: parse("loopSquareA"),
+            right: parse("loopSquareB"),
+            leftPath: "loopSquareA",
+            rightPath: "loopSquareB",
+            computationName: "apd_squarePath"
+        }]
+    }
+};
+
+const clonedHit2 = cloneInductiveBundle(hit2Bundle);
+assert.equal(clonedHit2.metadata.kind, "hit2");
+assert.equal(clonedHit2.metadata.dimension, 2);
+assert.equal(clonedHit2.metadata.twoPathConstructors[0].leftPath, "loopSquareA");
+assert.equal(clonedHit2.metadata.twoPathConstructors[0].rightPath, "loopSquareB");
+assert.notEqual(clonedHit2.metadata.twoPathConstructors[0].left,
+    hit2Bundle.metadata.twoPathConstructors[0].left);
+assert.notEqual(clonedHit2.metadata.twoPathConstructors[0].argumentTypes[0],
+    hit2Bundle.metadata.twoPathConstructors[0].argumentTypes[0]);
+hit2Bundle.metadata.twoPathConstructors[0].left.name = "mutatedLoop";
+clonedHit2.metadata.twoPathConstructors[0].right.name = "mutatedLoop";
+assert.equal(clonedHit2.metadata.twoPathConstructors[0].left.name, "loopSquareA");
+assert.equal(hit2Bundle.metadata.twoPathConstructors[0].right.name, "loopSquareB");
+
+for (const name of ["squarePath", "@squarePath"]) {
+    assert.deepEqual(
+        sandboxInductiveEntryPresentation(hit2Bundle, name, {
+            postfix: "解构",
+            category: "eliminator"
+        }),
+        { postfix: "构造", prefix: "sandbox HIT", category: "constructor" }
+    );
+}
+for (const name of ["apd_squarePath", "@apd_squarePath", "ap_squarePath", "@ap_squarePath"]) {
+    assert.deepEqual(
+        sandboxInductiveEntryPresentation(hit2Bundle, name, {
+            postfix: "定义",
+            category: "axiom"
+        }),
+        { postfix: "计算", prefix: "sandbox HIT", category: "compute" },
+        `${name} must render as a propositional two-path HIT computation rule`
+    );
+}
+
 assert.deepEqual(
     sandboxInductiveEntryPresentation(bundle, "loopDisplay", {
         postfix: "解构",

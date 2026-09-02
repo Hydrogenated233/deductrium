@@ -73,15 +73,32 @@ export function cloneInductiveBundle(bundle) {
                     left: Core.clone(ctor.left),
                     right: Core.clone(ctor.right),
                     computationName: ctor.computationName
+                })),
+                twoPathConstructors: bundle.metadata.twoPathConstructors?.map(ctor => ({
+                    name: ctor.name,
+                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    left: Core.clone(ctor.left),
+                    right: Core.clone(ctor.right),
+                    leftPath: ctor.leftPath,
+                    rightPath: ctor.rightPath,
+                    computationName: ctor.computationName
                 }))
             }
             : undefined
     };
 }
+function sandboxInductiveBundlePrefix(bundle) {
+    return bundle.metadata?.kind === "hit1" || bundle.metadata?.kind === "hit2"
+        ? "sandbox HIT"
+        : "sandbox inductive";
+}
 /** Classify a generated sandbox entry without relying on name-prefix guesses. */
 export function sandboxInductiveEntryPresentation(bundle, name, fallback) {
-    const prefix = bundle.metadata?.kind === "hit1" ? "sandbox HIT" : "sandbox inductive";
-    const paths = bundle.metadata?.pathConstructors ?? [];
+    const prefix = sandboxInductiveBundlePrefix(bundle);
+    const paths = [
+        ...(bundle.metadata?.pathConstructors ?? []),
+        ...(bundle.metadata?.twoPathConstructors ?? [])
+    ];
     const publicName = name.startsWith("@") ? name.slice(1) : name;
     if (paths.some(path => path.name === publicName)) {
         return { postfix: "构造", prefix, category: "constructor" };
@@ -2044,9 +2061,7 @@ export class TTGui {
                 appendEntry(name, type, "定义", "sandbox", "axiom");
         }
         for (const bundle of this.sandboxInductives ?? []) {
-            const bundlePrefix = bundle.metadata?.kind === "hit1"
-                ? "sandbox HIT"
-                : "sandbox inductive";
+            const bundlePrefix = sandboxInductiveBundlePrefix(bundle);
             const displayOptions = {
                 constructorNames: bundle.metadata?.constructors?.map(ctor => ctor.name)
                     ?? bundle.constructors?.map(([name]) => name)

@@ -2,12 +2,22 @@ import assert from "node:assert/strict";
 
 import { ASTParser } from "../js/tt/astparser.js";
 import { TTCoreEngine } from "../js/tt/engine.js";
+import {
+    creativeSandboxSystemRuleIds,
+    lowerSandboxHit,
+    parseSandboxHit
+} from "../js/tt/sandbox.js";
 
 const parser = new ASTParser();
 const parse = source => parser.parse(source);
 const createEngine = () => {
     const instance = new TTCoreEngine();
     instance.configure({ unlockedTypes: ["True", "False", "eq"] });
+    return instance;
+};
+const createHitEngine = () => {
+    const instance = new TTCoreEngine();
+    instance.configure({ unlockedTypes: creativeSandboxSystemRuleIds });
     return instance;
 };
 
@@ -330,5 +340,57 @@ assert.throws(() => new TTCoreEngine().core.registerSystemInductive({
         }]
     }
 }), /维度必须为 1/);
+
+const parameterizedHit2 = lowerSandboxHit(parseSandboxHit(
+    "hit SurfaceMetadata (A : U) : U "
+    + "| baseMetadata : SurfaceMetadata A "
+    + "| loopLeftMetadata : Πz:A,baseMetadata=baseMetadata "
+    + "| loopRightMetadata : Πz:A,baseMetadata=baseMetadata "
+    + "| path2 squareMetadata : Πz:A,loopLeftMetadata z=loopRightMetadata z"
+));
+const cloneHit2 = () => structuredClone(parameterizedHit2);
+
+assert.doesNotThrow(() => createHitEngine().core.registerSystemInductive(cloneHit2()));
+
+for (const [field, wrongPath] of [
+    ["leftPath", "loopRightMetadata"],
+    ["rightPath", "loopLeftMetadata"]
+]) {
+    const mismatchedHead = cloneHit2();
+    mismatchedHead.metadata.twoPathConstructors[0][field] = wrongPath;
+    assert.throws(
+        () => createHitEngine().core.registerSystemInductive(mismatchedHead),
+        /端点头常量与 [左右]Path metadata 不一致/
+    );
+}
+
+const missingPathArgument = cloneHit2();
+missingPathArgument.metadata.twoPathConstructors[0].left = parse("loopLeftMetadata A");
+missingPathArgument.auxiliaryTypes.find(([name]) => name === "squareMetadata")[1]
+    = parse("ΠA:U,Πz:A,(loopLeftMetadata A)=(loopRightMetadata A z)");
+assert.throws(
+    () => createHitEngine().core.registerSystemInductive(missingPathArgument),
+    /左端点参数数量与一阶路径 loopLeftMetadata telescope 不一致/
+);
+
+const extraPathArgument = cloneHit2();
+extraPathArgument.metadata.twoPathConstructors[0].right
+    = parse("loopRightMetadata A z z");
+extraPathArgument.auxiliaryTypes.find(([name]) => name === "squareMetadata")[1]
+    = parse("ΠA:U,Πz:A,(loopLeftMetadata A z)=(loopRightMetadata A z z)");
+assert.throws(
+    () => createHitEngine().core.registerSystemInductive(extraPathArgument),
+    /右端点参数数量与一阶路径 loopRightMetadata telescope 不一致/
+);
+
+const mismatchedUniformParameter = cloneHit2();
+mismatchedUniformParameter.metadata.twoPathConstructors[0].left
+    = parse("loopLeftMetadata True z");
+mismatchedUniformParameter.auxiliaryTypes.find(([name]) => name === "squareMetadata")[1]
+    = parse("ΠA:U,Πz:A,(loopLeftMetadata True z)=(loopRightMetadata A z)");
+assert.throws(
+    () => createHitEngine().core.registerSystemInductive(mismatchedUniformParameter),
+    /左端点未保持统一参数：A/
+);
 
 console.log("Core HIT path-metadata regression passed");

@@ -498,10 +498,7 @@ function sameGeneratedAst(left: AST, right: AST): boolean {
         && leftNodes.every((node, index) => sameGeneratedAst(node, rightNodes[index]));
 }
 
-function generatedEqualityEndpoints(ast: AST): readonly [AST, AST] | undefined {
-    if (ast.type === "=" && ast.nodes?.[0] && ast.nodes?.[1]) {
-        return [ast.nodes[0], ast.nodes[1]];
-    }
+function generatedApplicationParts(ast: AST): { head: AST; arguments: AST[] } {
     const arguments_: AST[] = [];
     let head = ast;
     while (head.type === "apply" && head.nodes?.[0] && head.nodes?.[1]) {
@@ -509,6 +506,215 @@ function generatedEqualityEndpoints(ast: AST): readonly [AST, AST] | undefined {
         head = head.nodes[0];
     }
     arguments_.reverse();
+    return { head, arguments: arguments_ };
+}
+
+function generatedFreeConstantName(ast: AST): string | undefined {
+    const head = generatedApplicationParts(ast).head;
+    return head.type === "var" && !head.bondVarId && head.name
+        ? head.name
+        : undefined;
+}
+
+function generatedContainsFreeConstant(ast: AST, name: string): boolean {
+    const stack = [ast];
+    const seen = new WeakSet<object>();
+    while (stack.length) {
+        const node = stack.pop();
+        if (!node || typeof node !== "object" || seen.has(node)) continue;
+        seen.add(node);
+        if (node.type === "var" && !node.bondVarId && node.name === name) return true;
+        for (const child of node.nodes ?? []) stack.push(child);
+    }
+    return false;
+}
+
+function generatedStrictRecursiveArgument(type: AST, familyName: string): boolean {
+    let cursor = type;
+    while ((cursor.type === "P" || cursor.type === "->")
+        && cursor.nodes?.[0] && cursor.nodes?.[1]) {
+        if (generatedContainsFreeConstant(cursor.nodes[0], familyName)) return false;
+        cursor = cursor.nodes[1];
+    }
+    return generatedFreeConstantName(cursor) === familyName;
+}
+
+function validateSystemInductiveComputeRules(
+    bundle: CoreSystemInductiveBundle,
+    rulesByHead: Readonly<Record<string, readonly { pattern: AST[]; result: AST }[]>>,
+    parameterCount: number,
+    constructorTypes: ReadonlyMap<string, AST>
+) {
+    const auxiliaryNames = new Set((bundle.auxiliaryTypes ?? []).map(([name]) => name));
+    const allowedHeads = new Set<string>();
+    const addEliminationHead = (entry: readonly [string, AST] | undefined) => {
+        if (!entry) return;
+        allowedHeads.add(entry[0]);
+        const fullAlias = `@${entry[0]}`;
+        if (auxiliaryNames.has(fullAlias)) allowedHeads.add(fullAlias);
+    };
+    addEliminationHead(bundle.eliminator);
+    addEliminationHead(bundle.recursor);
+
+    const constructorNames = new Set(bundle.constructors.map(([name]) => name));
+    const metadataConstructors = new Map(
+        (bundle.metadata?.constructors ?? []).map(constructor => [constructor.name, constructor] as const)
+    );
+    const recursiveArgumentIndexes = new Map<string, Set<number>>();
+    for (const constructorName of constructorNames) {
+        let argumentTypes = metadataConstructors.get(constructorName)?.argumentTypes;
+        if (!argumentTypes) {
+            argumentTypes = [];
+            let cursor = constructorTypes.get(constructorName);
+            let binderIndex = 0;
+            while (cursor && (cursor.type === "P" || cursor.type === "->")
+                && cursor.nodes?.[0] && cursor.nodes?.[1]) {
+                if (binderIndex >= parameterCount) argumentTypes.push(cursor.nodes[0]);
+                binderIndex++;
+                cursor = cursor.nodes[1];
+            }
+        }
+        const indexes = new Set<number>();
+        argumentTypes.forEach((type, index) => {
+            if (generatedStrictRecursiveArgument(type, bundle.type[0])) indexes.add(index);
+        });
+        recursiveArgumentIndexes.set(constructorName, indexes);
+    }
+    const constructorRuleOwners = new Set<string>();
+    const aritiesByHead = new Map<string, Set<number>>();
+    const rulePolicies: {
+        head: string;
+        rule: { pattern: AST[]; result: AST };
+        recursiveDataRoots: Set<string>;
+    }[] = [];
+    const containsAnonymousHole = (ast: AST) => {
+        const stack = [ast];
+        const seen = new WeakSet<object>();
+        while (stack.length) {
+            const node = stack.pop();
+            if (!node || typeof node !== "object" || seen.has(node)) continue;
+            seen.add(node);
+            if (node.type === "var" && node.name === "_") return true;
+            for (const child of node.nodes ?? []) stack.push(child);
+        }
+        return false;
+    };
+
+    for (const [head, rules] of Object.entries(rulesByHead)) {
+        if (!allowedHeads.has(head)) {
+            throw new Error(`归纳计算规则头只能属于本 bundle 的消去器或递归器：${head || "<空>"}`);
+        }
+        const arities = new Set<number>();
+        aritiesByHead.set(head, arities);
+        for (const rule of rules) {
+            const first = rule.pattern[0];
+            if (first?.type !== "var" || first.bondVarId || first.name !== head) {
+                throw new Error(`归纳计算规则 ${head} 的 pattern[0] 必须等于规则头`);
+            }
+            const dataPattern = rule.pattern[rule.pattern.length - 1];
+            const constructorName = dataPattern
+                ? generatedFreeConstantName(dataPattern)
+                : undefined;
+            if (!constructorName || !constructorNames.has(constructorName)) {
+                throw new Error(`归纳计算规则 ${head} 的最后数据模式必须由当前点构造子形成`);
+            }
+            const dataArguments = generatedApplicationParts(dataPattern).arguments;
+            const recursiveIndexes = recursiveArgumentIndexes.get(constructorName) ?? new Set<number>();
+            const recursiveDataRoots = new Set(
+                dataArguments.slice(parameterCount)
+                    .filter((argument, index) => recursiveIndexes.has(index)
+                        && argument.type === "var" && argument.name?.startsWith("?"))
+                    .map(argument => argument.name)
+            );
+            const ownerKey = `${head}\u0000${constructorName}`;
+            if (constructorRuleOwners.has(ownerKey)) {
+                throw new Error(`归纳计算规则 ${head} 在构造子 ${constructorName} 上重叠`);
+            }
+            constructorRuleOwners.add(ownerKey);
+            arities.add(rule.pattern.length - 1);
+
+            const boundMetas = new Set<string>();
+            for (const pattern of rule.pattern) collectInferenceMetaNames(pattern, boundMetas);
+            const unboundMetas = [...collectInferenceMetaNames(rule.result)]
+                .filter(name => !boundMetas.has(name));
+            if (unboundMetas.length) {
+                throw new Error(
+                    `归纳计算规则 ${head} 的右侧引用了左侧未绑定的元变量：${unboundMetas.join("、")}`
+                );
+            }
+            if (containsAnonymousHole(rule.result)) {
+                throw new Error(`归纳计算规则 ${head} 的右侧不能包含未绑定占位符 _`);
+            }
+            rulePolicies.push({ head, rule, recursiveDataRoots });
+        }
+    }
+
+    for (const [head, arities] of aritiesByHead) {
+        if (arities.size > 1) {
+            throw new Error(`归纳计算规则 ${head} 的 pattern 参数数量不一致`);
+        }
+    }
+
+    const recursiveHeads = new Set(aritiesByHead.keys());
+    const rejectNonDecreasingCall = (
+        ownerHead: string,
+        recursiveDataRoots: ReadonlySet<string>,
+        result: AST
+    ) => {
+        const seen = new WeakSet<object>();
+        const visit = (node: AST | undefined) => {
+            if (!node || typeof node !== "object" || seen.has(node)) return;
+            seen.add(node);
+            if (node.type === "apply") {
+                const application = generatedApplicationParts(node);
+                const calledHead = generatedFreeConstantName(application.head);
+                const arities = calledHead && recursiveHeads.has(calledHead)
+                    ? aritiesByHead.get(calledHead)
+                    : undefined;
+                if (calledHead && arities) {
+                    if (calledHead !== ownerHead) {
+                        throw new Error(`归纳计算规则 ${ownerHead} 不能递归调用其他消去器：${calledHead}`);
+                    }
+                    const [arity] = arities;
+                    if (arity <= 0 || application.arguments.length < arity) {
+                        throw new Error(`归纳计算规则 ${ownerHead} 包含部分应用的递归调用`);
+                    }
+                    const recursiveData = application.arguments[arity - 1];
+                    const recursiveRoot = generatedFreeConstantName(recursiveData);
+                    if (recursiveRoot && constructorNames.has(recursiveRoot)) {
+                        throw new Error(
+                            `归纳计算规则 ${ownerHead} 包含对构造项 ${recursiveRoot} 的明显非递减递归调用`
+                        );
+                    }
+                    if (!recursiveRoot?.startsWith("?") || !recursiveDataRoots.has(recursiveRoot)) {
+                        throw new Error(
+                            `归纳计算规则 ${ownerHead} 的递归数据不是当前构造项的直接子项`
+                        );
+                    }
+                    for (const argument of application.arguments) visit(argument);
+                    return;
+                }
+                visit(application.head);
+                for (const argument of application.arguments) visit(argument);
+                return;
+            }
+            if (node.type === "var" && recursiveHeads.has(node.name)) {
+                throw new Error(`归纳计算规则 ${ownerHead} 包含部分应用的递归调用`);
+            }
+            for (const child of node.nodes ?? []) visit(child);
+        };
+        visit(result);
+    };
+    for (const { head, rule, recursiveDataRoots } of rulePolicies) {
+        rejectNonDecreasingCall(head, recursiveDataRoots, rule.result);
+    }
+}
+
+function generatedEqualityEndpoints(ast: AST): readonly [AST, AST] | undefined {
+    if (ast.type === "=" && ast.nodes?.[0] && ast.nodes?.[1]) {
+        return [ast.nodes[0], ast.nodes[1]];
+    }
+    const { head, arguments: arguments_ } = generatedApplicationParts(ast);
     if (head.type !== "var" || (head.name !== "eq" && head.name !== "@eq")
         || arguments_.length < 2) return undefined;
     return [arguments_[arguments_.length - 2], arguments_[arguments_.length - 1]];
@@ -897,13 +1103,19 @@ export class Core {
             [head: string]: { pattern: AST[]; result: AST }[]
         } = {};
         for (const [head, rules] of Object.entries(bundle.computeRules ?? {})) {
-            if (!head || !Array.isArray(rules)) continue;
-            normalizedRules[head] = rules
-                .filter(rule => !!rule?.pattern?.length && !!rule.result)
-                .map(rule => ({
+            if (!head || !Array.isArray(rules)) {
+                throw new Error(`归纳计算规则集合无效：${head || "<空>"}`);
+            }
+            normalizedRules[head] = rules.map(rule => {
+                if (!rule?.pattern?.length || !rule.result
+                    || rule.pattern.some(pattern => !pattern)) {
+                    throw new Error(`归纳计算规则 ${head} 缺少 pattern 或 result`);
+                }
+                return {
                     pattern: rule.pattern.map(pattern => this.desugar(Core.clone(pattern), true)),
                     result: this.desugar(Core.clone(rule.result), true)
-                }));
+                };
+            });
         }
         for (const path of [
             ...(bundle.metadata?.pathConstructors ?? []),
@@ -922,7 +1134,6 @@ export class Core {
                 }
             }
         }
-
         let familyType = normalizedEntries[0][1];
         const familyBinders: { name: string; type: AST }[] = [];
         while ((familyType.type === "P" || familyType.type === "->")
@@ -943,6 +1154,16 @@ export class Core {
         }
         const parameters = familyBinders.slice(0, parameterCount);
         const indices = familyBinders.slice(parameterCount);
+        const constructorTypes = new Map(
+            normalizedEntries
+                .filter(([name]) => bundlePointConstructorNames.includes(name))
+        );
+        validateSystemInductiveComputeRules(
+            bundle,
+            normalizedRules,
+            parameterCount,
+            constructorTypes
+        );
 
         if (bundle.metadata?.kind === "hit1" || bundle.metadata?.kind === "hit2") {
             const metadata = bundle.metadata;
@@ -1061,6 +1282,49 @@ export class Core {
                 }
             }
 
+            const pathMetadataByName = new Map(
+                (metadata.pathConstructors ?? []).map(path => [path.name, path] as const)
+            );
+            const validateTwoPathEndpoint = (
+                owner: string,
+                side: "左" | "右",
+                endpoint: AST,
+                referencedName: string
+            ) => {
+                const referencedPath = pathMetadataByName.get(referencedName);
+                if (!referencedPath) {
+                    throw new Error(`二维 HIT 二阶路径构造子 ${owner} 的一阶路径引用不存在：${referencedName}`);
+                }
+                const application = generatedApplicationParts(endpoint);
+                const endpointHead = application.head.type === "var"
+                    ? application.head.name
+                    : "";
+                if (endpointHead !== referencedName) {
+                    throw new Error(
+                        `二维 HIT 二阶路径构造子 ${owner} ${side}端点头常量与 ${side}Path metadata 不一致：`
+                        + `${endpointHead || "<非常量>"} != ${referencedName}`
+                    );
+                }
+                const expectedArgumentCount = parameters.length
+                    + referencedPath.argumentTypes.length;
+                if (application.arguments.length !== expectedArgumentCount) {
+                    throw new Error(
+                        `二维 HIT 二阶路径构造子 ${owner} ${side}端点参数数量与一阶路径 `
+                        + `${referencedName} telescope 不一致：需要 ${expectedArgumentCount} 个，`
+                        + `实际 ${application.arguments.length} 个`
+                    );
+                }
+                for (let index = 0; index < parameters.length; index++) {
+                    const parameter = parameters[index];
+                    if (!sameGeneratedAst(application.arguments[index], wrapVar(parameter.name))) {
+                        throw new Error(
+                            `二维 HIT 二阶路径构造子 ${owner} ${side}端点未保持统一参数：`
+                            + parameter.name
+                        );
+                    }
+                }
+            };
+
             for (const path of metadata.twoPathConstructors ?? []) {
                 const pathType = auxiliaryTypes.get(path.name);
                 if (!pathType) {
@@ -1076,10 +1340,12 @@ export class Core {
                     || !sameGeneratedAst(endpoints[1], normalizedMetadataAst(path.right))) {
                     throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 端点与 metadata 不一致`);
                 }
-                if (!pathConstructorNames.has(path.leftPath)
-                    || !pathConstructorNames.has(path.rightPath)) {
-                    throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 的一阶路径引用不存在`);
-                }
+                validateTwoPathEndpoint(
+                    path.name, "左", normalizedMetadataAst(path.left), path.leftPath
+                );
+                validateTwoPathEndpoint(
+                    path.name, "右", normalizedMetadataAst(path.right), path.rightPath
+                );
                 const computationNames = [
                     `apd_${path.name}`,
                     `@apd_${path.name}`,
