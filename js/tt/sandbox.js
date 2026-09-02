@@ -24,7 +24,7 @@ export function sandboxEnabledInMode(mode) {
 }
 /** Persist only source-owned declaration state; parsed/lowered fields are rebuilt and re-certified. */
 export function toSandboxSavedDeclaration(declaration) {
-    const { inductive: _inductive, hit: _hit, generatedNames: _generatedNames, ...saved } = declaration;
+    const { inductive: _inductive, hit: _hit, generatedNames: _generatedNames, presentationAst: _presentationAst, ...saved } = declaration;
     return { ...saved, dependencies: [...saved.dependencies] };
 }
 export function sandboxHitPathLevels(signature) {
@@ -2475,6 +2475,40 @@ function parseSandboxStoredDeclaration(source) {
         }
     }
 }
+function sandboxDraftName(source) {
+    const inductive = /^(?:hit|inductive)\s+([^\s(:\[]+)/i.exec(source);
+    if (inductive)
+        return inductive[1];
+    return /^([^\s:]+)\s*(?::=|:)/.exec(source)?.[1] ?? "";
+}
+function sandboxDraftKind(source) {
+    if (/^hit\b/i.test(source))
+        return "hit";
+    if (/^inductive\b/i.test(source))
+        return "inductive";
+    if (/:=/.test(source))
+        return "definition";
+    return "term";
+}
+/** Create an editable GUI draft without constructing ASTs or trusting derived declaration data. */
+export function createSandboxDraftDeclaration(source, id, seed = {}, maxSourceChars) {
+    const text = expandTypeTheoryAliasesInSurface(normalizeSandboxSource(String(source ?? "")));
+    const enabled = seed.enabled !== false;
+    const error = sandboxSourceLimitError(text, maxSourceChars);
+    return {
+        id,
+        name: seed.name ?? sandboxDraftName(text),
+        kind: seed.kind ?? sandboxDraftKind(text),
+        source: text,
+        typeSource: seed.typeSource ?? "",
+        enabled,
+        trusted: true,
+        status: enabled ? "unchecked" : "disabled",
+        ...(error ? { error } : {}),
+        dependencies: [],
+        folderId: seed.folderId ?? null
+    };
+}
 export function createSandboxDeclaration(source, id, maxSourceChars) {
     // Keep the creation path consistent with the strict editor boundary.
     // The keyboard normally expands aliases on Space, but pasted text can
@@ -2572,7 +2606,8 @@ export function createSandboxDeclaration(source, id, maxSourceChars) {
             trusted: true,
             status: "unchecked",
             dependencies,
-            folderId: null
+            folderId: null,
+            presentationAst: parsed.ast ? Core.clone(parsed.ast) : undefined
         };
     }
     catch (error) {
@@ -3128,6 +3163,7 @@ export class SandboxEnvironment {
             declaration.inductive = undefined;
             declaration.hit = undefined;
             declaration.generatedNames = undefined;
+            declaration.presentationAst = undefined;
             const rowState = layout.get(declaration.id);
             if (rowState?.disabled) {
                 declaration.status = "disabled";
@@ -3146,6 +3182,7 @@ export class SandboxEnvironment {
                 parsed = parseSandboxStoredDeclaration(declaration.source);
                 declaration.name = parsed.name;
                 declaration.typeSource = parsed.typeSource;
+                declaration.presentationAst = parsed.ast ? Core.clone(parsed.ast) : undefined;
                 if (parsed.hit) {
                     declaration.kind = "hit";
                     declaration.hit = parsed.hit;
@@ -3791,7 +3828,8 @@ export class SandboxEnvironment {
                         dependencies: [],
                         inductive: undefined,
                         hit: undefined,
-                        generatedNames: undefined
+                        generatedNames: undefined,
+                        presentationAst: parsed.ast ? Core.clone(parsed.ast) : undefined
                     };
                     if (restored.kind !== entry.kind)
                         throw new Error("沙盒验证缓存声明种类不匹配");

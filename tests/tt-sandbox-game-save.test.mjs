@@ -78,16 +78,31 @@ gui.declarations = [{
     trusted: true,
     status: "valid",
     dependencies: [],
-    folderId: null
+    folderId: null,
+    presentationAst: { type: "var", name: "A", nodes: [] }
 }];
 gui.folders = [];
 gui.order = ["sandbox-1"];
-assert.deepEqual(gui.serializeGameSave(), {
+const serializedGuiSave = gui.serializeGameSave();
+assert.deepEqual(serializedGuiSave, {
     version: SANDBOX_SAVE_VERSION,
-    declarations: gui.declarations,
+    declarations: [{
+        id: "sandbox-1",
+        name: "A",
+        kind: "type",
+        source: "A : U",
+        typeSource: "U",
+        enabled: true,
+        trusted: true,
+        status: "valid",
+        dependencies: [],
+        folderId: null
+    }],
     folders: [],
     order: ["sandbox-1"]
 }, "the GUI must expose the same versioned snapshot used by standalone export");
+assert.equal(Object.hasOwn(serializedGuiSave.declarations[0], "presentationAst"), false,
+    "Worker presentation ASTs must never enter the game save");
 
 const hit3Source = "hit SaveCube3 : U "
     + "| saveBase3 : SaveCube3 "

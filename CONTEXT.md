@@ -119,6 +119,11 @@ The browser sandbox applies finite declaration, source-character, syntax-node,
 validation-step, and time budgets. Source characters and unsupported path
 dimensions are inspected before AST construction; only dimensions 1 through 3
 can reach lowering or Core registration.
+The browser GUI keeps new, edited, and restored declarations as source-only
+drafts. Parsed signatures and ordinary-declaration presentation ASTs come only
+from the sandbox Worker and are excluded from saves. A loaded validation cache
+is a one-shot Worker hint; declarations, certified cache data, and rendered
+state are committed only after the replacement bridge publishes successfully.
 
 ## Type-theory Proof Pages / 类型论证明页
 

@@ -184,6 +184,7 @@ const tests = [
     "./tt-sandbox-package-actions.test.mjs",
     "./tt-sandbox-lifecycle.test.mjs",
     "./tt-sandbox-worker-budget.test.mjs",
+    "./tt-sandbox-gui-draft.test.mjs",
     "./tt-sandbox-gui-cancel.test.mjs",
     "./tt-sandbox-gui-error-boundary.test.mjs",
     "./issue-14-build-output.test.mjs"

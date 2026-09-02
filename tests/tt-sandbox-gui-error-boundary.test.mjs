@@ -30,13 +30,18 @@ assert.deepEqual(workerStatuses, [
 const bridgeEvents = [];
 const statuses = [];
 const gui = Object.create(TTSandboxGui.prototype);
+const previousDeclarations = [{ id: "old", source: "Old : U" }];
+const previousValidationCache = { version: 1, semanticEpoch: "old", preludeKey: "old", entries: [] };
 gui.persistenceSuspended = false;
 gui.validationRequest = 0;
+gui.declarations = previousDeclarations;
+gui.validationCache = previousValidationCache;
 gui.worker = {
     async validate() {
         return {
             ok: true,
-            declarations: [],
+            declarations: [{ id: "new", source: "Published : U" }],
+            validationCache: { version: 1, semanticEpoch: "new", preludeKey: "new", entries: [] },
             bridge: {
                 axioms: [["Published", { type: "var", name: "U", nodes: [] }]],
                 inductives: [],
@@ -69,5 +74,9 @@ assert.deepEqual(statuses, [
     { message: "正在校验沙盒声明…", failed: false },
     { message: "沙盒类型层发布失败：bridge failed", failed: true }
 ], "bridge publication errors must not be reported as Worker validation failures");
+assert.equal(gui.declarations, previousDeclarations,
+    "a failed bridge publication must not commit the Worker's declaration generation");
+assert.equal(gui.validationCache, previousValidationCache,
+    "a failed bridge publication must not commit the Worker's validation cache");
 
 console.log("sandbox GUI error-boundary regression passed");

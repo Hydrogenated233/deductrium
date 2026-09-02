@@ -53,7 +53,8 @@ try {
     gui.folders = [{ kind: "folder", id: "folder-1", name: "F", length: 1, open: true, disabled: false }];
     gui.order = ["folder-1", "sandbox-1"];
     gui.pendingFolderId = "folder-1";
-    gui.fallback = {};
+    gui.pendingValidationCache = {};
+    gui.validationCache = {};
     gui.validationRequest = 4;
     gui.validationHandle = {};
     gui.validationCanRestoreBridge = true;
@@ -71,7 +72,8 @@ try {
     assert.deepEqual(gui.folders, []);
     assert.deepEqual(gui.order, []);
     assert.equal(gui.pendingFolderId, null);
-    assert.equal(gui.fallback, null);
+    assert.equal(gui.pendingValidationCache, undefined);
+    assert.equal(gui.validationCache, undefined);
     assert.equal(gui.validationRequest, 5);
     assert.equal(gui.validationHandle, null);
     assert.equal(gui.validationCanRestoreBridge, false);

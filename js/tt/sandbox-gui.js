@@ -1,6 +1,6 @@
 import { ASTParser } from "./astparser.js";
 import { Core } from "./core.js";
-import { SANDBOX_SAVE_VERSION, SandboxEnvironment, browserSandboxValidationLimits, createSandboxDeclaration, parseSandboxDeclaration, parseSandboxDeclarationSurface, migrateLegacySandboxSave, sandboxSourceLimitError, sandboxHitPathLevels, toSandboxSavedDeclaration } from "./sandbox.js";
+import { SANDBOX_SAVE_VERSION, browserSandboxValidationLimits, createSandboxDraftDeclaration, parseSandboxDeclaration, parseSandboxDeclarationSurface, migrateLegacySandboxSave, sandboxSourceLimitError, sandboxHitPathLevels, toSandboxSavedDeclaration } from "./sandbox.js";
 import { highestHitPathLevel, hitPathConstructorsAt } from "./hit-path-levels.js";
 import { SandboxWorkerCancelledError, SandboxWorkerClient } from "./sandbox-worker-client.js";
 import { ListDragger } from "../fs/itemdragger.js";
@@ -27,11 +27,12 @@ export function sandboxBrowserEnvironmentOptions(environmentOptions = {}) {
             : undefined
     };
 }
-function sandboxStructuredDisplayDeclaration(declaration) {
+function sandboxStructuredDisplayDeclaration(declaration, allowSourceParse = true) {
     if (declaration.hit || declaration.inductive) {
         return { hit: declaration.hit, inductive: declaration.inductive };
     }
-    if (!declaration.source || !["hit", "inductive"].includes(String(declaration.kind))) {
+    if (!allowSourceParse || !declaration.source
+        || !["hit", "inductive"].includes(String(declaration.kind))) {
         return {};
     }
     try {
@@ -48,12 +49,19 @@ function sandboxStructuredDisplayDeclaration(declaration) {
         return {};
     }
 }
-function sandboxHitDisplayDeclaration(declaration) {
-    return sandboxStructuredDisplayDeclaration(declaration).hit;
+function sandboxHitDisplayDeclaration(declaration, allowSourceParse = true) {
+    return sandboxStructuredDisplayDeclaration(declaration, allowSourceParse).hit;
 }
-export function sandboxDeclarationDisplayKind(declaration) {
+export function sandboxDeclarationDisplayKind(declaration, allowSourceParse = true) {
     if (String(declaration.kind) === "hit") {
-        const hit = sandboxHitDisplayDeclaration(declaration);
+        const hit = sandboxHitDisplayDeclaration(declaration, allowSourceParse);
+        if (!hit && !allowSourceParse) {
+            return {
+                kind: "HIT",
+                trust: declaration.status === "invalid" ? "高阶路径无效" : "高阶路径待校验",
+                trustClass: "sandbox-hit"
+            };
+        }
         const dimension = hit ? highestHitPathLevel(sandboxHitPathLevels(hit)) : 1;
         return {
             kind: "HIT",
@@ -67,8 +75,8 @@ export function sandboxDeclarationDisplayKind(declaration) {
     }
     return { kind: declaration.kind, trust: "trusted", trustClass: "sandbox-trusted" };
 }
-export function sandboxInductiveDisplaySources(declaration) {
-    const structured = sandboxStructuredDisplayDeclaration(declaration);
+export function sandboxInductiveDisplaySources(declaration, allowSourceParse = true) {
+    const structured = sandboxStructuredDisplayDeclaration(declaration, allowSourceParse);
     const hit = structured.hit;
     const signature = declaration.kind === "inductive" ? structured.inductive : hit;
     if (!signature)
@@ -120,8 +128,8 @@ function sandboxDisplayTypeAst(value) {
  * source text.  This is important for names such as `Loop2`, where the
  * generic parser treats the leading `L` as its lambda token.
  */
-export function sandboxInductiveDisplayAsts(declaration) {
-    const structured = sandboxStructuredDisplayDeclaration(declaration);
+export function sandboxInductiveDisplayAsts(declaration, allowSourceParse = true) {
+    const structured = sandboxStructuredDisplayDeclaration(declaration, allowSourceParse);
     const hit = structured.hit;
     const signature = declaration.kind === "inductive" ? structured.inductive : hit;
     if (!signature)
@@ -196,11 +204,11 @@ export class TTSandboxGui {
     environmentOptions;
     onAxiomsChange;
     renderAst;
-    fallback = null;
     declarations = [];
     folders = [];
     order = [];
     validationCache;
+    pendingValidationCache;
     /** Use the same ordered folder semantics as the type-layer theorem list. */
     workspace = new TheoremWorkspace();
     pendingFolderId = null;
@@ -297,19 +305,16 @@ export class TTSandboxGui {
         this.addToFolder(this.pendingFolderId);
     }
     addToFolder(folderId) {
-        const source = this.input.value.trim();
+        const source = normalizeSandboxCheckInput(this.input.value);
         if (!source)
             return;
+        if (hasLegacySurfaceSyntax(source)) {
+            this.setStatus("不再支持旧语法，请使用 Unicode 符号", true);
+            return;
+        }
         const sourceLimitError = sandboxSourceLimitError(source, this.environmentOptions?.validationMaxSourceChars);
         if (sourceLimitError) {
             this.setStatus(sourceLimitError, true);
-            return;
-        }
-        try {
-            parseSandboxDeclarationSurface(source);
-        }
-        catch (error) {
-            this.setStatus(String(error), true);
             return;
         }
         if (folderId) {
@@ -323,7 +328,7 @@ export class TTSandboxGui {
             const match = declaration.id.match(/^sandbox-(\d+)$/);
             return match ? Math.max(max, Number(match[1])) : max;
         }, 0) + 1;
-        const declaration = createSandboxDeclaration(source, `sandbox-${next}`, this.environmentOptions?.validationMaxSourceChars);
+        const declaration = createSandboxDraftDeclaration(source, `sandbox-${next}`, {}, this.environmentOptions?.validationMaxSourceChars);
         this.declarations.push(declaration);
         this.order.push(declaration.id);
         this.syncWorkspaceFromState();
@@ -396,7 +401,7 @@ export class TTSandboxGui {
         if (this.persistenceSuspended)
             return;
         const request = ++this.validationRequest;
-        const save = this.toSave();
+        const save = this.toWorkerSave();
         this.validationCanRestoreBridge = canRestoreBridge;
         this.updateValidationControls(true);
         this.setStatus("正在校验沙盒声明…", false);
@@ -427,6 +432,8 @@ export class TTSandboxGui {
             if (request !== this.validationRequest || this.persistenceSuspended)
                 return;
             this.updateValidationControls(false);
+            this.pendingValidationCache = undefined;
+            this.validationCanRestoreBridge = false;
             if (error instanceof SandboxWorkerCancelledError) {
                 this.setStatus(canRestoreBridge && this.lastTrustedBridge
                     ? "沙盒校验已取消，保留上次可信声明"
@@ -446,15 +453,14 @@ export class TTSandboxGui {
             return;
         this.updateValidationControls(false);
         if (result.status === "cancelled" || result.status === "budget-exhausted") {
+            this.pendingValidationCache = undefined;
+            this.validationCanRestoreBridge = false;
             const message = result.status === "cancelled"
                 ? "沙盒校验已取消，保留上次可信声明"
                 : `沙盒校验已停止：${result.error ?? "达到资源上限"}`;
             this.setStatus(message, result.status === "budget-exhausted");
             return;
         }
-        this.declarations = result.declarations;
-        this.validationCache = result.validationCache;
-        this.syncWorkspaceFromState();
         try {
             this.onAxiomsChange?.(result.bridge ?? emptyBridge(), { revalidate: true });
         }
@@ -464,10 +470,16 @@ export class TTSandboxGui {
             }
             catch { }
             this.lastTrustedBridge = null;
+            this.pendingValidationCache = undefined;
+            this.validationCanRestoreBridge = false;
             const reason = error instanceof Error ? error.message : String(error);
             this.setStatus(`沙盒类型层发布失败：${reason}`, true);
             return;
         }
+        this.declarations = result.declarations;
+        this.validationCache = result.validationCache;
+        this.pendingValidationCache = undefined;
+        this.syncWorkspaceFromState();
         this.lastTrustedBridge = result.bridge ?? emptyBridge();
         this.validationCanRestoreBridge = false;
         this.persist();
@@ -495,23 +507,13 @@ export class TTSandboxGui {
         }
         await this.whenReady();
         try {
-            const result = await this.worker.check(this.toSave(), source);
+            const result = await this.worker.check(this.toWorkerSave(), source);
             this.checkOutput.textContent = result.ok
                 ? `通过：${result.type ? parser.stringify(result.type) : "已检查"}`
                 : `失败：${result.error ?? "类型检查失败"}`;
         }
-        catch {
-            try {
-                const fallback = this.getFallback();
-                fallback.load(this.toSave());
-                const result = fallback.check(source);
-                this.checkOutput.textContent = result.ok
-                    ? `通过：${result.type ? parser.stringify(result.type) : "已检查"}`
-                    : `失败：${result.error ?? "类型检查失败"}`;
-            }
-            catch (error) {
-                this.checkOutput.textContent = `失败：${String(error)}`;
-            }
+        catch (error) {
+            this.checkOutput.textContent = `失败：沙盒 Worker 检查失败：${String(error)}`;
         }
     }
     render() {
@@ -611,25 +613,37 @@ export class TTSandboxGui {
         });
         const finishEdit = () => {
             if (source.value !== declaration.source) {
-                const sourceLimitError = sandboxSourceLimitError(source.value, this.environmentOptions?.validationMaxSourceChars);
+                const nextSource = normalizeSandboxCheckInput(source.value);
+                if (!nextSource) {
+                    this.setStatus("声明不能为空", true);
+                    source.classList.remove("hide");
+                    display.classList.add("hide");
+                    return;
+                }
+                if (hasLegacySurfaceSyntax(nextSource)) {
+                    this.setStatus("不再支持旧语法，请使用 Unicode 符号", true);
+                    source.classList.remove("hide");
+                    display.classList.add("hide");
+                    return;
+                }
+                const sourceLimitError = sandboxSourceLimitError(nextSource, this.environmentOptions?.validationMaxSourceChars);
                 if (sourceLimitError) {
                     this.setStatus(sourceLimitError, true);
                     source.classList.remove("hide");
                     display.classList.add("hide");
                     return;
                 }
-                try {
-                    parseSandboxDeclarationSurface(source.value.trim());
-                }
-                catch (error) {
-                    this.setStatus(String(error), true);
-                    source.classList.remove("hide");
-                    display.classList.add("hide");
-                    return;
-                }
-                declaration.source = source.value;
-                declaration.status = declaration.enabled ? "unchecked" : "disabled";
+                const draft = createSandboxDraftDeclaration(nextSource, declaration.id, {
+                    enabled: declaration.enabled,
+                    folderId: declaration.folderId
+                }, this.environmentOptions?.validationMaxSourceChars);
+                delete declaration.hit;
+                delete declaration.inductive;
+                delete declaration.generatedNames;
+                delete declaration.presentationAst;
                 delete declaration.error;
+                Object.assign(declaration, draft);
+                source.value = draft.source;
                 this.persist();
                 void this.requestValidation();
             }
@@ -648,7 +662,7 @@ export class TTSandboxGui {
         });
         const kind = document.createElement("span");
         kind.className = "sandbox-kind";
-        const displayKind = sandboxDeclarationDisplayKind(declaration);
+        const displayKind = sandboxDeclarationDisplayKind(declaration, false);
         kind.textContent = displayKind.kind;
         const trust = document.createElement("span");
         trust.className = displayKind.trustClass;
@@ -715,6 +729,8 @@ export class TTSandboxGui {
         this.validationRequest++;
         this.worker.terminate();
         this.validationHandle = null;
+        this.pendingValidationCache = undefined;
+        this.validationCache = undefined;
         this.updateValidationControls(false);
         try {
             localStorage.removeItem(storageKey);
@@ -724,9 +740,9 @@ export class TTSandboxGui {
     renderDeclarationDisplay(declaration, display) {
         display.replaceChildren();
         try {
-            const inductiveEntries = sandboxInductiveDisplayAsts(declaration);
+            const inductiveEntries = sandboxInductiveDisplayAsts(declaration, false);
             if (inductiveEntries) {
-                const hit = sandboxHitDisplayDeclaration(declaration);
+                const hit = sandboxHitDisplayDeclaration(declaration, false);
                 const keyword = document.createElement("span");
                 keyword.className = hit ? "sandbox-hit-keyword" : "";
                 keyword.textContent = hit ? "hit " : "inductive ";
@@ -752,20 +768,20 @@ export class TTSandboxGui {
                 });
                 return;
             }
-            // Keep malformed/legacy declarations readable without feeding a
-            // constructor name back through the generic parser.  A source-only
-            // fallback is preferable to a misleading lambda-token diagnostic.
-            const inductiveSources = sandboxInductiveDisplaySources(declaration);
+            const inductiveSources = sandboxInductiveDisplaySources(declaration, false);
             if (inductiveSources) {
-                const hit = sandboxHitDisplayDeclaration(declaration);
+                const hit = sandboxHitDisplayDeclaration(declaration, false);
                 display.textContent = `${hit ? "hit " : "inductive "}${inductiveSources.join(" | ")}`;
                 return;
             }
-            const ast = parser.parseSurfaceOrLegacy(declaration.source);
-            if (this.renderAst)
-                display.appendChild(this.renderAst(ast));
-            else
-                display.textContent = parser.stringify(ast);
+            if (declaration.presentationAst) {
+                if (this.renderAst)
+                    display.appendChild(this.renderAst(declaration.presentationAst));
+                else
+                    display.textContent = parser.stringify(declaration.presentationAst);
+                return;
+            }
+            display.textContent = declaration.source;
         }
         catch (error) {
             display.textContent = `${declaration.source} - ${String(error)}`;
@@ -883,14 +899,15 @@ export class TTSandboxGui {
         const folderIds = new Set(this.folders.map(folder => folder.id));
         this.declarations = migrated.declarations.map((declaration, index) => {
             const source = declaration.source || `${declaration.name} : ${declaration.typeSource}`;
-            const restored = createSandboxDeclaration(source, declaration.id || `sandbox-${index + 1}`, this.environmentOptions?.validationMaxSourceChars);
+            const restored = createSandboxDraftDeclaration(source, declaration.id || `sandbox-${index + 1}`, declaration, this.environmentOptions?.validationMaxSourceChars);
             restored.enabled = declaration.enabled !== false;
             restored.folderId = declaration.folderId && folderIds.has(declaration.folderId)
                 ? declaration.folderId
                 : null;
             return restored;
         });
-        this.validationCache = migrated.validationCache;
+        this.pendingValidationCache = migrated.validationCache;
+        this.validationCache = undefined;
         const knownIds = new Set([
             ...this.folders.map(folder => folder.id),
             ...this.declarations.map(declaration => declaration.id)
@@ -917,6 +934,12 @@ export class TTSandboxGui {
             order: [...this.order],
             ...(this.validationCache ? { validationCache: this.validationCache } : {})
         };
+    }
+    /** Include an untrusted loaded cache only in the next Worker request, never in autosave. */
+    toWorkerSave() {
+        const save = this.toSave();
+        const validationCache = this.pendingValidationCache ?? this.validationCache;
+        return validationCache ? { ...save, validationCache } : save;
     }
     persist() {
         if (this.persistenceSuspended)
@@ -971,7 +994,8 @@ export class TTSandboxGui {
         this.folders = [];
         this.order = [];
         this.pendingFolderId = null;
-        this.fallback = null;
+        this.pendingValidationCache = undefined;
+        this.validationCache = undefined;
         this.workspace.replace([]);
         const bridge = emptyBridge();
         this.lastTrustedBridge = bridge;
@@ -1151,9 +1175,6 @@ export class TTSandboxGui {
                 }
             }
         });
-    }
-    getFallback() {
-        return this.fallback ??= new SandboxEnvironment(this.environmentOptions);
     }
 }
 function rootButton(root, selector) {
