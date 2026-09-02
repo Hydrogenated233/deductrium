@@ -26,6 +26,17 @@ const cubeSource = "hit Cube3 : U "
 
 const parsed = parseSandboxHit(cubeSource);
 assert.deepEqual(parsed.threePathConstructors.map(path => path.name), ["cell3"]);
+assert.deepEqual(
+    parsed.pathLevels.map(entry => ({
+        level: entry.level,
+        names: entry.constructors.map(path => path.name)
+    })),
+    [
+        { level: 1, names: ["loopA3", "loopB3"] },
+        { level: 2, names: ["faceA3", "faceB3"] },
+        { level: 3, names: ["cell3"] }
+    ]
+);
 const cell = parsed.threePathConstructors[0];
 assert.equal(headName(cell.left), "faceA3");
 assert.equal(headName(cell.right), "faceB3");
@@ -37,6 +48,22 @@ assert.equal(headName(cell.sourcePoint), "base3");
 assert.equal(headName(cell.targetPoint), "base3");
 
 const bundle = lowerSandboxHit(parsed);
+
+const legacyProjectionChanged = structuredClone(parsed);
+legacyProjectionChanged.pathConstructors = [];
+legacyProjectionChanged.twoPathConstructors = [];
+legacyProjectionChanged.threePathConstructors = [];
+const pathLevelsBundle = lowerSandboxHit(legacyProjectionChanged);
+assert.ok(pathLevelsBundle.auxiliaryTypes.some(([name]) => name === "cell3"),
+    "lowering must use canonical pathLevels rather than stale legacy projections");
+
+const sparsePathLevels = structuredClone(parsed);
+sparsePathLevels.pathLevels[1].constructors = [];
+assert.throws(
+    () => lowerSandboxHit(sparsePathLevels),
+    /第 3 阶不能越过空的低阶路径层级/
+);
+
 assert.equal(bundle.metadata.version, 5);
 assert.equal(bundle.metadata.kind, "hit3");
 assert.equal(bundle.metadata.dimension, 3);

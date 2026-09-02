@@ -105,9 +105,11 @@ the trusted-axiom environment. Stage 2 is delivered in two editions: the first
 supports strictly positive ordinary inductive types without indexed induction;
 the second adds indexed signatures, indexed eliminators, and indexed induction.
 Stage 3 starts only after the Stage-2 second-edition checks are complete. Stage
-4 starts with two-dimensional paths and coherence; arbitrary-dimensional HIT
-support is the final experimental extension and must not be assumed by earlier
-phases.
+4 starts with two-dimensional paths and coherence and ends with user-facing
+support through dimension 3. Internally, path constructors are organized as
+contiguous `pathLevels` so later experiments do not require another storage
+rewrite. Dimension 4 is limited to fixtures, preflight rejection, and resource
+boundaries; arbitrary-dimensional HIT support is not a project commitment.
 
 ## Type-theory Proof Pages / 类型论证明页
 

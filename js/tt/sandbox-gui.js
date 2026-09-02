@@ -1,6 +1,7 @@
 import { ASTParser } from "./astparser.js";
 import { Core } from "./core.js";
-import { SANDBOX_SAVE_VERSION, SandboxEnvironment, createSandboxDeclaration, parseSandboxDeclaration, parseSandboxDeclarationSurface, migrateLegacySandboxSave } from "./sandbox.js";
+import { SANDBOX_SAVE_VERSION, SandboxEnvironment, createSandboxDeclaration, parseSandboxDeclaration, parseSandboxDeclarationSurface, migrateLegacySandboxSave, sandboxHitPathLevels } from "./sandbox.js";
+import { highestHitPathLevel, hitPathConstructorsAt } from "./hit-path-levels.js";
 import { SandboxWorkerCancelledError, SandboxWorkerClient } from "./sandbox-worker-client.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { TheoremWorkspace } from "./theorem-workspace.js";
@@ -43,11 +44,12 @@ function sandboxHitDisplayDeclaration(declaration) {
 export function sandboxDeclarationDisplayKind(declaration) {
     if (String(declaration.kind) === "hit") {
         const hit = sandboxHitDisplayDeclaration(declaration);
+        const dimension = hit ? highestHitPathLevel(sandboxHitPathLevels(hit)) : 1;
         return {
             kind: "HIT",
-            trust: hit?.threePathConstructors?.length
-                ? "三维高阶路径归纳（实验）"
-                : hit?.twoPathConstructors?.length
+            trust: dimension === 3
+                ? "三维高阶路径归纳"
+                : dimension === 2
                     ? "二维高阶路径归纳"
                     : "一阶路径归纳",
             trustClass: "sandbox-hit"
@@ -67,14 +69,15 @@ export function sandboxInductiveDisplaySources(declaration) {
     const indices = (signature.indices ?? [])
         .map(index => ` [${index.name} : ${index.typeSource}]`)
         .join("");
+    const pathLevels = hit ? sandboxHitPathLevels(hit) : undefined;
     const constructors = hit
-        ? [...hit.pointConstructors, ...hit.pathConstructors]
+        ? [...hit.pointConstructors, ...hitPathConstructorsAt(pathLevels, 1)]
         : declaration.inductive?.constructors ?? [];
     return [
         `${signature.name}${parameters}${indices} : ${signature.universe}`,
         ...constructors.map(ctor => `${ctor.name} : ${ctor.typeSource}`),
-        ...(hit?.twoPathConstructors ?? []).map(path => `path2 ${path.name} : ${path.typeSource}`),
-        ...(hit?.threePathConstructors ?? []).map(path => `path3 ${path.name} : ${path.typeSource}`)
+        ...(pathLevels ? hitPathConstructorsAt(pathLevels, 2) : []).map(path => `path2 ${path.name} : ${path.typeSource}`),
+        ...(pathLevels ? hitPathConstructorsAt(pathLevels, 3) : []).map(path => `path3 ${path.name} : ${path.typeSource}`)
     ];
 }
 function sandboxDeclarationLineAst(name, type) {
@@ -116,8 +119,9 @@ export function sandboxInductiveDisplayAsts(declaration) {
     const entries = [
         { ast: sandboxInductiveHeaderAst(signature) }
     ];
+    const pathLevels = hit ? sandboxHitPathLevels(hit) : undefined;
     const constructors = hit
-        ? [...hit.pointConstructors, ...hit.pathConstructors]
+        ? [...hit.pointConstructors, ...hitPathConstructorsAt(pathLevels, 1)]
         : declaration.inductive?.constructors ?? [];
     for (const constructor of constructors) {
         const type = sandboxDisplayTypeAst(constructor);
@@ -125,7 +129,7 @@ export function sandboxInductiveDisplayAsts(declaration) {
             return null;
         entries.push({ ast: sandboxDeclarationLineAst(constructor.name, type) });
     }
-    for (const path of hit?.twoPathConstructors ?? []) {
+    for (const path of pathLevels ? hitPathConstructorsAt(pathLevels, 2) : []) {
         const type = sandboxDisplayTypeAst(path);
         if (!type)
             return null;
@@ -134,7 +138,7 @@ export function sandboxInductiveDisplayAsts(declaration) {
             prefix: "path2 "
         });
     }
-    for (const path of hit?.threePathConstructors ?? []) {
+    for (const path of pathLevels ? hitPathConstructorsAt(pathLevels, 3) : []) {
         const type = sandboxDisplayTypeAst(path);
         if (!type)
             return null;

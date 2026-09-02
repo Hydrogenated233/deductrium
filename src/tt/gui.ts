@@ -39,6 +39,7 @@ import {
     TTProofSessionStore
 } from "./proof-sessions.js";
 import { installTypeTheorySymbolAliases } from "./symbol-aliases.js";
+import { flattenHitPathLevels, hitPathLevelsFromLegacy } from "./hit-path-levels.js";
 const parser = new ASTParser;
 const constructors = new Set<string>();
 const destructors = new Set<string>();
@@ -179,11 +180,7 @@ export function sandboxInductiveEntryPresentation(
     fallback: Omit<SandboxInductiveEntryPresentation, "prefix">
 ): SandboxInductiveEntryPresentation {
     const prefix = sandboxInductiveBundlePrefix(bundle);
-    const paths = [
-        ...(bundle.metadata?.pathConstructors ?? []),
-        ...(bundle.metadata?.twoPathConstructors ?? []),
-        ...(bundle.metadata?.threePathConstructors ?? [])
-    ];
+    const paths = flattenHitPathLevels(hitPathLevelsFromLegacy(bundle.metadata ?? {}));
     const publicName = name.startsWith("@") ? name.slice(1) : name;
     if (paths.some(path => path.name === publicName)) {
         return { postfix: "构造", prefix, category: "constructor" };

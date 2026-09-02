@@ -29,6 +29,11 @@ import {
     validBondVarId as isPositiveBondVarId,
     type Context
 } from "./scoped-syntax.js";
+import {
+    flattenHitPathLevels,
+    hitPathConstructorCount,
+    hitPathLevelsFromLegacy
+} from "./hit-path-levels.js";
 export type { Context } from "./scoped-syntax.js";
 export {
     findContextByName,
@@ -706,9 +711,9 @@ function validateSystemInductiveComputeRules(
     if (strictSchema) {
         const metadata = bundle.metadata!;
         const constructorCount = metadata.constructors.length;
-        const coherenceCount = (metadata.pathConstructors?.length ?? 0)
-            + (metadata.twoPathConstructors?.length ?? 0)
-            + (metadata.threePathConstructors?.length ?? 0);
+        const coherenceCount = hitPathConstructorCount(
+            hitPathLevelsFromLegacy(metadata)
+        );
         for (const constructor of metadata.constructors) {
             if (!Array.isArray(constructor.argumentNames)
                 || constructor.argumentNames.length !== constructor.argumentTypes.length
@@ -1459,9 +1464,9 @@ export class Core {
         const constructorSchemas = new Map(
             metadata.constructors.map(constructor => [constructor.name, constructor] as const)
         );
-        const coherenceCount = (metadata.pathConstructors?.length ?? 0)
-            + (metadata.twoPathConstructors?.length ?? 0)
-            + (metadata.threePathConstructors?.length ?? 0);
+        const coherenceCount = hitPathConstructorCount(
+            hitPathLevelsFromLegacy(metadata)
+        );
         let captureSequence = 0;
 
         const instantiateBinder = (cursor: AST, argument: AST) => {
@@ -1633,6 +1638,18 @@ export class Core {
                 `归纳类型 metadata 名称与 bundle 不一致：${bundle.metadata.typeName} != ${bundle.type[0]}`
             );
         }
+        const runtimeMetadataKind = bundle.metadata?.kind as string | undefined;
+        const runtimeMetadataDimension = Number(bundle.metadata?.dimension ?? 0);
+        if (runtimeMetadataDimension > 3 || runtimeMetadataKind === "hit4") {
+            throw new Error(
+                `Core 最高只支持三维 HIT：${runtimeMetadataKind ?? "HIT"}`
+                + `${runtimeMetadataDimension ? `/${runtimeMetadataDimension}` : ""}`
+            );
+        }
+        if (runtimeMetadataKind !== undefined
+            && !["inductive", "hit1", "hit2", "hit3"].includes(runtimeMetadataKind)) {
+            throw new Error(`不支持的归纳类型 metadata kind：${runtimeMetadataKind}`);
+        }
         const metadataVersion = Number(bundle.metadata?.version);
         if ([2, 3, 4, 5].includes(metadataVersion)
             && bundle.metadata?.ruleSchemaVersion !== 1) {
@@ -1800,11 +1817,7 @@ export class Core {
                 };
             });
         }
-        for (const path of [
-            ...(bundle.metadata?.pathConstructors ?? []),
-            ...(bundle.metadata?.twoPathConstructors ?? []),
-            ...(bundle.metadata?.threePathConstructors ?? [])
-        ]) {
+        for (const path of flattenHitPathLevels(hitPathLevelsFromLegacy(bundle.metadata ?? {}))) {
             for (const head of new Set([
                 path.name,
                 path.computationName,
@@ -3115,11 +3128,9 @@ export class Core {
         const strictRuleSchema = bundle.metadata?.ruleSchemaVersion === 1;
         const deferredComputationTypes = new Set<string>();
         if (strictRuleSchema) {
-            for (const path of [
-                ...(bundle.metadata?.pathConstructors ?? []),
-                ...(bundle.metadata?.twoPathConstructors ?? []),
-                ...(bundle.metadata?.threePathConstructors ?? [])
-            ]) {
+            for (const path of flattenHitPathLevels(
+                hitPathLevelsFromLegacy(bundle.metadata ?? {})
+            )) {
                 for (const name of [
                     path.computationName,
                     `apd_${path.name}`,

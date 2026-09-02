@@ -5,6 +5,7 @@ import { initTypeSystem } from "./initial.js";
 import { TheoremWorkspace } from "./theorem-workspace.js";
 import { hasLegacySurfaceSyntax, migrateLegacyDeclarationSource, migrateLegacySurfaceExpression } from "./surface-syntax-migration.js";
 import { expandTypeTheoryAliasesInSurface } from "./symbol-aliases.js";
+import { assertCanonicalHitPathLevels, createHitPathLevels, flattenHitPathLevels, hitPathConstructorsAt, hitPathLevelsFromLegacy, legacyHitPathCollectionsFromLevels } from "./hit-path-levels.js";
 const parser = new ASTParser();
 export const SANDBOX_SAVE_VERSION = 1;
 export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
@@ -12,7 +13,7 @@ export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
  * Bump whenever parsing, lowering, Core registration, or NbE cache semantics
  * change. Persisted validation data is an optimization hint, never authority.
  */
-export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit3-ap3-v1-2026-09-02";
+export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit3-apd3-path-levels-v1-2026-09-02";
 const SANDBOX_VALIDATION_CACHE_MAX_ENTRIES = 4_096;
 const SANDBOX_VALIDATION_CACHE_MAX_OBJECTS = 500_000;
 const SANDBOX_VALIDATION_CACHE_MAX_DEPTH = 256;
@@ -20,6 +21,22 @@ const SANDBOX_VALIDATION_CACHE_MAX_STRING_UNITS = 8 * 1024 * 1024;
 /** The sandbox is an authoring tool and is intentionally unavailable in survival. */
 export function sandboxEnabledInMode(mode) {
     return mode === "creative";
+}
+export function sandboxHitPathLevels(signature) {
+    const levels = signature.pathLevels ?? hitPathLevelsFromLegacy(signature);
+    assertCanonicalHitPathLevels(levels);
+    return levels;
+}
+function normalizeSandboxHitPathLevels(signature) {
+    const pathLevels = sandboxHitPathLevels(signature);
+    const legacy = legacyHitPathCollectionsFromLevels(pathLevels);
+    return {
+        ...signature,
+        pathLevels,
+        pathConstructors: [...legacy.pathConstructors],
+        twoPathConstructors: [...legacy.twoPathConstructors],
+        threePathConstructors: [...legacy.threePathConstructors]
+    };
 }
 const sandboxTypeSystemRules = Object.freeze(initTypeSystem());
 const defaultSandboxSystemRuleIds = Object.freeze([...new Set(sandboxTypeSystemRules.map(rule => rule.id))]);
@@ -1076,6 +1093,7 @@ export function parseSandboxHit(source) {
         universe: ordinary.universe,
         universeAst: ordinary.universeAst,
         pointConstructors: ordinary.constructors,
+        pathLevels: createHitPathLevels(pathConstructors, twoPathConstructors, threePathConstructors),
         pathConstructors,
         twoPathConstructors,
         threePathConstructors
@@ -1731,6 +1749,7 @@ function sandboxRenameHitUniformParameters(signature, reserved) {
         universe: parser.stringify(universeAst),
         universeAst,
         pointConstructors,
+        pathLevels: createHitPathLevels(pathConstructors, twoPathConstructors, threePathConstructors),
         pathConstructors,
         twoPathConstructors,
         threePathConstructors
@@ -1738,6 +1757,7 @@ function sandboxRenameHitUniformParameters(signature, reserved) {
 }
 /** Lower a HIT while keeping path computation propositional. */
 export function lowerSandboxHit(signature) {
+    signature = normalizeSandboxHitPathLevels(signature);
     if (signature.indices.length)
         throw new Error("一阶 HIT 第一版暂不支持索引");
     if (!signature.pathConstructors.length)
@@ -2544,23 +2564,25 @@ function sandboxInductiveGeneratedNames(signature) {
     ];
 }
 function sandboxHitGeneratedNames(signature) {
+    const pathLevels = sandboxHitPathLevels(signature);
+    const pathConstructors = hitPathConstructorsAt(pathLevels, 1);
+    const twoPathConstructors = hitPathConstructorsAt(pathLevels, 2);
+    const threePathConstructors = hitPathConstructorsAt(pathLevels, 3);
     return [
         signature.name,
         ...signature.pointConstructors.map(ctor => ctor.name),
-        ...signature.pathConstructors.map(ctor => ctor.name),
-        ...signature.twoPathConstructors.map(ctor => ctor.name),
-        ...signature.threePathConstructors.map(ctor => ctor.name),
+        ...flattenHitPathLevels(pathLevels).map(ctor => ctor.name),
         `ind_${signature.name}`,
         `@ind_${signature.name}`,
         `rec_${signature.name}`,
         `@rec_${signature.name}`,
-        ...signature.pathConstructors.flatMap(path => [
+        ...pathConstructors.flatMap(path => [
             `apd_${path.name}`,
             `@apd_${path.name}`,
             `ap_${path.name}`,
             `@ap_${path.name}`
         ]),
-        ...signature.twoPathConstructors.flatMap(path => [
+        ...twoPathConstructors.flatMap(path => [
             `apd_${path.name}`,
             `@apd_${path.name}`,
             `ap_${path.name}`,
@@ -2568,7 +2590,7 @@ function sandboxHitGeneratedNames(signature) {
             `ap2_${path.name}`,
             `@ap2_${path.name}`
         ]),
-        ...signature.threePathConstructors.flatMap(path => [
+        ...threePathConstructors.flatMap(path => [
             path.name,
             `apd3_${path.name}`,
             `@apd3_${path.name}`,
@@ -2601,6 +2623,7 @@ function collectInductiveDependencies(signature) {
     return [...names];
 }
 function collectHitDependencies(signature) {
+    const pathLevels = sandboxHitPathLevels(signature);
     const own = new Set(sandboxHitGeneratedNames(signature));
     for (const parameter of signature.parameters)
         own.add(parameter.name);
@@ -2616,15 +2639,8 @@ function collectHitDependencies(signature) {
     collect(signature.universeAst);
     for (const constructor of signature.pointConstructors)
         collect(constructor.type);
-    for (const path of signature.pathConstructors) {
+    for (const path of flattenHitPathLevels(pathLevels))
         collect(path.type);
-    }
-    for (const path of signature.twoPathConstructors) {
-        collect(path.type);
-    }
-    for (const path of signature.threePathConstructors) {
-        collect(path.type);
-    }
     return [...names];
 }
 function normalizeSandboxLimit(value) {

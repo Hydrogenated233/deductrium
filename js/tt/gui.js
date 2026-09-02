@@ -16,6 +16,7 @@ import { TheoremWorkspace } from "./theorem-workspace.js";
 import { applyWorkspaceLayout, createWorkspaceDragHandle, syncWorkspaceDomOrder } from "./theorem-workspace-view.js";
 import { TTProofSessionStore } from "./proof-sessions.js";
 import { installTypeTheorySymbolAliases } from "./symbol-aliases.js";
+import { flattenHitPathLevels, hitPathLevelsFromLegacy } from "./hit-path-levels.js";
 const parser = new ASTParser;
 const constructors = new Set();
 const destructors = new Set();
@@ -123,11 +124,7 @@ function sandboxInductiveBundlePrefix(bundle) {
 /** Classify a generated sandbox entry without relying on name-prefix guesses. */
 export function sandboxInductiveEntryPresentation(bundle, name, fallback) {
     const prefix = sandboxInductiveBundlePrefix(bundle);
-    const paths = [
-        ...(bundle.metadata?.pathConstructors ?? []),
-        ...(bundle.metadata?.twoPathConstructors ?? []),
-        ...(bundle.metadata?.threePathConstructors ?? [])
-    ];
+    const paths = flattenHitPathLevels(hitPathLevelsFromLegacy(bundle.metadata ?? {}));
     const publicName = name.startsWith("@") ? name.slice(1) : name;
     if (paths.some(path => path.name === publicName)) {
         return { postfix: "构造", prefix, category: "constructor" };

@@ -251,7 +251,7 @@ const cubeDeclaration = createSandboxDeclaration(
 );
 assert.deepEqual(sandboxDeclarationDisplayKind(cubeDeclaration), {
     kind: "HIT",
-    trust: "三维高阶路径归纳（实验）",
+    trust: "三维高阶路径归纳",
     trustClass: "sandbox-hit"
 });
 const cubeSources = sandboxInductiveDisplaySources(cubeDeclaration);
@@ -332,7 +332,7 @@ assert.match(indexHtml, /hit Circle2 : U \| base2 : Circle2 \| loop2 : base2 = b
 assert.match(indexHtml, /apd_loop2[\s\S]*ap_loop2/);
 assert.match(indexHtml, /path2[\s\S]*apd_squareS[\s\S]*ap_squareS/);
 assert.match(indexHtml, /ap2_squareS/);
-assert.match(indexHtml, /实验性三维 HIT[\s\S]*path3[\s\S]*ap3_名称[\s\S]*apd3_名称/);
+assert.match(indexHtml, /可注册三维 HIT[\s\S]*path3[\s\S]*ap3_名称[\s\S]*apd3_名称[\s\S]*path4[\s\S]*边界 fixture/);
 assert.match(indexHtml, /路径构造子的 <code>apd_<\/code>\/<code>ap_<\/code> 规则是需要显式使用的命题/);
 
 console.log("sandbox HIT bridge and display regression passed");

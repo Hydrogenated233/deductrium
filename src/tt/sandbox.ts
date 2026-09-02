@@ -23,6 +23,15 @@ import {
     migrateLegacySurfaceExpression
 } from "./surface-syntax-migration.js";
 import { expandTypeTheoryAliasesInSurface } from "./symbol-aliases.js";
+import {
+    assertCanonicalHitPathLevels,
+    createHitPathLevels,
+    flattenHitPathLevels,
+    hitPathConstructorsAt,
+    hitPathLevelsFromLegacy,
+    legacyHitPathCollectionsFromLevels,
+    type HitPathLevels
+} from "./hit-path-levels.js";
 
 const parser = new ASTParser();
 
@@ -33,7 +42,8 @@ export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
  * Bump whenever parsing, lowering, Core registration, or NbE cache semantics
  * change. Persisted validation data is an optimization hint, never authority.
  */
-export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit3-ap3-v1-2026-09-02";
+export const SANDBOX_VALIDATION_SEMANTIC_EPOCH =
+    "sandbox-nbe-hit3-apd3-path-levels-v1-2026-09-02";
 
 const SANDBOX_VALIDATION_CACHE_MAX_ENTRIES = 4_096;
 const SANDBOX_VALIDATION_CACHE_MAX_OBJECTS = 500_000;
@@ -254,6 +264,12 @@ export type SandboxHitThreePathConstructor = {
 };
 
 /** Structured higher-inductive signature (parameterized and non-indexed). */
+export type SandboxHitPathLevels = HitPathLevels<
+    SandboxHitPathConstructor,
+    SandboxHitTwoPathConstructor,
+    SandboxHitThreePathConstructor
+>;
+
 export type SandboxHitDeclaration = {
     name: string;
     parameters: SandboxInductiveBinder[];
@@ -261,10 +277,35 @@ export type SandboxHitDeclaration = {
     universe: string;
     universeAst: AST;
     pointConstructors: SandboxInductiveConstructor[];
+    /** Canonical internal ordering for 1D-3D path constructors. */
+    pathLevels: SandboxHitPathLevels;
+    /** Compatibility projections retained for existing saves and consumers. */
     pathConstructors: SandboxHitPathConstructor[];
     twoPathConstructors: SandboxHitTwoPathConstructor[];
     threePathConstructors: SandboxHitThreePathConstructor[];
 };
+
+export function sandboxHitPathLevels(
+    signature: Partial<Pick<SandboxHitDeclaration, "pathLevels">>
+        & Pick<SandboxHitDeclaration,
+            "pathConstructors" | "twoPathConstructors" | "threePathConstructors">
+): SandboxHitPathLevels {
+    const levels = signature.pathLevels ?? hitPathLevelsFromLegacy(signature);
+    assertCanonicalHitPathLevels(levels);
+    return levels as SandboxHitPathLevels;
+}
+
+function normalizeSandboxHitPathLevels(signature: SandboxHitDeclaration): SandboxHitDeclaration {
+    const pathLevels = sandboxHitPathLevels(signature);
+    const legacy = legacyHitPathCollectionsFromLevels(pathLevels);
+    return {
+        ...signature,
+        pathLevels,
+        pathConstructors: [...legacy.pathConstructors],
+        twoPathConstructors: [...legacy.twoPathConstructors],
+        threePathConstructors: [...legacy.threePathConstructors]
+    };
+}
 
 export type SandboxInductiveMetadata = {
     version: 2 | 3 | 4 | 5;
@@ -1562,6 +1603,11 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
         universe: ordinary.universe,
         universeAst: ordinary.universeAst,
         pointConstructors: ordinary.constructors,
+        pathLevels: createHitPathLevels(
+            pathConstructors,
+            twoPathConstructors,
+            threePathConstructors
+        ),
         pathConstructors,
         twoPathConstructors,
         threePathConstructors
@@ -2469,6 +2515,11 @@ function sandboxRenameHitUniformParameters(
         universe: parser.stringify(universeAst),
         universeAst,
         pointConstructors,
+        pathLevels: createHitPathLevels(
+            pathConstructors,
+            twoPathConstructors,
+            threePathConstructors
+        ),
         pathConstructors,
         twoPathConstructors,
         threePathConstructors
@@ -2477,6 +2528,7 @@ function sandboxRenameHitUniformParameters(
 
 /** Lower a HIT while keeping path computation propositional. */
 export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInductiveBundle {
+    signature = normalizeSandboxHitPathLevels(signature);
     if (signature.indices.length) throw new Error("一阶 HIT 第一版暂不支持索引");
     if (!signature.pathConstructors.length) throw new Error("一阶 HIT 至少需要一个一阶路径构造子");
     for (const constructor of signature.pointConstructors) {
@@ -4202,23 +4254,25 @@ function sandboxInductiveGeneratedNames(signature: SandboxInductiveDeclaration) 
 }
 
 function sandboxHitGeneratedNames(signature: SandboxHitDeclaration) {
+    const pathLevels = sandboxHitPathLevels(signature);
+    const pathConstructors = hitPathConstructorsAt(pathLevels, 1);
+    const twoPathConstructors = hitPathConstructorsAt(pathLevels, 2);
+    const threePathConstructors = hitPathConstructorsAt(pathLevels, 3);
     return [
         signature.name,
         ...signature.pointConstructors.map(ctor => ctor.name),
-        ...signature.pathConstructors.map(ctor => ctor.name),
-        ...signature.twoPathConstructors.map(ctor => ctor.name),
-        ...signature.threePathConstructors.map(ctor => ctor.name),
+        ...flattenHitPathLevels(pathLevels).map(ctor => ctor.name),
         `ind_${signature.name}`,
         `@ind_${signature.name}`,
         `rec_${signature.name}`,
         `@rec_${signature.name}`,
-        ...signature.pathConstructors.flatMap(path => [
+        ...pathConstructors.flatMap(path => [
             `apd_${path.name}`,
             `@apd_${path.name}`,
             `ap_${path.name}`,
             `@ap_${path.name}`
         ]),
-        ...signature.twoPathConstructors.flatMap(path => [
+        ...twoPathConstructors.flatMap(path => [
             `apd_${path.name}`,
             `@apd_${path.name}`,
             `ap_${path.name}`,
@@ -4226,7 +4280,7 @@ function sandboxHitGeneratedNames(signature: SandboxHitDeclaration) {
             `ap2_${path.name}`,
             `@ap2_${path.name}`
         ]),
-        ...signature.threePathConstructors.flatMap(path => [
+        ...threePathConstructors.flatMap(path => [
             path.name,
             `apd3_${path.name}`,
             `@apd3_${path.name}`,
@@ -4256,6 +4310,7 @@ function collectInductiveDependencies(signature: SandboxInductiveDeclaration) {
 }
 
 function collectHitDependencies(signature: SandboxHitDeclaration) {
+    const pathLevels = sandboxHitPathLevels(signature);
     const own = new Set(sandboxHitGeneratedNames(signature));
     for (const parameter of signature.parameters) own.add(parameter.name);
     const names = new Set<string>();
@@ -4267,15 +4322,7 @@ function collectHitDependencies(signature: SandboxHitDeclaration) {
     for (const parameter of signature.parameters) collect(parameter.type);
     collect(signature.universeAst);
     for (const constructor of signature.pointConstructors) collect(constructor.type);
-    for (const path of signature.pathConstructors) {
-        collect(path.type);
-    }
-    for (const path of signature.twoPathConstructors) {
-        collect(path.type);
-    }
-    for (const path of signature.threePathConstructors) {
-        collect(path.type);
-    }
+    for (const path of flattenHitPathLevels(pathLevels)) collect(path.type);
     return [...names];
 }
 

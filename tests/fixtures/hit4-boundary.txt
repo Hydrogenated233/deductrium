@@ -1,0 +1,9 @@
+hit Hyper4 : U
+| base4 : Hyper4
+| loopA4 : base4 = base4
+| loopB4 : base4 = base4
+| path2 faceA4 : loopA4 = loopB4
+| path2 faceB4 : loopA4 = loopB4
+| path3 cellA4 : faceA4 = faceB4
+| path3 cellB4 : faceA4 = faceB4
+| path4 hyper4 : cellA4 = cellB4

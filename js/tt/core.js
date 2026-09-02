@@ -4,6 +4,7 @@ import { SemanticNbeTypeChecker, isNbeUniverseType } from "./nbe-checker.js";
 import { SemanticNbeKernel } from "./nbe-kernel.js";
 import { compactImplicitAliasesForDisplay, hasExplicitAtOccurrence } from "./presentation.js";
 import { findContextEntriesBeforeByName, findContextIndexByBondVarId, hasContextName, isBinderNode, markScopedBondVars, prependContext, ScopeCursor, validBondVarId as isPositiveBondVarId } from "./scoped-syntax.js";
+import { flattenHitPathLevels, hitPathConstructorCount, hitPathLevelsFromLegacy } from "./hit-path-levels.js";
 export { findContextByName, findContextEntriesBeforeByName, findContextIndexByBondVarId, findContextIndexByName, hasContextName } from "./scoped-syntax.js";
 const parser = new ASTParser;
 const semanticResourceBaseLimits = Object.freeze({
@@ -473,9 +474,7 @@ function validateSystemInductiveComputeRules(bundle, rulesByHead, parameters, in
     if (strictSchema) {
         const metadata = bundle.metadata;
         const constructorCount = metadata.constructors.length;
-        const coherenceCount = (metadata.pathConstructors?.length ?? 0)
-            + (metadata.twoPathConstructors?.length ?? 0)
-            + (metadata.threePathConstructors?.length ?? 0);
+        const coherenceCount = hitPathConstructorCount(hitPathLevelsFromLegacy(metadata));
         for (const constructor of metadata.constructors) {
             if (!Array.isArray(constructor.argumentNames)
                 || constructor.argumentNames.length !== constructor.argumentTypes.length
@@ -1163,9 +1162,7 @@ export class Core {
         const types = new Map(normalizedEntries);
         const constructorIndex = new Map(metadata.constructors.map((constructor, index) => [constructor.name, index]));
         const constructorSchemas = new Map(metadata.constructors.map(constructor => [constructor.name, constructor]));
-        const coherenceCount = (metadata.pathConstructors?.length ?? 0)
-            + (metadata.twoPathConstructors?.length ?? 0)
-            + (metadata.threePathConstructors?.length ?? 0);
+        const coherenceCount = hitPathConstructorCount(hitPathLevelsFromLegacy(metadata));
         let captureSequence = 0;
         const instantiateBinder = (cursor, argument) => {
             if ((cursor.type !== "P" && cursor.type !== "->")
@@ -1311,6 +1308,16 @@ export class Core {
         }
         if (bundle.metadata?.typeName && bundle.metadata.typeName !== bundle.type[0]) {
             throw new Error(`归纳类型 metadata 名称与 bundle 不一致：${bundle.metadata.typeName} != ${bundle.type[0]}`);
+        }
+        const runtimeMetadataKind = bundle.metadata?.kind;
+        const runtimeMetadataDimension = Number(bundle.metadata?.dimension ?? 0);
+        if (runtimeMetadataDimension > 3 || runtimeMetadataKind === "hit4") {
+            throw new Error(`Core 最高只支持三维 HIT：${runtimeMetadataKind ?? "HIT"}`
+                + `${runtimeMetadataDimension ? `/${runtimeMetadataDimension}` : ""}`);
+        }
+        if (runtimeMetadataKind !== undefined
+            && !["inductive", "hit1", "hit2", "hit3"].includes(runtimeMetadataKind)) {
+            throw new Error(`不支持的归纳类型 metadata kind：${runtimeMetadataKind}`);
         }
         const metadataVersion = Number(bundle.metadata?.version);
         if ([2, 3, 4, 5].includes(metadataVersion)
@@ -1474,11 +1481,7 @@ export class Core {
                 };
             });
         }
-        for (const path of [
-            ...(bundle.metadata?.pathConstructors ?? []),
-            ...(bundle.metadata?.twoPathConstructors ?? []),
-            ...(bundle.metadata?.threePathConstructors ?? [])
-        ]) {
+        for (const path of flattenHitPathLevels(hitPathLevelsFromLegacy(bundle.metadata ?? {}))) {
             for (const head of new Set([
                 path.name,
                 path.computationName,
@@ -2367,11 +2370,7 @@ export class Core {
         const strictRuleSchema = bundle.metadata?.ruleSchemaVersion === 1;
         const deferredComputationTypes = new Set();
         if (strictRuleSchema) {
-            for (const path of [
-                ...(bundle.metadata?.pathConstructors ?? []),
-                ...(bundle.metadata?.twoPathConstructors ?? []),
-                ...(bundle.metadata?.threePathConstructors ?? [])
-            ]) {
+            for (const path of flattenHitPathLevels(hitPathLevelsFromLegacy(bundle.metadata ?? {}))) {
                 for (const name of [
                     path.computationName,
                     `apd_${path.name}`,
