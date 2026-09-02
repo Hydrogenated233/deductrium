@@ -213,10 +213,14 @@ const hitDeclaration = {
         universe: "U",
         universeAst: parse("U"),
         pointConstructors: [{ name: "baseDisplay", typeSource: "CircleDisplay" }],
-        pathConstructors: [{
-            name: "loopDisplay",
-            typeSource: "baseDisplay = baseDisplay"
-        }]
+        pathLevels: [
+            { level: 1, constructors: [{
+                name: "loopDisplay",
+                typeSource: "baseDisplay = baseDisplay"
+            }] },
+            { level: 2, constructors: [] },
+            { level: 3, constructors: [] }
+        ]
     }
 };
 assert.deepEqual(sandboxDeclarationDisplayKind(hitDeclaration), {
@@ -233,14 +237,17 @@ assert.deepEqual(sandboxDeclarationDisplayKind({
         universe: "U",
         universeAst: parse("U"),
         pointConstructors: [{ name: "baseSquare", typeSource: "SquareDisplay" }],
-        pathConstructors: [
-            { name: "loopSquareA", typeSource: "baseSquare = baseSquare" },
-            { name: "loopSquareB", typeSource: "baseSquare = baseSquare" }
-        ],
-        twoPathConstructors: [{
-            name: "squarePath",
-            typeSource: "loopSquareA = loopSquareB"
-        }]
+        pathLevels: [
+            { level: 1, constructors: [
+                { name: "loopSquareA", typeSource: "baseSquare = baseSquare" },
+                { name: "loopSquareB", typeSource: "baseSquare = baseSquare" }
+            ] },
+            { level: 2, constructors: [{
+                name: "squarePath",
+                typeSource: "loopSquareA = loopSquareB"
+            }] },
+            { level: 3, constructors: [] }
+        ]
     }
 }), {
     kind: "HIT",

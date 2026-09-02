@@ -113,6 +113,8 @@ boundaries; arbitrary-dimensional HIT support is not a project commitment.
 HIT metadata version 6 carries only this canonical `pathLevels` structure.
 Legacy versions 3 through 5 are normalized once at the Core boundary; sandbox
 saves retain source declarations rather than persisting derived metadata.
+The sandbox authoring model follows the same rule: `SandboxHitDeclaration`
+stores point constructors separately and has no parallel legacy path arrays.
 
 ## Type-theory Proof Pages / 类型论证明页
 

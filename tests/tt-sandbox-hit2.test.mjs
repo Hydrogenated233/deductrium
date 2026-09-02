@@ -21,12 +21,14 @@ const surfaceSource = "hit SurfaceX : U "
 const parsed = parseSandboxHit(surfaceSource);
 assert.equal(parsed.name, "SurfaceX");
 assert.deepEqual(parsed.pointConstructors.map(constructor => constructor.name), ["baseX"]);
-assert.deepEqual(parsed.pathConstructors.map(path => path.name), ["loopAX", "loopBX"]);
-assert.deepEqual(parsed.twoPathConstructors.map(path => path.name), ["squareX"]);
-assert.equal(parsed.twoPathConstructors[0].left.name, "loopAX");
-assert.equal(parsed.twoPathConstructors[0].right.name, "loopBX");
-assert.equal(parsed.twoPathConstructors[0].leftPoint.name, "baseX");
-assert.equal(parsed.twoPathConstructors[0].rightPoint.name, "baseX");
+const parsedPaths = parsed.pathLevels[0].constructors;
+const parsedTwoPaths = parsed.pathLevels[1].constructors;
+assert.deepEqual(parsedPaths.map(path => path.name), ["loopAX", "loopBX"]);
+assert.deepEqual(parsedTwoPaths.map(path => path.name), ["squareX"]);
+assert.equal(parsedTwoPaths[0].left.name, "loopAX");
+assert.equal(parsedTwoPaths[0].right.name, "loopBX");
+assert.equal(parsedTwoPaths[0].leftPoint.name, "baseX");
+assert.equal(parsedTwoPaths[0].rightPoint.name, "baseX");
 
 assert.throws(
     () => parseSandboxHit(

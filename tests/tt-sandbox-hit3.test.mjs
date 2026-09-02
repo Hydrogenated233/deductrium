@@ -25,7 +25,7 @@ const cubeSource = "hit Cube3 : U "
     + "| path3 cell3 : faceA3 = faceB3";
 
 const parsed = parseSandboxHit(cubeSource);
-assert.deepEqual(parsed.threePathConstructors.map(path => path.name), ["cell3"]);
+assert.deepEqual(parsed.pathLevels[2].constructors.map(path => path.name), ["cell3"]);
 assert.deepEqual(
     parsed.pathLevels.map(entry => ({
         level: entry.level,
@@ -37,7 +37,7 @@ assert.deepEqual(
         { level: 3, names: ["cell3"] }
     ]
 );
-const cell = parsed.threePathConstructors[0];
+const cell = parsed.pathLevels[2].constructors[0];
 assert.equal(headName(cell.left), "faceA3");
 assert.equal(headName(cell.right), "faceB3");
 assert.equal(cell.leftTwoPath, "faceA3");
@@ -49,13 +49,9 @@ assert.equal(headName(cell.targetPoint), "base3");
 
 const bundle = lowerSandboxHit(parsed);
 
-const legacyProjectionChanged = structuredClone(parsed);
-legacyProjectionChanged.pathConstructors = [];
-legacyProjectionChanged.twoPathConstructors = [];
-legacyProjectionChanged.threePathConstructors = [];
-const pathLevelsBundle = lowerSandboxHit(legacyProjectionChanged);
-assert.ok(pathLevelsBundle.auxiliaryTypes.some(([name]) => name === "cell3"),
-    "lowering must use canonical pathLevels rather than stale legacy projections");
+assert.equal(Object.hasOwn(parsed, "pathConstructors"), false);
+assert.equal(Object.hasOwn(parsed, "twoPathConstructors"), false);
+assert.equal(Object.hasOwn(parsed, "threePathConstructors"), false);
 
 const sparsePathLevels = structuredClone(parsed);
 sparsePathLevels.pathLevels[1].constructors = [];
@@ -168,7 +164,7 @@ const parameterizedSource = "hit CubeP (A : U) : U "
     + "| path2 faceBP : Πz:A,loopAP z=loopBP z "
     + "| path3 cellP : Πz:A,faceAP A z=faceBP A z";
 const parameterized = parseSandboxHit(parameterizedSource);
-const parameterizedCell = parameterized.threePathConstructors[0];
+const parameterizedCell = parameterized.pathLevels[2].constructors[0];
 assert.deepEqual(parameterizedCell.arguments.map(argument => argument.name), ["z"]);
 assert.equal(headName(parameterizedCell.sourcePath), "loopAP");
 assert.equal(headName(parameterizedCell.targetPath), "loopBP");
@@ -244,6 +240,23 @@ assert.equal(parameterizedSandbox.check("apd3_cellP").ok, true);
 assert.equal(parameterizedSandbox.check("@apd3_cellP").ok, true);
 assert.equal(parameterizedSandbox.add("useApd3P := apd3_cellP").ok, true);
 assert.equal(parameterizedSandbox.add("useFullApd3P := @apd3_cellP").ok, true);
+
+const reservedParameterSource = "hit CubeReserved (trans : U) : U "
+    + "| baseR : CubeReserved trans "
+    + "| loopRA : baseR=baseR | loopRB : baseR=baseR "
+    + "| path2 faceRA : loopRA=loopRB | path2 faceRB : loopRA=loopRB "
+    + "| path3 cellR : faceRA=faceRB";
+const reservedParameterBundle = lowerSandboxHit(parseSandboxHit(reservedParameterSource));
+assert.match(parser.stringify(reservedParameterBundle.type[1]), /param_trans/,
+    "pathLevels must be refreshed after a reserved uniform parameter is renamed");
+const reservedParameterSandbox = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+});
+assert.equal(
+    reservedParameterSandbox.add(reservedParameterSource).ok,
+    true,
+    "renamed uniform parameters must propagate through all three path levels"
+);
 
 const wrongKind = structuredClone(bundle);
 wrongKind.metadata.kind = "hit2";

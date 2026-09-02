@@ -16,7 +16,7 @@ const circleSource = "hit Circle2 : U | baseC : Circle2 | loopC : baseC = baseC"
 const circle = parseSandboxHit(circleSource);
 assert.equal(circle.name, "Circle2");
 assert.deepEqual(circle.pointConstructors.map(ctor => ctor.name), ["baseC"]);
-assert.deepEqual(circle.pathConstructors.map(ctor => ctor.name), ["loopC"]);
+assert.deepEqual(circle.pathLevels[0].constructors.map(ctor => ctor.name), ["loopC"]);
 assert.equal(circle.pointConstructors[0].typeSource, "Circle2",
     "the parser's internal self placeholder must not leak into HIT display source");
 assert.equal(parseSandboxDeclaration(circleSource).hit?.name, "Circle2");
@@ -131,7 +131,7 @@ const parameterizedSource = "hit Span2 (A : U) (B : U) (C : U) "
     + "| inr2 : B -> Span2 A B C f g "
     + "| glue2 : Px:C,inl2 (f x) = inr2 (g x)";
 const parameterized = parseSandboxHit(parameterizedSource);
-assert.equal(parameterized.pathConstructors[0].arguments[0].name, "x");
+assert.equal(parameterized.pathLevels[0].constructors[0].arguments[0].name, "x");
 const parameterizedSandbox = new SandboxEnvironment({ systemRuleIds: creativeSandboxSystemRuleIds });
 const parameterizedResult = parameterizedSandbox.add(parameterizedSource);
 assert.equal(parameterizedResult.ok, true, parameterizedResult.error);
