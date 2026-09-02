@@ -27,6 +27,65 @@ export function toSandboxSavedDeclaration(declaration) {
     const { inductive: _inductive, hit: _hit, generatedNames: _generatedNames, presentationAst: _presentationAst, ...saved } = declaration;
     return { ...saved, dependencies: [...saved.dependencies] };
 }
+/** Ordered declaration semantics shared by incremental validation and Worker session reuse. */
+export function sandboxValidationSignatures(save) {
+    const folders = new Map((save.folders ?? []).map(folder => [folder.id, folder]));
+    const declarations = new Map(save.declarations.map(declaration => [declaration.id, declaration]));
+    const items = [];
+    const seen = new Set();
+    const append = (id) => {
+        if (seen.has(id))
+            return;
+        const folder = folders.get(id);
+        if (folder) {
+            seen.add(id);
+            items.push({
+                kind: "folder",
+                id: folder.id,
+                name: folder.name,
+                length: Math.max(0, Number(folder.length) || 0),
+                open: folder.open !== false,
+                disabled: !!folder.disabled
+            });
+            return;
+        }
+        const declaration = declarations.get(id);
+        if (!declaration)
+            return;
+        seen.add(id);
+        items.push({
+            kind: "theorem",
+            id: declaration.id,
+            value: declaration.source,
+            local: false
+        });
+    };
+    for (const id of save.order ?? [])
+        append(id);
+    for (const folder of folders.values())
+        append(folder.id);
+    for (const declaration of declarations.values())
+        append(declaration.id);
+    const workspace = new TheoremWorkspace(items);
+    const layout = new Map(workspace.layout().map(item => [item.id, item]));
+    return workspace.snapshot()
+        .filter((item) => item.kind === "theorem")
+        .map(item => {
+        const declaration = declarations.get(item.id);
+        return JSON.stringify({
+            id: item.id,
+            source: declaration?.source ?? item.value,
+            enabled: declaration?.enabled !== false,
+            disabled: !!layout.get(item.id)?.disabled
+        });
+    });
+}
+export function sandboxValidationSemanticsKey(save) {
+    return JSON.stringify({
+        version: save.version,
+        declarations: sandboxValidationSignatures(save)
+    });
+}
 export function sandboxHitPathLevels(signature) {
     return hitPathLevelsFromCanonicalOrLegacy(signature);
 }
@@ -4011,19 +4070,10 @@ export class SandboxEnvironment {
     }
     validationSignatures() {
         this.syncWorkspaceFromState();
-        const layout = new Map(this.workspace.layout().map(item => [item.id, item]));
-        const declarations = new Map(this.declarations.map(declaration => [declaration.id, declaration]));
-        return this.workspace.snapshot()
-            .filter((item) => item.kind === "theorem")
-            .map(item => {
-            const declaration = declarations.get(item.id);
-            const rowState = layout.get(item.id);
-            return JSON.stringify({
-                id: item.id,
-                source: declaration?.source ?? item.value,
-                enabled: declaration?.enabled !== false,
-                disabled: !!rowState?.disabled
-            });
+        return sandboxValidationSignatures({
+            declarations: this.declarations,
+            folders: this.folders,
+            order: this.order
         });
     }
     orderedDeclarationIndex(id) {

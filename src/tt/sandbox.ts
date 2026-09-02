@@ -123,6 +123,65 @@ export type SandboxSave = {
     validationCache?: SandboxValidationCache;
 };
 
+/** Ordered declaration semantics shared by incremental validation and Worker session reuse. */
+export function sandboxValidationSignatures(
+    save: Pick<SandboxSave, "declarations" | "folders" | "order">
+): string[] {
+    const folders = new Map((save.folders ?? []).map(folder => [folder.id, folder] as const));
+    const declarations = new Map(save.declarations.map(declaration => [declaration.id, declaration] as const));
+    const items: TheoremWorkspaceItem[] = [];
+    const seen = new Set<string>();
+    const append = (id: string) => {
+        if (seen.has(id)) return;
+        const folder = folders.get(id);
+        if (folder) {
+            seen.add(id);
+            items.push({
+                kind: "folder",
+                id: folder.id,
+                name: folder.name,
+                length: Math.max(0, Number(folder.length) || 0),
+                open: folder.open !== false,
+                disabled: !!folder.disabled
+            });
+            return;
+        }
+        const declaration = declarations.get(id);
+        if (!declaration) return;
+        seen.add(id);
+        items.push({
+            kind: "theorem",
+            id: declaration.id,
+            value: declaration.source,
+            local: false
+        });
+    };
+    for (const id of save.order ?? []) append(id);
+    for (const folder of folders.values()) append(folder.id);
+    for (const declaration of declarations.values()) append(declaration.id);
+
+    const workspace = new TheoremWorkspace(items);
+    const layout = new Map(workspace.layout().map(item => [item.id, item] as const));
+    return workspace.snapshot()
+        .filter((item): item is Extract<TheoremWorkspaceItem, { kind: "theorem" }> => item.kind === "theorem")
+        .map(item => {
+            const declaration = declarations.get(item.id);
+            return JSON.stringify({
+                id: item.id,
+                source: declaration?.source ?? item.value,
+                enabled: declaration?.enabled !== false,
+                disabled: !!layout.get(item.id)?.disabled
+            });
+        });
+}
+
+export function sandboxValidationSemanticsKey(save: SandboxSave): string {
+    return JSON.stringify({
+        version: save.version,
+        declarations: sandboxValidationSignatures(save)
+    });
+}
+
 export type SandboxValidationCacheEntry = {
     id: string;
     /** Chained fingerprint of the exact ordered declaration prefix. */
@@ -5803,20 +5862,11 @@ export class SandboxEnvironment {
 
     private validationSignatures() {
         this.syncWorkspaceFromState();
-        const layout = new Map(this.workspace.layout().map(item => [item.id, item] as const));
-        const declarations = new Map(this.declarations.map(declaration => [declaration.id, declaration] as const));
-        return this.workspace.snapshot()
-            .filter((item): item is Extract<TheoremWorkspaceItem, { kind: "theorem" }> => item.kind === "theorem")
-            .map(item => {
-                const declaration = declarations.get(item.id);
-                const rowState = layout.get(item.id);
-                return JSON.stringify({
-                    id: item.id,
-                    source: declaration?.source ?? item.value,
-                    enabled: declaration?.enabled !== false,
-                    disabled: !!rowState?.disabled
-                });
-            });
+        return sandboxValidationSignatures({
+            declarations: this.declarations,
+            folders: this.folders,
+            order: this.order
+        });
     }
 
     private orderedDeclarationIndex(id: string) {

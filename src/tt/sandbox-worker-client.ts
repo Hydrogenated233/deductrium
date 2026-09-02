@@ -2,6 +2,7 @@ import {
     SandboxCheckResult,
     SandboxEnvironmentOptions,
     SandboxSave,
+    sandboxValidationSemanticsKey,
     SandboxValidationResult
 } from "./sandbox.js";
 
@@ -76,7 +77,7 @@ export class SandboxWorkerClient {
             if (!this.sessionReady) {
                 throw new Error(restored.error ?? "沙盒 Worker 校验未完成");
             }
-        } else if (save && sandboxSaveKey(save) !== this.sessionSaveKey) {
+        } else if (save && sandboxValidationSemanticsKey(save) !== this.sessionSaveKey) {
             throw new Error("沙盒存档已变更，请先校验后再检查表达式");
         }
         return this.request<SandboxCheckResult>({ kind: "check", source, options: this.options });
@@ -161,7 +162,7 @@ export class SandboxWorkerClient {
             return;
         }
         this.sessionReady = true;
-        this.sessionSaveKey = sandboxSaveKey(save);
+        this.sessionSaveKey = sandboxValidationSemanticsKey(save);
     }
 
     private ensureWorker() {
@@ -189,22 +190,4 @@ export class SandboxWorkerClient {
         for (const pending of this.pending.values()) pending.reject(error);
         this.pending.clear();
     }
-}
-
-function sandboxSaveKey(save: SandboxSave) {
-    return JSON.stringify({
-        version: save.version,
-        declarations: save.declarations.map(declaration => ({
-            id: declaration.id,
-            source: declaration.source,
-            enabled: declaration.enabled,
-            folderId: declaration.folderId
-        })),
-        folders: (save.folders ?? []).map(folder => ({
-            id: folder.id,
-            length: folder.length,
-            disabled: folder.disabled
-        })),
-        order: save.order ?? []
-    });
 }

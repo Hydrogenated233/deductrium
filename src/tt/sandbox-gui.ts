@@ -17,6 +17,7 @@ import {
     migrateLegacySandboxSave,
     sandboxSourceLimitError,
     sandboxHitPathLevels,
+    sandboxValidationSemanticsKey,
     toSandboxSavedDeclaration
 } from "./sandbox.js";
 import {
@@ -415,6 +416,7 @@ export class TTSandboxGui {
             if (!folder) return;
             if (!folder.open) folder.open = true;
         }
+        const beforeKey = this.validationSemanticsKey();
         const next = this.declarations.reduce((max, declaration) => {
             const match = declaration.id.match(/^sandbox-(\d+)$/);
             return match ? Math.max(max, Number(match[1])) : max;
@@ -434,9 +436,7 @@ export class TTSandboxGui {
         }
         this.pendingFolderId = null;
         this.input.value = "";
-        this.persist();
-        this.render();
-        void this.requestValidation();
+        this.finishSemanticMutation(beforeKey, true);
     }
 
     /** Load the legacy standalone sandbox key when no game save owns the state. */
@@ -471,6 +471,22 @@ export class TTSandboxGui {
         const promise = this.validate(!revokeBridge);
         this.validationPromise = promise;
         return promise;
+    }
+
+    private validationSemanticsKey() {
+        return sandboxValidationSemanticsKey(this.toSave());
+    }
+
+    private finishSemanticMutation(beforeKey: string, rerender: boolean) {
+        const semanticsChanged = beforeKey !== this.validationSemanticsKey();
+        if (semanticsChanged) {
+            this.validationCache = undefined;
+            this.pendingValidationCache = undefined;
+        }
+        this.persist();
+        if (rerender) this.render();
+        if (semanticsChanged) void this.requestValidation();
+        return semanticsChanged;
     }
 
     private invalidateBridge() {
@@ -682,11 +698,11 @@ export class TTSandboxGui {
         enabled.checked = declaration.enabled;
         enabled.title = "启用声明";
         enabled.addEventListener("change", () => {
+            const beforeKey = this.validationSemanticsKey();
             declaration.enabled = enabled.checked;
             declaration.status = declaration.enabled ? "unchecked" : "disabled";
             delete declaration.error;
-            this.persist();
-            void this.requestValidation();
+            this.finishSemanticMutation(beforeKey, false);
         });
 
         const source = document.createElement("input");
@@ -731,6 +747,7 @@ export class TTSandboxGui {
                     display.classList.add("hide");
                     return;
                 }
+                const beforeKey = this.validationSemanticsKey();
                 const draft = createSandboxDraftDeclaration(
                     nextSource,
                     declaration.id,
@@ -747,8 +764,7 @@ export class TTSandboxGui {
                 delete declaration.error;
                 Object.assign(declaration, draft);
                 source.value = draft.source;
-                this.persist();
-                void this.requestValidation();
+                this.finishSemanticMutation(beforeKey, false);
             }
             source.classList.add("hide");
             display.classList.remove("hide");
@@ -777,12 +793,11 @@ export class TTSandboxGui {
             : declaration.status === "disabled" ? "已停用" : declaration.status;
 
         const remove = actionButton("×", "删除声明", () => {
+            const beforeKey = this.validationSemanticsKey();
             this.syncWorkspaceFromState();
             const mutation = this.workspace.removeTheorem(declaration.id);
             if (mutation.changed) this.applyWorkspaceSnapshot(mutation.snapshot);
-            this.persist();
-            this.render();
-            void this.requestValidation();
+            this.finishSemanticMutation(beforeKey, true);
         });
         row.append(drag, enabled, source, display, kind, trust, state, remove);
         return row;
@@ -933,12 +948,11 @@ export class TTSandboxGui {
         disabled.title = "停用文件夹中的声明";
         label.append(disabled, document.createTextNode("停用子声明"));
         disabled.addEventListener("change", () => {
+            const beforeKey = this.validationSemanticsKey();
             this.syncWorkspaceFromState();
             const mutation = this.workspace.setFolderDisabled(folder.id, disabled.checked);
             if (mutation.changed) this.applyWorkspaceSnapshot(mutation.snapshot);
-            this.persist();
-            this.render();
-            void this.requestValidation();
+            this.finishSemanticMutation(beforeKey, true);
         });
         const rename = actionButton("✎", "重命名文件夹", () => {
             const nextName = prompt("文件夹名称：", folder.name)?.trim();
@@ -950,13 +964,12 @@ export class TTSandboxGui {
             this.render();
         });
         const remove = actionButton("×", "删除文件夹（声明移到上一级）", () => {
+            const beforeKey = this.validationSemanticsKey();
             this.syncWorkspaceFromState();
             const mutation = this.workspace.removeFolder(folder.id);
             if (!mutation.changed) return;
             this.applyWorkspaceSnapshot(mutation.snapshot);
-            this.persist();
-            this.render();
-            void this.requestValidation();
+            this.finishSemanticMutation(beforeKey, true);
         });
         row.append(drag, add, title, label, rename, remove);
         return row;
@@ -1118,6 +1131,7 @@ export class TTSandboxGui {
 
     private moveSandboxItem(sourceId: string, destination: string) {
         if (!sourceId) return;
+        const beforeKey = this.validationSemanticsKey();
         // The shared theorem list keeps its add button as the final child;
         // dropping below it is the same as the workspace bottom sentinel.
         if (destination === "+") destination = " ";
@@ -1125,9 +1139,7 @@ export class TTSandboxGui {
         const mutation = this.workspace.move(sourceId, destination || " ");
         if (!mutation.changed) return;
         this.applyWorkspaceSnapshot(mutation.snapshot);
-        this.persist();
-        this.render();
-        void this.requestValidation();
+        this.finishSemanticMutation(beforeKey, true);
     }
 
     /**

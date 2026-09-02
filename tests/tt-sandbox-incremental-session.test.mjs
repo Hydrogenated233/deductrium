@@ -131,6 +131,25 @@ try {
     assert.equal(checked(clientValidation), 0);
     assert.equal(replayed(clientValidation), save.declarations.length);
     assert.equal((await client.check(save, "A")).ok, true);
+    const uiOnlySave = structuredClone(save);
+    uiOnlySave.folders = [{
+        kind: "folder",
+        id: "sandbox-empty-folder",
+        name: "Renamed UI Folder",
+        length: 0,
+        open: false,
+        disabled: false
+    }];
+    uiOnlySave.order = [...(uiOnlySave.order ?? []), "sandbox-empty-folder"];
+    assert.equal((await client.check(uiOnlySave, "A")).ok, true,
+        "empty-folder presentation changes must reuse the same validated Worker session");
+    const semanticChange = structuredClone(save);
+    semanticChange.declarations[0].enabled = false;
+    await assert.rejects(
+        client.check(semanticChange, "A"),
+        /存档已变更/,
+        "declaration enable state must remain part of the Worker session semantics key"
+    );
     client.terminate();
     assert.equal((await client.check(save, "A")).ok, true,
         "the client restores its persisted save once after Worker restart");

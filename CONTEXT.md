@@ -124,6 +124,10 @@ drafts. Parsed signatures and ordinary-declaration presentation ASTs come only
 from the sandbox Worker and are excluded from saves. A loaded validation cache
 is a one-shot Worker hint; declarations, certified cache data, and rendered
 state are committed only after the replacement bridge publishes successfully.
+GUI cache invalidation and Worker session reuse share one validation-semantics
+key over ordered declaration id/source/enabled/effective-disabled tuples. Empty
+folders, folding, renaming, and other presentation-only changes do not revoke a
+valid bridge; declaration reordering or recursive disabling does.
 
 ## Type-theory Proof Pages / 类型论证明页
 

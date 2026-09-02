@@ -140,6 +140,8 @@ class FakeElement {
             dependencies: [],
             folderId: null
         };
+        gui.declarations = [declaration];
+        gui.order = [declaration.id];
 
         gui.createDeclarationRow(declaration);
         const input = created.find(element => element.classList.contains("sandbox-source"));
