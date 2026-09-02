@@ -10,6 +10,11 @@ export function createHitPathLevels(path1 = [], path2 = [], path3 = []) {
 export function hitPathLevelsFromLegacy(legacy) {
     return createHitPathLevels(legacy.pathConstructors ?? [], legacy.twoPathConstructors ?? [], legacy.threePathConstructors ?? []);
 }
+export function hitPathLevelsFromCanonicalOrLegacy(value) {
+    const levels = value.pathLevels ?? hitPathLevelsFromLegacy(value);
+    assertCanonicalHitPathLevels(levels);
+    return levels;
+}
 export function legacyHitPathCollectionsFromLevels(levels) {
     return {
         pathConstructors: [...levels[0].constructors],

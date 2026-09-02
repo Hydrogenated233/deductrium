@@ -170,6 +170,7 @@ const tests = [
     "./tt-assist-sandbox-inductive.test.mjs",
     "./tt-sandbox-indexed-inductive.test.mjs",
     "./tt-hit-path-levels.test.mjs",
+    "./tt-hit-metadata-v6.test.mjs",
     "./tt-core-hit-metadata.test.mjs",
     "./tt-sandbox-hit1.test.mjs",
     "./tt-sandbox-hit2.test.mjs",

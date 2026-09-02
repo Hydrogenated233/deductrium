@@ -64,13 +64,15 @@ assert.throws(
     /第 3 阶不能越过空的低阶路径层级/
 );
 
-assert.equal(bundle.metadata.version, 5);
+assert.equal(bundle.metadata.version, 6);
 assert.equal(bundle.metadata.kind, "hit3");
 assert.equal(bundle.metadata.dimension, 3);
 assert.equal(bundle.metadata.ruleSchemaVersion, 1);
-assert.equal(bundle.metadata.threePathConstructors[0].name, "cell3");
-assert.equal(bundle.metadata.threePathConstructors[0].computationName, "apd3_cell3");
-assert.equal(bundle.metadata.threePathConstructors[0].actionComputationName, "ap3_cell3");
+const threePathMetadata = bundle.metadata.pathLevels[2].constructors;
+assert.equal(threePathMetadata[0].name, "cell3");
+assert.equal(threePathMetadata[0].computationName, "apd3_cell3");
+assert.equal(threePathMetadata[0].actionComputationName, "ap3_cell3");
+assert.equal(bundle.metadata.threePathConstructors, undefined);
 assert.ok(bundle.auxiliaryTypes.some(([name]) => name === "cell3"));
 for (const name of ["apd_cell3", "@apd_cell3", "ap_cell3", "@ap_cell3"]) {
     assert.equal(bundle.auxiliaryTypes.some(([entryName]) => entryName === name), false);
@@ -149,7 +151,7 @@ assert.equal(
 
 const bridge = sandbox.bridge();
 assert.equal(bridge.inductives[0].metadata.kind, "hit3");
-assert.equal(bridge.inductives[0].metadata.threePathConstructors[0].name, "cell3");
+assert.equal(bridge.inductives[0].metadata.pathLevels[2].constructors[0].name, "cell3");
 const restored = new SandboxEnvironment({ systemRuleIds: creativeSandboxSystemRuleIds });
 restored.load(JSON.parse(sandbox.serialize()));
 assert.equal(restored.getDeclarations()[0].status, "valid");
@@ -246,25 +248,25 @@ assert.equal(parameterizedSandbox.add("useFullApd3P := @apd3_cellP").ok, true);
 const wrongKind = structuredClone(bundle);
 wrongKind.metadata.kind = "hit2";
 wrongKind.metadata.dimension = 2;
-assert.throws(() => register(wrongKind), /二维 HIT metadata 不能包含三阶路径构造子/);
+assert.throws(() => register(wrongKind), /摘要与 pathLevels 不一致/);
 
 const wrongBoundary = structuredClone(bundle);
-wrongBoundary.metadata.threePathConstructors[0].sourcePath = parser.parse("loopB3");
+wrongBoundary.metadata.pathLevels[2].constructors[0].sourcePath = parser.parse("loopB3");
 assert.throws(() => register(wrongBoundary), /边界 metadata 不一致/);
 
 const wrongEndpoint = structuredClone(bundle);
-wrongEndpoint.metadata.threePathConstructors[0].left = parser.parse("faceB3");
+wrongEndpoint.metadata.pathLevels[2].constructors[0].left = parser.parse("faceB3");
 assert.throws(() => register(wrongEndpoint), /端点与 metadata 不一致/);
 
 const wrongComputationName = structuredClone(bundle);
-wrongComputationName.metadata.threePathConstructors[0].computationName = "apd_cell3";
+wrongComputationName.metadata.pathLevels[2].constructors[0].computationName = "apd_cell3";
 assert.throws(
     () => register(wrongComputationName),
     /三维 HIT dependent 计算定理不存在/
 );
 
 const missingArgumentNames = structuredClone(bundle);
-delete missingArgumentNames.metadata.threePathConstructors[0].argumentNames;
+delete missingArgumentNames.metadata.pathLevels[2].constructors[0].argumentNames;
 assert.throws(() => register(missingArgumentNames), /argumentNames 与 telescope 不一致/);
 
 const definitionalCell = structuredClone(bundle);

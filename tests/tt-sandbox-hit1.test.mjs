@@ -97,10 +97,14 @@ assert.equal(sandbox.check(
 assert.equal(sandbox.check("ap_loopC True true rfl").ok, true);
 
 const circleBundle = lowerSandboxHit(circle);
-assert.equal(circleBundle.metadata.version, 3);
+assert.equal(circleBundle.metadata.version, 6);
 assert.equal(circleBundle.metadata.kind, "hit1");
 assert.deepEqual(circleBundle.metadata.constructors.map(ctor => ctor.name), ["baseC"]);
-assert.deepEqual(circleBundle.metadata.pathConstructors.map(ctor => ctor.name), ["loopC"]);
+assert.deepEqual(
+    circleBundle.metadata.pathLevels[0].constructors.map(ctor => ctor.name),
+    ["loopC"]
+);
+assert.equal(circleBundle.metadata.pathConstructors, undefined);
 assert.equal(circleBundle.computeRules.loopC, undefined,
     "path constructors must never become definitional compute-rule heads");
 assert.equal(circleBundle.computeRules.apd_loopC, undefined,

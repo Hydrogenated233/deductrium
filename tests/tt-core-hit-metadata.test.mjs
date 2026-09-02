@@ -351,6 +351,7 @@ const parameterizedHit2 = lowerSandboxHit(parseSandboxHit(
     + "| path2 squareMetadata : Πz:A,loopLeftMetadata z=loopRightMetadata z"
 ));
 const cloneHit2 = () => structuredClone(parameterizedHit2);
+const hit2Metadata = candidate => candidate.metadata.pathLevels[1].constructors;
 
 assert.doesNotThrow(() => createHitEngine().core.registerSystemInductive(cloneHit2()));
 
@@ -359,7 +360,7 @@ for (const [field, wrongPath] of [
     ["rightPath", "loopLeftMetadata"]
 ]) {
     const mismatchedHead = cloneHit2();
-    mismatchedHead.metadata.twoPathConstructors[0][field] = wrongPath;
+    hit2Metadata(mismatchedHead)[0][field] = wrongPath;
     assert.throws(
         () => createHitEngine().core.registerSystemInductive(mismatchedHead),
         /端点头常量与 [左右]Path metadata 不一致/
@@ -367,7 +368,7 @@ for (const [field, wrongPath] of [
 }
 
 const missingPathArgument = cloneHit2();
-missingPathArgument.metadata.twoPathConstructors[0].left = parse("loopLeftMetadata A");
+hit2Metadata(missingPathArgument)[0].left = parse("loopLeftMetadata A");
 missingPathArgument.auxiliaryTypes.find(([name]) => name === "squareMetadata")[1]
     = parse("ΠA:U,Πz:A,(loopLeftMetadata A)=(loopRightMetadata A z)");
 assert.throws(
@@ -376,8 +377,7 @@ assert.throws(
 );
 
 const extraPathArgument = cloneHit2();
-extraPathArgument.metadata.twoPathConstructors[0].right
-    = parse("loopRightMetadata A z z");
+hit2Metadata(extraPathArgument)[0].right = parse("loopRightMetadata A z z");
 extraPathArgument.auxiliaryTypes.find(([name]) => name === "squareMetadata")[1]
     = parse("ΠA:U,Πz:A,(loopLeftMetadata A z)=(loopRightMetadata A z z)");
 assert.throws(
@@ -386,8 +386,7 @@ assert.throws(
 );
 
 const mismatchedUniformParameter = cloneHit2();
-mismatchedUniformParameter.metadata.twoPathConstructors[0].left
-    = parse("loopLeftMetadata True z");
+hit2Metadata(mismatchedUniformParameter)[0].left = parse("loopLeftMetadata True z");
 mismatchedUniformParameter.auxiliaryTypes.find(([name]) => name === "squareMetadata")[1]
     = parse("ΠA:U,Πz:A,(loopLeftMetadata True z)=(loopRightMetadata A z)");
 assert.throws(

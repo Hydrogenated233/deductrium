@@ -1,7 +1,7 @@
 import { TR } from "../lang.js";
 import { ASTParser } from "./astparser.js";
 import { Core, findContextByName, wrapApply, wrapLambda, wrapVar } from "./core.js";
-import { hitPathConstructorCount, hitPathLevelsFromLegacy } from "./hit-path-levels.js";
+import { hitPathConstructorCount, hitPathLevelsFromCanonicalOrLegacy } from "./hit-path-levels.js";
 import { markExplicitAtSyntax } from "./presentation.js";
 let core = new Core;
 let parser = new ASTParser;
@@ -1930,7 +1930,7 @@ export class Assist {
             || dynamicInductive?.kind === "hit2"
             || dynamicInductive?.kind === "hit3"
             ? dynamicInductive.constructors.length
-                + hitPathConstructorCount(hitPathLevelsFromLegacy(dynamicInductive))
+                + hitPathConstructorCount(hitPathLevelsFromCanonicalOrLegacy(dynamicInductive))
             : undefined;
         const ctorNumbers = metadataBranchCount ?? inferredBranchCount;
         if (ctorNumbers < 0 || holes.length < ctorNumbers) {

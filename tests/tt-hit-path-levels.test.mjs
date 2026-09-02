@@ -10,6 +10,7 @@ import {
     hitPathConstructorCount,
     hitPathConstructorsAt,
     hitPathLevelsAreContiguous,
+    hitPathLevelsFromCanonicalOrLegacy,
     hitPathLevelsFromLegacy,
     legacyHitPathCollectionsFromLevels
 } from "../js/tt/hit-path-levels.js";
@@ -43,6 +44,14 @@ assert.equal(highestHitPathLevel(levels), 3);
 assert.equal(firstHitPathLevelGap(levels), undefined);
 assert.equal(hitPathLevelsAreContiguous(levels), true);
 assert.doesNotThrow(() => assertCanonicalHitPathLevels(levels));
+assert.equal(
+    hitPathLevelsFromCanonicalOrLegacy({
+        pathLevels: levels,
+        pathConstructors: [{ name: "stale" }]
+    }),
+    levels,
+    "canonical pathLevels must take precedence over legacy projections"
+);
 
 const legacy = hitPathLevelsFromLegacy({
     pathConstructors: path1,

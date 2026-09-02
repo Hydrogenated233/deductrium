@@ -44,13 +44,15 @@ const bundle = {
 const cloned = cloneInductiveBundle(bundle);
 assert.equal(cloned.metadata.kind, "hit1");
 assert.equal(cloned.metadata.dimension, 1);
-assert.notEqual(cloned.metadata.pathConstructors[0].left,
+assert.equal(cloned.metadata.version, 6);
+const clonedPath = cloned.metadata.pathLevels[0].constructors[0];
+assert.notEqual(clonedPath.left,
     bundle.metadata.pathConstructors[0].left);
-assert.notEqual(cloned.metadata.pathConstructors[0].argumentTypes[0],
+assert.notEqual(clonedPath.argumentTypes[0],
     bundle.metadata.pathConstructors[0].argumentTypes[0]);
 bundle.metadata.pathConstructors[0].left.name = "mutatedLeft";
-cloned.metadata.pathConstructors[0].right.name = "mutatedRight";
-assert.equal(cloned.metadata.pathConstructors[0].left.name, "baseDisplay");
+clonedPath.right.name = "mutatedRight";
+assert.equal(clonedPath.left.name, "baseDisplay");
 assert.equal(bundle.metadata.pathConstructors[0].right.name, "baseDisplay");
 
 const hit2Bundle = {
@@ -102,15 +104,17 @@ const hit2Bundle = {
 const clonedHit2 = cloneInductiveBundle(hit2Bundle);
 assert.equal(clonedHit2.metadata.kind, "hit2");
 assert.equal(clonedHit2.metadata.dimension, 2);
-assert.equal(clonedHit2.metadata.twoPathConstructors[0].leftPath, "loopSquareA");
-assert.equal(clonedHit2.metadata.twoPathConstructors[0].rightPath, "loopSquareB");
-assert.notEqual(clonedHit2.metadata.twoPathConstructors[0].left,
+assert.equal(clonedHit2.metadata.version, 6);
+const clonedTwoPath = clonedHit2.metadata.pathLevels[1].constructors[0];
+assert.equal(clonedTwoPath.leftPath, "loopSquareA");
+assert.equal(clonedTwoPath.rightPath, "loopSquareB");
+assert.notEqual(clonedTwoPath.left,
     hit2Bundle.metadata.twoPathConstructors[0].left);
-assert.notEqual(clonedHit2.metadata.twoPathConstructors[0].argumentTypes[0],
+assert.notEqual(clonedTwoPath.argumentTypes[0],
     hit2Bundle.metadata.twoPathConstructors[0].argumentTypes[0]);
 hit2Bundle.metadata.twoPathConstructors[0].left.name = "mutatedLoop";
-clonedHit2.metadata.twoPathConstructors[0].right.name = "mutatedLoop";
-assert.equal(clonedHit2.metadata.twoPathConstructors[0].left.name, "loopSquareA");
+clonedTwoPath.right.name = "mutatedLoop";
+assert.equal(clonedTwoPath.left.name, "loopSquareA");
 assert.equal(hit2Bundle.metadata.twoPathConstructors[0].right.name, "loopSquareB");
 
 const hit3Bundle = structuredClone(hit2Bundle);
@@ -130,11 +134,13 @@ hit3Bundle.metadata.threePathConstructors = [{
 }];
 const clonedHit3 = cloneInductiveBundle(hit3Bundle);
 assert.equal(clonedHit3.metadata.kind, "hit3");
-assert.equal(clonedHit3.metadata.threePathConstructors[0].leftTwoPath, "squarePath");
-assert.equal(clonedHit3.metadata.threePathConstructors[0].actionComputationName, "ap3_cubePath");
-assert.notEqual(clonedHit3.metadata.threePathConstructors[0].left,
+assert.equal(clonedHit3.metadata.version, 6);
+const clonedThreePath = clonedHit3.metadata.pathLevels[2].constructors[0];
+assert.equal(clonedThreePath.leftTwoPath, "squarePath");
+assert.equal(clonedThreePath.actionComputationName, "ap3_cubePath");
+assert.notEqual(clonedThreePath.left,
     hit3Bundle.metadata.threePathConstructors[0].left);
-assert.notEqual(clonedHit3.metadata.threePathConstructors[0].sourcePath,
+assert.notEqual(clonedThreePath.sourcePath,
     hit3Bundle.metadata.threePathConstructors[0].sourcePath);
 
 for (const name of ["squarePath", "@squarePath"]) {

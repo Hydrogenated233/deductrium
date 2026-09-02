@@ -38,6 +38,17 @@ const register = candidate => {
     return engine.core.registerSystemInductive(candidate);
 };
 
+const forgedPathLevels = structuredClone(bundle);
+forgedPathLevels.metadata.pathLevels.push({
+    level: 4,
+    constructors: [{ name: "forgedHyper4" }]
+});
+assert.throws(
+    () => register(forgedPathLevels),
+    /pathLevels 必须包含一至三阶三个层级/,
+    "a forged fourth path level must be rejected even when the summary still says dimension 3"
+);
+
 const forgedKind = structuredClone(bundle);
 forgedKind.metadata.kind = "hit4";
 forgedKind.metadata.dimension = 4;

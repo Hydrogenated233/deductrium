@@ -5,7 +5,7 @@ import { initTypeSystem } from "./initial.js";
 import { TheoremWorkspace } from "./theorem-workspace.js";
 import { hasLegacySurfaceSyntax, migrateLegacyDeclarationSource, migrateLegacySurfaceExpression } from "./surface-syntax-migration.js";
 import { expandTypeTheoryAliasesInSurface } from "./symbol-aliases.js";
-import { assertCanonicalHitPathLevels, createHitPathLevels, flattenHitPathLevels, hitPathConstructorsAt, hitPathLevelsFromLegacy, legacyHitPathCollectionsFromLevels } from "./hit-path-levels.js";
+import { createHitPathLevels, flattenHitPathLevels, highestHitPathLevel, hitPathConstructorsAt, hitPathLevelsFromCanonicalOrLegacy, legacyHitPathCollectionsFromLevels } from "./hit-path-levels.js";
 const parser = new ASTParser();
 export const SANDBOX_SAVE_VERSION = 1;
 export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
@@ -13,7 +13,7 @@ export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
  * Bump whenever parsing, lowering, Core registration, or NbE cache semantics
  * change. Persisted validation data is an optimization hint, never authority.
  */
-export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit3-apd3-path-levels-v1-2026-09-02";
+export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit3-apd3-metadata-v6-2026-09-02";
 const SANDBOX_VALIDATION_CACHE_MAX_ENTRIES = 4_096;
 const SANDBOX_VALIDATION_CACHE_MAX_OBJECTS = 500_000;
 const SANDBOX_VALIDATION_CACHE_MAX_DEPTH = 256;
@@ -23,9 +23,7 @@ export function sandboxEnabledInMode(mode) {
     return mode === "creative";
 }
 export function sandboxHitPathLevels(signature) {
-    const levels = signature.pathLevels ?? hitPathLevelsFromLegacy(signature);
-    assertCanonicalHitPathLevels(levels);
-    return levels;
+    return hitPathLevelsFromCanonicalOrLegacy(signature);
 }
 function normalizeSandboxHitPathLevels(signature) {
     const pathLevels = sandboxHitPathLevels(signature);
@@ -2280,6 +2278,40 @@ export function lowerSandboxHit(signature) {
             `@ap3_${path.name}`
         ])
     ];
+    const metadataPathConstructors = signature.pathConstructors.map(path => ({
+        name: path.name,
+        argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
+        argumentNames: path.arguments.map(argument => argument.name),
+        left: Core.clone(path.left),
+        right: Core.clone(path.right),
+        computationName: `apd_${path.name}`
+    }));
+    const metadataTwoPathConstructors = signature.twoPathConstructors.map(path => ({
+        name: path.name,
+        argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
+        argumentNames: path.arguments.map(argument => argument.name),
+        left: Core.clone(path.left),
+        right: Core.clone(path.right),
+        leftPath: flattenApplication(path.left)[0]?.name ?? "",
+        rightPath: flattenApplication(path.right)[0]?.name ?? "",
+        computationName: `apd_${path.name}`,
+        strongComputationName: `ap2_${path.name}`
+    }));
+    const metadataThreePathConstructors = signature.threePathConstructors.map(path => ({
+        name: path.name,
+        argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
+        argumentNames: path.arguments.map(argument => argument.name),
+        left: Core.clone(path.left),
+        right: Core.clone(path.right),
+        leftTwoPath: path.leftTwoPath,
+        rightTwoPath: path.rightTwoPath,
+        sourcePath: Core.clone(path.sourcePath),
+        targetPath: Core.clone(path.targetPath),
+        computationName: `apd3_${path.name}`,
+        actionComputationName: `ap3_${path.name}`
+    }));
+    const metadataPathLevels = createHitPathLevels(metadataPathConstructors, metadataTwoPathConstructors, metadataThreePathConstructors);
+    const dimension = highestHitPathLevel(signature.pathLevels);
     return {
         type: [base.type[0], Core.clone(base.type[1])],
         constructors: base.constructors.map(([name, type]) => [name, Core.clone(type)]),
@@ -2293,15 +2325,9 @@ export function lowerSandboxHit(signature) {
         recursor: [`rec_${signature.name}`, publicRecursorType],
         computeRules,
         metadata: {
-            version: signature.threePathConstructors.length
-                ? 5
-                : signature.twoPathConstructors.length ? 4 : 3,
-            kind: signature.threePathConstructors.length
-                ? "hit3"
-                : signature.twoPathConstructors.length ? "hit2" : "hit1",
-            dimension: signature.threePathConstructors.length
-                ? 3
-                : signature.twoPathConstructors.length ? 2 : 1,
+            version: 6,
+            kind: dimension === 3 ? "hit3" : dimension === 2 ? "hit2" : "hit1",
+            dimension,
             ruleSchemaVersion: 1,
             typeName: signature.name,
             parameterCount: signature.parameters.length,
@@ -2318,38 +2344,7 @@ export function lowerSandboxHit(signature) {
                 recursiveArguments: [],
                 resultIndices: []
             })),
-            pathConstructors: signature.pathConstructors.map(path => ({
-                name: path.name,
-                argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
-                argumentNames: path.arguments.map(argument => argument.name),
-                left: Core.clone(path.left),
-                right: Core.clone(path.right),
-                computationName: `apd_${path.name}`
-            })),
-            twoPathConstructors: signature.twoPathConstructors.map(path => ({
-                name: path.name,
-                argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
-                argumentNames: path.arguments.map(argument => argument.name),
-                left: Core.clone(path.left),
-                right: Core.clone(path.right),
-                leftPath: flattenApplication(path.left)[0]?.name ?? "",
-                rightPath: flattenApplication(path.right)[0]?.name ?? "",
-                computationName: `apd_${path.name}`,
-                strongComputationName: `ap2_${path.name}`
-            })),
-            threePathConstructors: signature.threePathConstructors.map(path => ({
-                name: path.name,
-                argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
-                argumentNames: path.arguments.map(argument => argument.name),
-                left: Core.clone(path.left),
-                right: Core.clone(path.right),
-                leftTwoPath: path.leftTwoPath,
-                rightTwoPath: path.rightTwoPath,
-                sourcePath: Core.clone(path.sourcePath),
-                targetPath: Core.clone(path.targetPath),
-                computationName: `apd3_${path.name}`,
-                actionComputationName: `ap3_${path.name}`
-            }))
+            pathLevels: metadataPathLevels
         },
         generatedNames
     };
@@ -3365,7 +3360,10 @@ export class SandboxEnvironment {
         const validationCache = this.buildValidationCache();
         return {
             version: SANDBOX_SAVE_VERSION,
-            declarations: this.getDeclarations(),
+            declarations: this.declarations.map(declaration => {
+                const { inductive: _inductive, hit: _hit, generatedNames: _generatedNames, ...saved } = declaration;
+                return { ...saved, dependencies: [...saved.dependencies] };
+            }),
             folders: snapshot
                 .filter((item) => item.kind === "folder")
                 .map(folder => ({ ...folder })),

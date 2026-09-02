@@ -1,6 +1,6 @@
 import { langMgr, TR } from "../lang.js";
 import { ASTParser, debugBoundVarId } from "./astparser.js";
-import { Core, assignContext, wrapApply, wrapVar, wrapLambda } from "./core.js";
+import { Core, assignContext, cloneCoreHitPathMetadata, wrapApply, wrapVar, wrapLambda } from "./core.js";
 import { TTCoreWorkerClient } from "./core-worker-client.js";
 import { installTrustedDeclarations } from "./engine.js";
 import { TTAssistEngine } from "./assist-engine.js";
@@ -16,7 +16,7 @@ import { TheoremWorkspace } from "./theorem-workspace.js";
 import { applyWorkspaceLayout, createWorkspaceDragHandle, syncWorkspaceDomOrder } from "./theorem-workspace-view.js";
 import { TTProofSessionStore } from "./proof-sessions.js";
 import { installTypeTheorySymbolAliases } from "./symbol-aliases.js";
-import { flattenHitPathLevels, hitPathLevelsFromLegacy } from "./hit-path-levels.js";
+import { flattenHitPathLevels, hitPathLevelsFromCanonicalOrLegacy } from "./hit-path-levels.js";
 const parser = new ASTParser;
 const constructors = new Set();
 const destructors = new Set();
@@ -29,6 +29,12 @@ let consts = new Set;
 const allrules = initTypeSystem();
 const reservedConsts = new Set;
 export function cloneInductiveBundle(bundle) {
+    const clonedHitPaths = bundle.metadata
+        && (bundle.metadata.kind === "hit1"
+            || bundle.metadata.kind === "hit2"
+            || bundle.metadata.kind === "hit3")
+        ? cloneCoreHitPathMetadata(bundle.metadata)
+        : undefined;
     return {
         type: [bundle.type[0], Core.clone(bundle.type[1])],
         auxiliaryTypes: (bundle.auxiliaryTypes ?? []).map(([name, type]) => [name, Core.clone(type)]),
@@ -49,7 +55,9 @@ export function cloneInductiveBundle(bundle) {
         ])),
         metadata: bundle.metadata
             ? {
-                version: bundle.metadata.version,
+                version: clonedHitPaths && bundle.metadata.version !== 1
+                    ? 6
+                    : bundle.metadata.version,
                 kind: bundle.metadata.kind,
                 dimension: bundle.metadata.dimension,
                 ruleSchemaVersion: bundle.metadata.ruleSchemaVersion,
@@ -78,38 +86,7 @@ export function cloneInductiveBundle(bundle) {
                     })),
                     resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
                 })),
-                pathConstructors: bundle.metadata.pathConstructors?.map(ctor => ({
-                    name: ctor.name,
-                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
-                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-                    left: Core.clone(ctor.left),
-                    right: Core.clone(ctor.right),
-                    computationName: ctor.computationName
-                })),
-                twoPathConstructors: bundle.metadata.twoPathConstructors?.map(ctor => ({
-                    name: ctor.name,
-                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
-                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-                    left: Core.clone(ctor.left),
-                    right: Core.clone(ctor.right),
-                    leftPath: ctor.leftPath,
-                    rightPath: ctor.rightPath,
-                    computationName: ctor.computationName,
-                    strongComputationName: ctor.strongComputationName
-                })),
-                threePathConstructors: bundle.metadata.threePathConstructors?.map(ctor => ({
-                    name: ctor.name,
-                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
-                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-                    left: Core.clone(ctor.left),
-                    right: Core.clone(ctor.right),
-                    leftTwoPath: ctor.leftTwoPath,
-                    rightTwoPath: ctor.rightTwoPath,
-                    sourcePath: Core.clone(ctor.sourcePath),
-                    targetPath: Core.clone(ctor.targetPath),
-                    computationName: ctor.computationName,
-                    actionComputationName: ctor.actionComputationName
-                }))
+                ...(clonedHitPaths ?? {})
             }
             : undefined
     };
@@ -124,7 +101,7 @@ function sandboxInductiveBundlePrefix(bundle) {
 /** Classify a generated sandbox entry without relying on name-prefix guesses. */
 export function sandboxInductiveEntryPresentation(bundle, name, fallback) {
     const prefix = sandboxInductiveBundlePrefix(bundle);
-    const paths = flattenHitPathLevels(hitPathLevelsFromLegacy(bundle.metadata ?? {}));
+    const paths = flattenHitPathLevels(hitPathLevelsFromCanonicalOrLegacy(bundle.metadata ?? {}));
     const publicName = name.startsWith("@") ? name.slice(1) : name;
     if (paths.some(path => path.name === publicName)) {
         return { postfix: "构造", prefix, category: "constructor" };

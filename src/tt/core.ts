@@ -30,9 +30,16 @@ import {
     type Context
 } from "./scoped-syntax.js";
 import {
+    assertCanonicalHitPathLevels,
+    createHitPathLevels,
     flattenHitPathLevels,
+    highestHitPathLevel,
     hitPathConstructorCount,
-    hitPathLevelsFromLegacy
+    hitPathConstructorsAt,
+    hitPathLevelsFromCanonicalOrLegacy,
+    hitPathLevelsFromLegacy,
+    legacyHitPathCollectionsFromLevels,
+    type HitPathLevels
 } from "./hit-path-levels.js";
 export type { Context } from "./scoped-syntax.js";
 export {
@@ -427,6 +434,197 @@ type State = {
     time?: number;
 }
 
+export type CoreHitPathConstructorMetadata = {
+    name: string;
+    argumentTypes: AST[];
+    argumentNames?: string[];
+    left: AST;
+    right: AST;
+    computationName?: string;
+};
+
+export type CoreHitTwoPathConstructorMetadata = {
+    name: string;
+    argumentTypes: AST[];
+    argumentNames?: string[];
+    left: AST;
+    right: AST;
+    leftPath: string;
+    rightPath: string;
+    computationName?: string;
+    strongComputationName?: string;
+};
+
+export type CoreHitThreePathConstructorMetadata = {
+    name: string;
+    argumentTypes: AST[];
+    argumentNames?: string[];
+    left: AST;
+    right: AST;
+    leftTwoPath: string;
+    rightTwoPath: string;
+    sourcePath: AST;
+    targetPath: AST;
+    computationName?: string;
+    actionComputationName?: string;
+};
+
+export type CoreHitPathLevels = HitPathLevels<
+    CoreHitPathConstructorMetadata,
+    CoreHitTwoPathConstructorMetadata,
+    CoreHitThreePathConstructorMetadata
+>;
+
+export type CoreSystemInductiveMetadata = {
+    /** Version 2 distinguishes uniform parameters from family indices. */
+    version?: number;
+    /** Ordinary inductive data or a higher inductive type. */
+    kind?: "inductive" | "hit1" | "hit2" | "hit3";
+    /** Highest path dimension represented by this metadata. */
+    dimension?: number;
+    /** Canonical sandbox compute-rule schema validated by Core. */
+    ruleSchemaVersion?: 1;
+    typeName: string;
+    parameterCount?: number;
+    indexCount?: number;
+    indices?: readonly { name: string; type: AST }[];
+    eliminatorName: string;
+    /** Universe-polymorphic eliminator used when the motive is above U0. */
+    fullEliminatorName?: string;
+    recursorName?: string;
+    /** Universe-polymorphic recursor paired with `fullEliminatorName`. */
+    fullRecursorName?: string;
+    constructors: readonly {
+        name: string;
+        argumentTypes: AST[];
+        argumentNames?: string[];
+        recursiveArguments?: readonly {
+            index: number;
+            telescope: readonly { name: string; type: AST }[];
+            resultIndices: readonly AST[];
+        }[];
+        resultIndices?: AST[];
+    }[];
+    /** Canonical v6 path representation. Legacy v3-v5 arrays remain readable. */
+    pathLevels?: CoreHitPathLevels;
+    pathConstructors?: readonly CoreHitPathConstructorMetadata[];
+    twoPathConstructors?: readonly CoreHitTwoPathConstructorMetadata[];
+    threePathConstructors?: readonly CoreHitThreePathConstructorMetadata[];
+};
+
+function normalizeCoreSystemInductiveMetadata(
+    metadata: CoreSystemInductiveMetadata
+): CoreSystemInductiveMetadata {
+    const isHit = metadata.kind === "hit1"
+        || metadata.kind === "hit2"
+        || metadata.kind === "hit3";
+    if (!isHit) return metadata;
+
+    const version = Number(metadata.version ?? 0);
+    if (version <= 1) return metadata;
+    if (![3, 4, 5, 6].includes(version)) {
+        throw new Error(`不支持的 HIT metadata 版本：${version || "<空>"}`);
+    }
+    let sourceLevels: CoreHitPathLevels;
+    if (version === 6) {
+        if (!metadata.pathLevels) {
+            throw new Error(`HIT metadata v${version} 缺少 canonical pathLevels`);
+        }
+        if (metadata.pathConstructors !== undefined
+            || metadata.twoPathConstructors !== undefined
+            || metadata.threePathConstructors !== undefined) {
+            throw new Error("HIT metadata v6 不能同时携带 legacy 路径字段");
+        }
+        assertCanonicalHitPathLevels(metadata.pathLevels);
+        sourceLevels = metadata.pathLevels;
+    } else {
+        if (metadata.pathLevels !== undefined) {
+            throw new Error(`legacy HIT metadata v${version} 不能携带 pathLevels`);
+        }
+        sourceLevels = hitPathLevelsFromLegacy(metadata);
+        assertCanonicalHitPathLevels(sourceLevels);
+    }
+
+    const pathLevels = createHitPathLevels(
+        hitPathConstructorsAt(sourceLevels, 1),
+        hitPathConstructorsAt(sourceLevels, 2),
+        hitPathConstructorsAt(sourceLevels, 3)
+    );
+    const dimension = highestHitPathLevel(pathLevels);
+    const expectedKind = dimension === 3 ? "hit3" : dimension === 2 ? "hit2" : "hit1";
+    if (metadata.dimension !== dimension || metadata.kind !== expectedKind) {
+        throw new Error(
+            `HIT metadata 摘要与 pathLevels 不一致：${metadata.kind ?? ""}/`
+            + `${metadata.dimension ?? ""} != ${expectedKind}/${dimension}`
+        );
+    }
+    if (version < 6 && version !== dimension + 2) {
+        throw new Error(`legacy HIT metadata v${version} 与维度 ${dimension} 不一致`);
+    }
+    const {
+        pathLevels: _pathLevels,
+        pathConstructors: _pathConstructors,
+        twoPathConstructors: _twoPathConstructors,
+        threePathConstructors: _threePathConstructors,
+        ...common
+    } = metadata;
+    return {
+        ...common,
+        version: 6,
+        kind: expectedKind,
+        dimension,
+        pathLevels,
+    };
+}
+
+export function cloneCoreHitPathMetadata(metadata: CoreSystemInductiveMetadata) {
+    const canonical = normalizeCoreSystemInductiveMetadata(metadata);
+    const sourceLevels = hitPathLevelsFromCanonicalOrLegacy(canonical);
+    const pathLevels: CoreHitPathLevels = createHitPathLevels(
+        hitPathConstructorsAt(sourceLevels, 1).map(ctor => ({
+            name: ctor.name,
+            argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+            argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
+            left: Core.clone(ctor.left),
+            right: Core.clone(ctor.right),
+            computationName: ctor.computationName
+        })),
+        hitPathConstructorsAt(sourceLevels, 2).map(ctor => ({
+            name: ctor.name,
+            argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+            argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
+            left: Core.clone(ctor.left),
+            right: Core.clone(ctor.right),
+            leftPath: ctor.leftPath,
+            rightPath: ctor.rightPath,
+            computationName: ctor.computationName,
+            strongComputationName: ctor.strongComputationName
+        })),
+        hitPathConstructorsAt(sourceLevels, 3).map(ctor => ({
+            name: ctor.name,
+            argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+            argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
+            left: Core.clone(ctor.left),
+            right: Core.clone(ctor.right),
+            leftTwoPath: ctor.leftTwoPath,
+            rightTwoPath: ctor.rightTwoPath,
+            sourcePath: Core.clone(ctor.sourcePath),
+            targetPath: Core.clone(ctor.targetPath),
+            computationName: ctor.computationName,
+            actionComputationName: ctor.actionComputationName
+        }))
+    );
+    if (canonical.version === 1) {
+        const legacy = legacyHitPathCollectionsFromLevels(pathLevels);
+        return {
+            pathConstructors: [...legacy.pathConstructors],
+            twoPathConstructors: [...legacy.twoPathConstructors],
+            threePathConstructors: [...legacy.threePathConstructors]
+        };
+    }
+    return { pathLevels };
+}
+
 /** A body-less system entry installed as one trusted unit.  Sandbox ordinary
  * inductive declarations lower to these entries before they reach the Core;
  * keeping the bundle shape here avoids teaching the checker about UI state. */
@@ -446,75 +644,7 @@ export type CoreSystemInductiveBundle = {
     /** Iota rules keyed by their head constant (`ind_tri`, for example). */
     computeRules?: Readonly<Record<string, readonly { pattern: AST[]; result: AST }[]>>;
     /** Metadata consumed by proof-assistant destruct/induction helpers. */
-    metadata?: {
-        /** Version 2 distinguishes uniform parameters from family indices. */
-        version?: number;
-        /** Ordinary inductive data or a higher inductive type. */
-        kind?: "inductive" | "hit1" | "hit2" | "hit3";
-        /** Highest path dimension represented by this metadata. */
-        dimension?: number;
-        /** Canonical sandbox compute-rule schema validated by Core. */
-        ruleSchemaVersion?: 1;
-        typeName: string;
-        parameterCount?: number;
-        indexCount?: number;
-        indices?: readonly { name: string; type: AST }[];
-        eliminatorName: string;
-        /** Universe-polymorphic eliminator used when the motive is above U0. */
-        fullEliminatorName?: string;
-        recursorName?: string;
-        /** Universe-polymorphic recursor paired with `fullEliminatorName`. */
-        fullRecursorName?: string;
-        constructors: readonly {
-            name: string;
-            argumentTypes: AST[];
-            argumentNames?: string[];
-            recursiveArguments?: readonly {
-                index: number;
-                telescope: readonly { name: string; type: AST }[];
-                resultIndices: readonly AST[];
-            }[];
-            resultIndices?: AST[];
-        }[];
-        /**
-         * Path constructors are eliminator coherence data, not point/data
-         * constructors. Their constants are installed separately (normally as
-         * auxiliary types), and this metadata never creates definitional
-         * compute rules for them.
-         */
-        pathConstructors?: readonly {
-            name: string;
-            argumentTypes: AST[];
-            argumentNames?: string[];
-            left: AST;
-            right: AST;
-            computationName?: string;
-        }[];
-        twoPathConstructors?: readonly {
-            name: string;
-            argumentTypes: AST[];
-            argumentNames?: string[];
-            left: AST;
-            right: AST;
-            leftPath: string;
-            rightPath: string;
-            computationName?: string;
-            strongComputationName?: string;
-        }[];
-        threePathConstructors?: readonly {
-            name: string;
-            argumentTypes: AST[];
-            argumentNames?: string[];
-            left: AST;
-            right: AST;
-            leftTwoPath: string;
-            rightTwoPath: string;
-            sourcePath: AST;
-            targetPath: AST;
-            computationName?: string;
-            actionComputationName?: string;
-        }[];
-    };
+    metadata?: CoreSystemInductiveMetadata;
 }
 
 type RegisteredInductiveMetadata = NonNullable<CoreSystemInductiveBundle["metadata"]> & {
@@ -712,7 +842,7 @@ function validateSystemInductiveComputeRules(
         const metadata = bundle.metadata!;
         const constructorCount = metadata.constructors.length;
         const coherenceCount = hitPathConstructorCount(
-            hitPathLevelsFromLegacy(metadata)
+            hitPathLevelsFromCanonicalOrLegacy(metadata)
         );
         for (const constructor of metadata.constructors) {
             if (!Array.isArray(constructor.argumentNames)
@@ -1465,7 +1595,7 @@ export class Core {
             metadata.constructors.map(constructor => [constructor.name, constructor] as const)
         );
         const coherenceCount = hitPathConstructorCount(
-            hitPathLevelsFromLegacy(metadata)
+            hitPathLevelsFromCanonicalOrLegacy(metadata)
         );
         let captureSequence = 0;
 
@@ -1612,6 +1742,24 @@ export class Core {
         if (!bundle?.type?.[0] || !bundle.type[1]) {
             throw new Error("归纳类型 bundle 缺少类型条目");
         }
+        const runtimeMetadataKind = bundle.metadata?.kind as string | undefined;
+        const runtimeMetadataDimension = Number(bundle.metadata?.dimension ?? 0);
+        if (runtimeMetadataDimension > 3 || runtimeMetadataKind === "hit4") {
+            throw new Error(
+                `Core 最高只支持三维 HIT：${runtimeMetadataKind ?? "HIT"}`
+                + `${runtimeMetadataDimension ? `/${runtimeMetadataDimension}` : ""}`
+            );
+        }
+        if (runtimeMetadataKind !== undefined
+            && !["inductive", "hit1", "hit2", "hit3"].includes(runtimeMetadataKind)) {
+            throw new Error(`不支持的归纳类型 metadata kind：${runtimeMetadataKind}`);
+        }
+        if (bundle.metadata) {
+            bundle = {
+                ...bundle,
+                metadata: normalizeCoreSystemInductiveMetadata(bundle.metadata)
+            };
+        }
         const entries: (readonly [string, AST])[] = [
             bundle.type,
             ...(bundle.auxiliaryTypes ?? []),
@@ -1638,20 +1786,18 @@ export class Core {
                 `归纳类型 metadata 名称与 bundle 不一致：${bundle.metadata.typeName} != ${bundle.type[0]}`
             );
         }
-        const runtimeMetadataKind = bundle.metadata?.kind as string | undefined;
-        const runtimeMetadataDimension = Number(bundle.metadata?.dimension ?? 0);
-        if (runtimeMetadataDimension > 3 || runtimeMetadataKind === "hit4") {
-            throw new Error(
-                `Core 最高只支持三维 HIT：${runtimeMetadataKind ?? "HIT"}`
-                + `${runtimeMetadataDimension ? `/${runtimeMetadataDimension}` : ""}`
-            );
-        }
-        if (runtimeMetadataKind !== undefined
-            && !["inductive", "hit1", "hit2", "hit3"].includes(runtimeMetadataKind)) {
-            throw new Error(`不支持的归纳类型 metadata kind：${runtimeMetadataKind}`);
-        }
         const metadataVersion = Number(bundle.metadata?.version);
-        if ([2, 3, 4, 5].includes(metadataVersion)
+        if (Number.isFinite(metadataVersion) && metadataVersion > 0
+            && ![1, 2, 3, 4, 5, 6].includes(metadataVersion)) {
+            throw new Error(`不支持的归纳 metadata 版本：${metadataVersion}`);
+        }
+        const metadataPathLevels: CoreHitPathLevels = bundle.metadata
+            ? hitPathLevelsFromCanonicalOrLegacy(bundle.metadata)
+            : createHitPathLevels([], [], []);
+        const metadataPathEntries = hitPathConstructorsAt(metadataPathLevels, 1);
+        const metadataTwoPathEntries = hitPathConstructorsAt(metadataPathLevels, 2);
+        const metadataThreePathEntries = hitPathConstructorsAt(metadataPathLevels, 3);
+        if ([2, 3, 4, 5, 6].includes(metadataVersion)
             && bundle.metadata?.ruleSchemaVersion !== 1) {
             throw new Error(`沙盒归纳 metadata v${metadataVersion} 必须使用计算规则 schema v1`);
         }
@@ -1675,18 +1821,18 @@ export class Core {
                 throw new Error("计算规则 schema 的消去器槽位与 bundle 不一致");
             }
             const expectedAuxiliaryNames = [
-                ...(metadata.pathConstructors ?? []).map(path => path.name),
-                ...(metadata.twoPathConstructors ?? []).map(path => path.name),
-                ...(metadata.threePathConstructors ?? []).map(path => path.name),
+                ...metadataPathEntries.map(path => path.name),
+                ...metadataTwoPathEntries.map(path => path.name),
+                ...metadataThreePathEntries.map(path => path.name),
                 metadata.fullEliminatorName,
                 metadata.fullRecursorName,
-                ...(metadata.pathConstructors ?? []).flatMap(path => [
+                ...metadataPathEntries.flatMap(path => [
                     `apd_${path.name}`,
                     `@apd_${path.name}`,
                     `ap_${path.name}`,
                     `@ap_${path.name}`
                 ]),
-                ...(metadata.twoPathConstructors ?? []).flatMap(path => [
+                ...metadataTwoPathEntries.flatMap(path => [
                     `apd_${path.name}`,
                     `@apd_${path.name}`,
                     `ap_${path.name}`,
@@ -1694,7 +1840,7 @@ export class Core {
                     `ap2_${path.name}`,
                     `@ap2_${path.name}`
                 ]),
-                ...(metadata.threePathConstructors ?? []).flatMap(path => [
+                ...metadataThreePathEntries.flatMap(path => [
                     `apd3_${path.name}`,
                     `@apd3_${path.name}`,
                     `ap3_${path.name}`,
@@ -1719,7 +1865,7 @@ export class Core {
             ...metadataPointConstructorNames
         ]);
         const pathConstructorNames = new Set<string>();
-        for (const path of bundle.metadata?.pathConstructors ?? []) {
+        for (const path of metadataPathEntries) {
             if (!path.name || pathConstructorNames.has(path.name)) {
                 throw new Error(`路径构造子 metadata 名称冲突：${path.name || ""}`);
             }
@@ -1729,7 +1875,7 @@ export class Core {
             pathConstructorNames.add(path.name);
         }
         const twoPathConstructorNames = new Set<string>();
-        for (const path of bundle.metadata?.twoPathConstructors ?? []) {
+        for (const path of metadataTwoPathEntries) {
             if (!path.name || twoPathConstructorNames.has(path.name)) {
                 throw new Error(`二阶路径构造子 metadata 名称冲突：${path.name || ""}`);
             }
@@ -1739,7 +1885,7 @@ export class Core {
             twoPathConstructorNames.add(path.name);
         }
         const threePathConstructorNames = new Set<string>();
-        for (const path of bundle.metadata?.threePathConstructors ?? []) {
+        for (const path of metadataThreePathEntries) {
             if (!path.name || threePathConstructorNames.has(path.name)) {
                 throw new Error(`三阶路径构造子 metadata 名称冲突：${path.name || ""}`);
             }
@@ -1759,23 +1905,27 @@ export class Core {
             if (bundle.metadata.dimension !== hitDimension) {
                 throw new Error(`HIT metadata 维度必须为 ${hitDimension}：${bundle.metadata.dimension ?? ""}`);
             }
-            if (!bundle.metadata.pathConstructors?.length) {
+            const pathLevelDimension = highestHitPathLevel(metadataPathLevels);
+            if (pathLevelDimension !== hitDimension) {
+                throw new Error(
+                    `HIT pathLevels 最高维度必须为 ${hitDimension}：${pathLevelDimension}`
+                );
+            }
+            if (!metadataPathEntries.length) {
                 throw new Error("HIT metadata 至少需要一个一阶路径构造子");
             }
-            if (bundle.metadata.kind === "hit2" && !bundle.metadata.twoPathConstructors?.length) {
+            if (bundle.metadata.kind === "hit2" && !metadataTwoPathEntries.length) {
                 throw new Error("二维 HIT metadata 至少需要一个二阶路径构造子");
             }
             if (bundle.metadata.kind === "hit3"
-                && (!bundle.metadata.twoPathConstructors?.length
-                    || !bundle.metadata.threePathConstructors?.length)) {
+                && (!metadataTwoPathEntries.length || !metadataThreePathEntries.length)) {
                 throw new Error("三维 HIT metadata 至少需要二阶和三阶路径构造子");
             }
             if (bundle.metadata.kind === "hit1"
-                && (bundle.metadata.twoPathConstructors?.length
-                    || bundle.metadata.threePathConstructors?.length)) {
+                && (metadataTwoPathEntries.length || metadataThreePathEntries.length)) {
                 throw new Error("一阶 HIT metadata 不能包含高阶路径构造子");
             }
-            if (bundle.metadata.kind === "hit2" && bundle.metadata.threePathConstructors?.length) {
+            if (bundle.metadata.kind === "hit2" && metadataThreePathEntries.length) {
                 throw new Error("二维 HIT metadata 不能包含三阶路径构造子");
             }
             if (bundlePointConstructorNames.length !== metadataPointConstructorNames.length
@@ -1817,7 +1967,9 @@ export class Core {
                 };
             });
         }
-        for (const path of flattenHitPathLevels(hitPathLevelsFromLegacy(bundle.metadata ?? {}))) {
+        for (const path of flattenHitPathLevels(
+            hitPathLevelsFromCanonicalOrLegacy(bundle.metadata ?? {})
+        )) {
             for (const head of new Set([
                 path.name,
                 path.computationName,
@@ -1948,7 +2100,7 @@ export class Core {
                 }
             }
 
-            for (const path of metadata.pathConstructors ?? []) {
+            for (const path of metadataPathEntries) {
                 if (metadata.ruleSchemaVersion === 1
                     && (!Array.isArray(path.argumentNames)
                         || path.argumentNames.length !== path.argumentTypes.length
@@ -1997,10 +2149,10 @@ export class Core {
             }
 
             const pathMetadataByName = new Map(
-                (metadata.pathConstructors ?? []).map(path => [path.name, path] as const)
+                metadataPathEntries.map(path => [path.name, path] as const)
             );
             const twoPathMetadataByName = new Map(
-                (metadata.twoPathConstructors ?? []).map(path => [path.name, path] as const)
+                metadataTwoPathEntries.map(path => [path.name, path] as const)
             );
             const validateTwoPathEndpoint = (
                 owner: string,
@@ -2065,7 +2217,7 @@ export class Core {
                 };
             };
 
-            for (const path of metadata.twoPathConstructors ?? []) {
+            for (const path of metadataTwoPathEntries) {
                 if (metadata.ruleSchemaVersion === 1
                     && (!Array.isArray(path.argumentNames)
                         || path.argumentNames.length !== path.argumentTypes.length
@@ -2196,7 +2348,7 @@ export class Core {
                 return { sourcePath, targetPath };
             };
 
-            for (const path of metadata.threePathConstructors ?? []) {
+            for (const path of metadataThreePathEntries) {
                 if (!Array.isArray(path.argumentNames)
                     || path.argumentNames.length !== path.argumentTypes.length
                     || new Set(path.argumentNames).size !== path.argumentNames.length) {
@@ -2261,7 +2413,7 @@ export class Core {
                 }
             }
 
-            if (metadata.twoPathConstructors?.length) {
+            if (metadataTwoPathEntries.length) {
                 const readRecursorTelescope = (source: AST, label: string) => {
                     const binders: { name: string; type: AST }[] = [];
                     let cursor = source;
@@ -2306,7 +2458,7 @@ export class Core {
                     return result;
                 };
                 const validateStrongTwoPathComputation = (
-                    path: NonNullable<typeof metadata.twoPathConstructors>[number],
+                    path: CoreHitTwoPathConstructorMetadata,
                     full: boolean
                 ) => {
                     const recursorName = full ? metadata.fullRecursorName : metadata.recursorName;
@@ -2323,9 +2475,9 @@ export class Core {
                     const recursorBinders = readRecursorTelescope(
                         recursorType, full ? "完整递归器" : "公开递归器"
                     );
-                    const pathEntries = metadata.pathConstructors ?? [];
-                    const twoPathEntries = metadata.twoPathConstructors ?? [];
-                    const threePathEntries = metadata.threePathConstructors ?? [];
+                    const pathEntries = metadataPathEntries;
+                    const twoPathEntries = metadataTwoPathEntries;
+                    const threePathEntries = metadataThreePathEntries;
                     let offset = full ? 1 : 0;
                     offset += parameters.length;
                     const motiveName = recursorBinders[offset++].name;
@@ -2400,13 +2552,13 @@ export class Core {
                     }
                 };
 
-                for (const path of metadata.twoPathConstructors) {
+                for (const path of metadataTwoPathEntries) {
                     validateStrongTwoPathComputation(path, false);
                     validateStrongTwoPathComputation(path, true);
                 }
 
                 const validateThreePathActionComputation = (
-                    path: NonNullable<typeof metadata.threePathConstructors>[number],
+                    path: CoreHitThreePathConstructorMetadata,
                     full: boolean
                 ) => {
                     const recursorName = full ? metadata.fullRecursorName : metadata.recursorName;
@@ -2423,9 +2575,9 @@ export class Core {
                     const recursorBinders = readRecursorTelescope(
                         recursorType, full ? "完整递归器" : "公开递归器"
                     );
-                    const pathEntries = metadata.pathConstructors ?? [];
-                    const twoPathEntries = metadata.twoPathConstructors ?? [];
-                    const threePathEntries = metadata.threePathConstructors ?? [];
+                    const pathEntries = metadataPathEntries;
+                    const twoPathEntries = metadataTwoPathEntries;
+                    const threePathEntries = metadataThreePathEntries;
                     let offset = full ? 1 : 0;
                     offset += parameters.length;
                     const motiveName = recursorBinders[offset++].name;
@@ -2547,7 +2699,7 @@ export class Core {
                 };
 
                 const validateThreePathDependentComputation = (
-                    path: NonNullable<typeof metadata.threePathConstructors>[number],
+                    path: CoreHitThreePathConstructorMetadata,
                     full: boolean
                 ) => {
                     const eliminatorName = full
@@ -2568,9 +2720,9 @@ export class Core {
                         eliminatorType,
                         full ? "完整消去器" : "公开消去器"
                     );
-                    const pathEntries = metadata.pathConstructors ?? [];
-                    const twoPathEntries = metadata.twoPathConstructors ?? [];
-                    const threePathEntries = metadata.threePathConstructors ?? [];
+                    const pathEntries = metadataPathEntries;
+                    const twoPathEntries = metadataTwoPathEntries;
+                    const threePathEntries = metadataThreePathEntries;
                     let offset = full ? 1 : 0;
                     offset += parameters.length;
                     const motiveName = eliminatorBinders[offset++].name;
@@ -2869,7 +3021,7 @@ export class Core {
                     canonicallyCertifiedTypeFormations.add(computationName);
                 };
 
-                for (const path of metadata.threePathConstructors ?? []) {
+                for (const path of metadataThreePathEntries) {
                     validateThreePathDependentComputation(path, false);
                     validateThreePathDependentComputation(path, true);
                     validateThreePathActionComputation(path, false);
@@ -2958,9 +3110,9 @@ export class Core {
                     label: string
                 ) => {
                     const binders = readTelescope(source, label);
-                    const pathEntries = metadata.pathConstructors ?? [];
-                    const twoPathEntries = metadata.twoPathConstructors ?? [];
-                    const threePathEntries = metadata.threePathConstructors ?? [];
+                    const pathEntries = metadataPathEntries;
+                    const twoPathEntries = metadataTwoPathEntries;
+                    const threePathEntries = metadataThreePathEntries;
                     const expectedCount = (full ? 1 : 0)
                         + parameters.length
                         + 1
@@ -3129,7 +3281,7 @@ export class Core {
         const deferredComputationTypes = new Set<string>();
         if (strictRuleSchema) {
             for (const path of flattenHitPathLevels(
-                hitPathLevelsFromLegacy(bundle.metadata ?? {})
+                hitPathLevelsFromCanonicalOrLegacy(bundle.metadata ?? {})
             )) {
                 for (const name of [
                     path.computationName,
@@ -3209,6 +3361,12 @@ export class Core {
             throw error;
         }
         const registrationName = bundle.type[0];
+        const clonedHitPaths = bundle.metadata
+            && (bundle.metadata.kind === "hit1"
+                || bundle.metadata.kind === "hit2"
+                || bundle.metadata.kind === "hit3")
+            ? cloneCoreHitPathMetadata(bundle.metadata)
+            : undefined;
         const metadata = bundle.metadata
             ? {
                 version: bundle.metadata.version,
@@ -3238,38 +3396,7 @@ export class Core {
                     })),
                     resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
                 })),
-                pathConstructors: bundle.metadata.pathConstructors?.map(ctor => ({
-                    name: ctor.name,
-                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
-                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-                    left: Core.clone(ctor.left),
-                    right: Core.clone(ctor.right),
-                    computationName: ctor.computationName
-                })),
-                twoPathConstructors: bundle.metadata.twoPathConstructors?.map(ctor => ({
-                    name: ctor.name,
-                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
-                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-                    left: Core.clone(ctor.left),
-                    right: Core.clone(ctor.right),
-                    leftPath: ctor.leftPath,
-                    rightPath: ctor.rightPath,
-                    computationName: ctor.computationName,
-                    strongComputationName: ctor.strongComputationName
-                })),
-                threePathConstructors: bundle.metadata.threePathConstructors?.map(ctor => ({
-                    name: ctor.name,
-                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
-                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-                    left: Core.clone(ctor.left),
-                    right: Core.clone(ctor.right),
-                    leftTwoPath: ctor.leftTwoPath,
-                    rightTwoPath: ctor.rightTwoPath,
-                    sourcePath: Core.clone(ctor.sourcePath),
-                    targetPath: Core.clone(ctor.targetPath),
-                    computationName: ctor.computationName,
-                    actionComputationName: ctor.actionComputationName
-                }))
+                ...(clonedHitPaths ?? {})
             }
             : undefined;
         this.registeredSystemInductives.set(registrationName, {
@@ -3320,6 +3447,11 @@ export class Core {
     getInductiveMetadata(typeName: string) {
         const metadata = this.inductiveMetadata.get(typeName);
         if (!metadata) return undefined;
+        const clonedHitPaths = metadata.kind === "hit1"
+            || metadata.kind === "hit2"
+            || metadata.kind === "hit3"
+            ? cloneCoreHitPathMetadata(metadata)
+            : undefined;
         return {
             version: metadata.version,
             kind: metadata.kind,
@@ -3354,38 +3486,7 @@ export class Core {
                 })),
                 resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
             })),
-            pathConstructors: metadata.pathConstructors?.map(ctor => ({
-                name: ctor.name,
-                argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
-                argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-                left: Core.clone(ctor.left),
-                right: Core.clone(ctor.right),
-                computationName: ctor.computationName
-            })),
-            twoPathConstructors: metadata.twoPathConstructors?.map(ctor => ({
-                name: ctor.name,
-                argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
-                argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-                left: Core.clone(ctor.left),
-                right: Core.clone(ctor.right),
-                leftPath: ctor.leftPath,
-                rightPath: ctor.rightPath,
-                computationName: ctor.computationName,
-                strongComputationName: ctor.strongComputationName
-            })),
-            threePathConstructors: metadata.threePathConstructors?.map(ctor => ({
-                name: ctor.name,
-                argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
-                argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-                left: Core.clone(ctor.left),
-                right: Core.clone(ctor.right),
-                leftTwoPath: ctor.leftTwoPath,
-                rightTwoPath: ctor.rightTwoPath,
-                sourcePath: Core.clone(ctor.sourcePath),
-                targetPath: Core.clone(ctor.targetPath),
-                computationName: ctor.computationName,
-                actionComputationName: ctor.actionComputationName
-            }))
+            ...(clonedHitPaths ?? {})
         };
     }
     isRegisteredInductiveType(typeName: string) {

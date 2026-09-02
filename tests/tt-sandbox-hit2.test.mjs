@@ -61,11 +61,12 @@ assert.throws(
 );
 
 const bundle = lowerSandboxHit(parsed);
-assert.equal(bundle.metadata.version, 4);
+assert.equal(bundle.metadata.version, 6);
 assert.equal(bundle.metadata.kind, "hit2");
 assert.equal(bundle.metadata.dimension, 2);
 assert.equal(bundle.metadata.typeName, "SurfaceX");
-assert.deepEqual(bundle.metadata.twoPathConstructors.map(path => ({
+const twoPathMetadata = bundle.metadata.pathLevels[1].constructors;
+assert.deepEqual(twoPathMetadata.map(path => ({
     name: path.name,
     leftPath: path.leftPath,
     rightPath: path.rightPath,
@@ -78,9 +79,10 @@ assert.deepEqual(bundle.metadata.twoPathConstructors.map(path => ({
     computationName: "apd_squareX",
     strongComputationName: "ap2_squareX"
 }]);
-assert.deepEqual(bundle.metadata.twoPathConstructors[0].argumentTypes, []);
-assert.equal(bundle.metadata.twoPathConstructors[0].left.name, "loopAX");
-assert.equal(bundle.metadata.twoPathConstructors[0].right.name, "loopBX");
+assert.deepEqual(twoPathMetadata[0].argumentTypes, []);
+assert.equal(twoPathMetadata[0].left.name, "loopAX");
+assert.equal(twoPathMetadata[0].right.name, "loopBX");
+assert.equal(bundle.metadata.twoPathConstructors, undefined);
 
 // The second path is propositional. It must expose computation theorem
 // slots, but must not be installed as an ordinary definitional rewrite head.
@@ -149,7 +151,10 @@ assert.deepEqual(bridge.order, [{ kind: "inductive", name: "SurfaceX" }]);
 assert.equal(bridge.inductives.length, 1);
 assert.equal(bridge.inductives[0].metadata.kind, "hit2");
 assert.equal(bridge.inductives[0].metadata.dimension, 2);
-assert.equal(bridge.inductives[0].metadata.twoPathConstructors[0].name, "squareX");
+assert.equal(
+    bridge.inductives[0].metadata.pathLevels[1].constructors[0].name,
+    "squareX"
+);
 
 // Save/load must preserve the declaration source, folder placement, and the
 // regenerated two-dimensional metadata rather than silently downgrading it.
@@ -158,6 +163,15 @@ assert.equal(encoded.version, 1);
 assert.deepEqual(encoded.order, [folder.id, declaration.id]);
 assert.equal(encoded.folders[0].open, true);
 assert.equal(encoded.declarations[0].folderId, folder.id);
+assert.equal("hit" in encoded.declarations[0], false);
+assert.equal("inductive" in encoded.declarations[0], false);
+assert.equal("generatedNames" in encoded.declarations[0], false);
+
+// Old v1 saves may contain stale derived structures. Source remains the only
+// authority, so loading must ignore these fields and regenerate v6 metadata.
+encoded.declarations[0].hit = { pathLevels: [{ level: 4, constructors: [] }] };
+encoded.declarations[0].inductive = { name: "stale" };
+encoded.declarations[0].generatedNames = ["staleGeneratedName"];
 
 const restored = new SandboxEnvironment({ systemRuleIds: creativeSandboxSystemRuleIds });
 restored.load(encoded);
@@ -168,6 +182,8 @@ assert.equal(restoredDeclaration.folderId, folder.id);
 assert.ok(restored.check("squareX : loopAX = loopBX").ok);
 assert.equal(restored.bridge().inductives[0].metadata.kind, "hit2");
 assert.equal(restored.bridge().inductives[0].metadata.dimension, 2);
+assert.equal(restored.bridge().inductives[0].metadata.version, 6);
+assert.equal(restored.bridge().inductives[0].metadata.pathLevels[1].constructors[0].name, "squareX");
 
 // Uniform parameters must be threaded through generated path-computation
 // theorems.  Before the regression fix, `C` was supplied where `A` was
@@ -180,7 +196,7 @@ const parameterizedSource = "hit SurfaceP (A : U) : U "
     + "| path2 squareP : Pz:A,loopAP z=loopBP z";
 const parameterized = lowerSandboxHit(parseSandboxHit(parameterizedSource));
 assert.equal(parameterized.metadata.parameterCount, 1);
-assert.equal(parameterized.metadata.twoPathConstructors[0].name, "squareP");
+assert.equal(parameterized.metadata.pathLevels[1].constructors[0].name, "squareP");
 const parameterizedSandbox = new SandboxEnvironment({
     systemRuleIds: creativeSandboxSystemRuleIds
 });

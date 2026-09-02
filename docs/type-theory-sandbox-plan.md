@@ -208,11 +208,12 @@ hit Circle2 : U
 
 - 二维 HIT 已完成结构解析、消去器 lowering、命题计算规则和 Core schema 认证。
 - 三维扩展第一批已支持 `path3` 的结构化解析：端点必须是直接的二阶路径构造子应用，统一参数、局部参数、共享一阶路径边界和点边界都会被检查；`path4` 及更高维仍明确拒绝。
-- 三维声明已生成真正的 dependent/recursor coherence binder、点 iota 参数和 metadata v5；Core 会重建并验证三阶端点、统一参数及共享低维边界。
+- 三维声明已生成真正的 dependent/recursor coherence binder 和点 iota 参数。HIT writer 使用 metadata v6：只传输连续的 `pathLevels`；Core 会把旧 v3-v5 metadata 一次性迁移为 v6，并重建验证三阶端点、统一参数及共享低维边界。
 - 二维非依赖 action 现已额外生成兼容的新强计算槽 `ap2_<path2>`：它把二阶 action 与经两端 `ap_<path1>` 校正后的用户 `q2` 关联；旧 `ap_<path2>` 类型保持不变。
 - 非依赖三阶 action 已生成 `ap3_<path3>`：它使用两端已认证的 `ap2_<path2>`、低维 `ap_<path1>` 和用户 `q3` 构造校正公式，并由 Core 独立重建类型。
 - 依赖三阶 `apd3_<path3>` 命题计算规则已开放：生成式通过 `hit_map_transport` 构造随二阶路径变化的 dependent correction naturality，Core 会从 metadata 和消去器 telescope 独立重建公开/完整类型后再使用局部资源额度检查。
 - 普通用户表达式仍使用全局 NbE 资源上限；只有已通过 Core canonical 重建的三维计算系统类型可以使用更高的调用级形成/输出额度。
+- 沙盒主存档只保存声明源码和工作区状态，不保存派生的 `hit`、`inductive`、`generatedNames` 或 `pathLevels`；Worker 每次从源码重新 lowering，validation cache 仅作为需经 Core 重认证的优化提示。
 
 ### 验收标准
 

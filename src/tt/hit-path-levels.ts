@@ -49,6 +49,16 @@ export function hitPathLevelsFromLegacy<Path1, Path2, Path3>(
     );
 }
 
+export function hitPathLevelsFromCanonicalOrLegacy<Path1, Path2, Path3>(
+    value: LegacyHitPathCollections<Path1, Path2, Path3> & {
+        readonly pathLevels?: HitPathLevels<Path1, Path2, Path3>;
+    }
+): HitPathLevels<Path1, Path2, Path3> {
+    const levels = value.pathLevels ?? hitPathLevelsFromLegacy(value);
+    assertCanonicalHitPathLevels(levels);
+    return levels as HitPathLevels<Path1, Path2, Path3>;
+}
+
 export function legacyHitPathCollectionsFromLevels<Path1, Path2, Path3>(
     levels: HitPathLevels<Path1, Path2, Path3>
 ): Required<LegacyHitPathCollections<Path1, Path2, Path3>> {

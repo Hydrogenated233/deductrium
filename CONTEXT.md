@@ -110,6 +110,9 @@ support through dimension 3. Internally, path constructors are organized as
 contiguous `pathLevels` so later experiments do not require another storage
 rewrite. Dimension 4 is limited to fixtures, preflight rejection, and resource
 boundaries; arbitrary-dimensional HIT support is not a project commitment.
+HIT metadata version 6 carries only this canonical `pathLevels` structure.
+Legacy versions 3 through 5 are normalized once at the Core boundary; sandbox
+saves retain source declarations rather than persisting derived metadata.
 
 ## Type-theory Proof Pages / 类型论证明页
 
