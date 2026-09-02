@@ -1345,7 +1345,9 @@ export class Core {
                     `apd_${path.name}`,
                     `@apd_${path.name}`,
                     `ap_${path.name}`,
-                    `@ap_${path.name}`
+                    `@ap_${path.name}`,
+                    `ap2_${path.name}`,
+                    `@ap2_${path.name}`
                 ])
             ];
             if (expectedAuxiliaryNames.some(name => !name)
@@ -1470,7 +1472,9 @@ export class Core {
                 `apd_${path.name}`,
                 `@apd_${path.name}`,
                 `ap_${path.name}`,
-                `@ap_${path.name}`
+                `@ap_${path.name}`,
+                `ap2_${path.name}`,
+                `@ap2_${path.name}`
             ])) {
                 if (head && normalizedRules[head]?.length) {
                     throw new Error(`路径构造子不能注册为定义计算规则：${head}`);
@@ -1678,10 +1682,15 @@ export class Core {
                     `apd_${path.name}`,
                     `@apd_${path.name}`,
                     `ap_${path.name}`,
-                    `@ap_${path.name}`
+                    `@ap_${path.name}`,
+                    `ap2_${path.name}`,
+                    `@ap2_${path.name}`
                 ];
                 if (path.computationName !== computationNames[0]) {
                     throw new Error(`二维 HIT metadata 计算定理不存在：${path.computationName ?? ""}`);
+                }
+                if (path.strongComputationName !== computationNames[4]) {
+                    throw new Error(`二维 HIT metadata 强计算定理不存在：${path.strongComputationName ?? ""}`);
                 }
                 for (const computationName of computationNames) {
                     const computationType = auxiliaryTypes.get(computationName);
@@ -1777,6 +1786,113 @@ export class Core {
                 if (!sameGeneratedAstAlpha(leftEndpoint.sourcePath, normalizedMetadataAst(path.sourcePath))
                     || !sameGeneratedAstAlpha(leftEndpoint.targetPath, normalizedMetadataAst(path.targetPath))) {
                     throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 的边界 metadata 不一致`);
+                }
+            }
+            if (metadata.twoPathConstructors?.length) {
+                const readRecursorTelescope = (source, label) => {
+                    const binders = [];
+                    let cursor = source;
+                    while ((cursor.type === "P" || cursor.type === "->")
+                        && cursor.nodes?.[0] && cursor.nodes?.[1]) {
+                        binders.push({
+                            name: cursor.type === "P" ? cursor.name : "",
+                            type: Core.clone(cursor.nodes[0])
+                        });
+                        cursor = cursor.nodes[1];
+                    }
+                    if (!binders.length)
+                        throw new Error(`${label} telescope 不完整`);
+                    return binders;
+                };
+                const strongEquality = (left, right) => ({
+                    type: "=",
+                    name: "",
+                    nodes: [left, right]
+                });
+                const strongCompose = (left, right) => ({
+                    type: "*",
+                    name: "",
+                    nodes: [left, right]
+                });
+                const strongWrapPis = (binders, body) => {
+                    let result = body;
+                    for (let index = binders.length - 1; index >= 0; index--) {
+                        result = {
+                            type: "P",
+                            name: binders[index].name,
+                            nodes: [Core.clone(binders[index].type), result]
+                        };
+                    }
+                    return result;
+                };
+                const validateStrongTwoPathComputation = (path, full) => {
+                    const recursorName = full ? metadata.fullRecursorName : metadata.recursorName;
+                    const recursorType = full
+                        ? (metadata.fullRecursorName
+                            ? auxiliaryTypes.get(metadata.fullRecursorName)
+                            : undefined)
+                        : bundle.recursor?.[1] && normalizedMetadataAst(bundle.recursor[1]);
+                    const computationName = `${full ? "@" : ""}ap2_${path.name}`;
+                    const actualComputationType = auxiliaryTypes.get(computationName);
+                    if (!recursorName || !recursorType || !actualComputationType) {
+                        throw new Error(`二维 HIT 强计算定理槽位不存在：${computationName}`);
+                    }
+                    const recursorBinders = readRecursorTelescope(recursorType, full ? "完整递归器" : "公开递归器");
+                    const pathEntries = metadata.pathConstructors ?? [];
+                    const twoPathEntries = metadata.twoPathConstructors ?? [];
+                    const threePathEntries = metadata.threePathConstructors ?? [];
+                    let offset = full ? 1 : 0;
+                    offset += parameters.length;
+                    const motiveName = recursorBinders[offset++].name;
+                    offset += metadata.constructors.length;
+                    const pathMethodNames = recursorBinders
+                        .slice(offset, offset + pathEntries.length)
+                        .map(binder => binder.name);
+                    offset += pathEntries.length;
+                    const twoPathMethodNames = recursorBinders
+                        .slice(offset, offset + twoPathEntries.length)
+                        .map(binder => binder.name);
+                    offset += twoPathEntries.length;
+                    offset += threePathEntries.length;
+                    if (recursorBinders.length !== offset + 1) {
+                        throw new Error("二维 HIT 递归器 telescope 与高阶路径 metadata 不一致");
+                    }
+                    const prefixBinders = recursorBinders.slice(0, offset);
+                    const prefixValues = prefixBinders.map(binder => wrapVar(binder.name));
+                    const endpointComputation = (endpoint, label) => {
+                        const application = generatedApplicationParts(endpoint);
+                        const endpointName = generatedFreeConstantName(application.head) ?? "";
+                        const endpointIndex = pathEntries.findIndex(entry => entry.name === endpointName);
+                        if (endpointIndex < 0) {
+                            throw new Error(`${label} 引用了未知一阶路径：${endpointName}`);
+                        }
+                        return wrapApply(wrapVar(`${full ? "@" : ""}ap_${endpointName}`), ...prefixValues.map(value => Core.clone(value)), ...application.arguments.slice(parameters.length).map(argument => Core.clone(argument)));
+                    };
+                    const leftEndpoint = normalizedMetadataAst(path.left);
+                    const rightEndpoint = normalizedMetadataAst(path.right);
+                    validateTwoPathEndpoint(path.name, "强计算左", leftEndpoint, path.leftPath);
+                    const leftComputation = endpointComputation(leftEndpoint, computationName);
+                    const rightComputation = endpointComputation(rightEndpoint, computationName);
+                    const pathIndex = twoPathEntries.findIndex(entry => entry.name === path.name);
+                    const argumentNames = path.argumentNames ?? [];
+                    const argumentValues = argumentNames.map(wrapVar);
+                    const methodValue = wrapApply(wrapVar(twoPathMethodNames[pathIndex]), ...argumentValues.map(argument => Core.clone(argument)));
+                    const correctedMethod = strongCompose(strongCompose(leftComputation, methodValue), wrapApply(wrapVar("inveq"), rightComputation));
+                    const recursorHead = wrapApply(wrapVar(recursorName), ...prefixValues.map(value => Core.clone(value)));
+                    const pathTerm = wrapApply(wrapVar(path.name), ...parameters.map(parameter => wrapVar(parameter.name)), ...argumentValues.map(argument => Core.clone(argument)));
+                    const strongAction = wrapApply(wrapVar("hit_ap2"), recursorHead, pathTerm);
+                    const localBinders = argumentNames.map((name, index) => ({
+                        name,
+                        type: normalizedMetadataAst(path.argumentTypes[index])
+                    }));
+                    const expected = normalizedMetadataAst(strongWrapPis([...prefixBinders, ...localBinders], strongEquality(strongAction, correctedMethod)));
+                    if (!sameGeneratedAstAlpha(actualComputationType, expected)) {
+                        throw new Error(`二维 HIT 强计算定理 ${computationName} 与 metadata 不一致`);
+                    }
+                };
+                for (const path of metadata.twoPathConstructors) {
+                    validateStrongTwoPathComputation(path, false);
+                    validateStrongTwoPathComputation(path, true);
                 }
             }
             if (metadata.kind === "hit3") {
@@ -1953,7 +2069,9 @@ export class Core {
                     `apd_${path.name}`,
                     `@apd_${path.name}`,
                     `ap_${path.name}`,
-                    `@ap_${path.name}`
+                    `@ap_${path.name}`,
+                    `ap2_${path.name}`,
+                    `@ap2_${path.name}`
                 ]) {
                     if (name)
                         deferredComputationTypes.add(name);
@@ -2066,7 +2184,8 @@ export class Core {
                     right: Core.clone(ctor.right),
                     leftPath: ctor.leftPath,
                     rightPath: ctor.rightPath,
-                    computationName: ctor.computationName
+                    computationName: ctor.computationName,
+                    strongComputationName: ctor.strongComputationName
                 })),
                 threePathConstructors: bundle.metadata.threePathConstructors?.map(ctor => ({
                     name: ctor.name,
@@ -2180,7 +2299,8 @@ export class Core {
                 right: Core.clone(ctor.right),
                 leftPath: ctor.leftPath,
                 rightPath: ctor.rightPath,
-                computationName: ctor.computationName
+                computationName: ctor.computationName,
+                strongComputationName: ctor.strongComputationName
             })),
             threePathConstructors: metadata.threePathConstructors?.map(ctor => ({
                 name: ctor.name,

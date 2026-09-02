@@ -93,7 +93,8 @@ export function cloneInductiveBundle(bundle) {
                     right: Core.clone(ctor.right),
                     leftPath: ctor.leftPath,
                     rightPath: ctor.rightPath,
-                    computationName: ctor.computationName
+                    computationName: ctor.computationName,
+                    strongComputationName: ctor.strongComputationName
                 })),
                 threePathConstructors: bundle.metadata.threePathConstructors?.map(ctor => ({
                     name: ctor.name,
@@ -130,7 +131,9 @@ export function sandboxInductiveEntryPresentation(bundle, name, fallback) {
     if (paths.some(path => path.name === publicName)) {
         return { postfix: "构造", prefix, category: "constructor" };
     }
-    if (paths.some(path => path.computationName === publicName || `ap_${path.name}` === publicName)) {
+    if (paths.some(path => path.computationName === publicName
+        || `ap_${path.name}` === publicName
+        || ("strongComputationName" in path && path.strongComputationName === publicName))) {
         return { postfix: "计算", prefix, category: "compute" };
     }
     return { ...fallback, prefix };

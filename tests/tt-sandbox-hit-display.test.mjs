@@ -93,7 +93,8 @@ const hit2Bundle = {
             right: parse("loopSquareB"),
             leftPath: "loopSquareA",
             rightPath: "loopSquareB",
-            computationName: "apd_squarePath"
+            computationName: "apd_squarePath",
+            strongComputationName: "ap2_squarePath"
         }]
     }
 };
@@ -144,7 +145,9 @@ for (const name of ["squarePath", "@squarePath"]) {
         { postfix: "构造", prefix: "sandbox HIT", category: "constructor" }
     );
 }
-for (const name of ["apd_squarePath", "@apd_squarePath", "ap_squarePath", "@ap_squarePath"]) {
+for (const name of [
+    "apd_squarePath", "@apd_squarePath", "ap_squarePath", "@ap_squarePath", "ap2_squarePath"
+]) {
     assert.deepEqual(
         sandboxInductiveEntryPresentation(hit2Bundle, name, {
             postfix: "定义",
@@ -320,6 +323,7 @@ const indexHtml = await readFile(new URL("../index.html", import.meta.url), "utf
 assert.match(indexHtml, /hit Circle2 : U \| base2 : Circle2 \| loop2 : base2 = base2/);
 assert.match(indexHtml, /apd_loop2[\s\S]*ap_loop2/);
 assert.match(indexHtml, /path2[\s\S]*apd_squareS[\s\S]*ap_squareS/);
+assert.match(indexHtml, /ap2_squareS/);
 assert.match(indexHtml, /实验性三维 HIT[\s\S]*path3[\s\S]*三阶[\s\S]*apd_/);
 assert.match(indexHtml, /路径构造子的 <code>apd_<\/code>\/<code>ap_<\/code> 规则是需要显式使用的命题/);
 

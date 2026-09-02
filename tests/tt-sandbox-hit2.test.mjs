@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import { ASTParser } from "../js/tt/astparser.js";
+import { TTCoreEngine } from "../js/tt/engine.js";
 import {
     SandboxEnvironment,
     creativeSandboxSystemRuleIds,
@@ -68,12 +69,14 @@ assert.deepEqual(bundle.metadata.twoPathConstructors.map(path => ({
     name: path.name,
     leftPath: path.leftPath,
     rightPath: path.rightPath,
-    computationName: path.computationName
+    computationName: path.computationName,
+    strongComputationName: path.strongComputationName
 })), [{
     name: "squareX",
     leftPath: "loopAX",
     rightPath: "loopBX",
-    computationName: "apd_squareX"
+    computationName: "apd_squareX",
+    strongComputationName: "ap2_squareX"
 }]);
 assert.deepEqual(bundle.metadata.twoPathConstructors[0].argumentTypes, []);
 assert.equal(bundle.metadata.twoPathConstructors[0].left.name, "loopAX");
@@ -86,16 +89,41 @@ assert.equal(bundle.computeRules.apd_squareX, undefined);
 assert.equal(bundle.computeRules.ap_squareX, undefined);
 assert.equal(bundle.computeRules["@apd_squareX"], undefined);
 assert.equal(bundle.computeRules["@ap_squareX"], undefined);
+assert.equal(bundle.computeRules.ap2_squareX, undefined);
+assert.equal(bundle.computeRules["@ap2_squareX"], undefined);
 for (const name of [
     "squareX",
     "apd_squareX",
     "@apd_squareX",
     "ap_squareX",
-    "@ap_squareX"
+    "@ap_squareX",
+    "ap2_squareX",
+    "@ap2_squareX"
 ]) {
     assert.ok(bundle.auxiliaryTypes.some(([entryName]) => entryName === name),
         `二维 HIT must export ${name}`);
 }
+const strongActionType = parser.stringify(
+    bundle.auxiliaryTypes.find(([name]) => name === "ap2_squareX")[1]
+);
+assert.match(strongActionType, /ap_loopAX/);
+assert.match(strongActionType, /q2_0/);
+
+const forgedStrongAction = structuredClone(bundle);
+const originalTypes = new Map(forgedStrongAction.auxiliaryTypes);
+for (const [target, source] of [
+    ["ap2_squareX", "ap_squareX"],
+    ["@ap2_squareX", "@ap_squareX"]
+]) {
+    const index = forgedStrongAction.auxiliaryTypes.findIndex(([name]) => name === target);
+    forgedStrongAction.auxiliaryTypes[index] = [target, structuredClone(originalTypes.get(source))];
+}
+const forgedEngine = new TTCoreEngine();
+forgedEngine.configure({ unlockedTypes: creativeSandboxSystemRuleIds });
+assert.throws(
+    () => forgedEngine.core.registerSystemInductive(forgedStrongAction),
+    /强计算定理 ap2_squareX 与 metadata 不一致/
+);
 
 // Registration is the end-to-end acceptance check: it validates all generated
 // slots through the same Core path used by the creative sandbox.
@@ -113,6 +141,8 @@ assert.ok(sandbox.check("apd_squareX").ok);
 assert.ok(sandbox.check("@apd_squareX").ok);
 assert.ok(sandbox.check("ap_squareX").ok);
 assert.ok(sandbox.check("@ap_squareX").ok);
+assert.ok(sandbox.check("ap2_squareX").ok);
+assert.ok(sandbox.check("@ap2_squareX").ok);
 
 const bridge = sandbox.bridge();
 assert.deepEqual(bridge.order, [{ kind: "inductive", name: "SurfaceX" }]);

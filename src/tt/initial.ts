@@ -619,6 +619,9 @@ export function initTypeSystem() {
     addRule("@定义", "@ap3:=Lu:U@.Lv:U@.La:Uu.Lb:Uv.Lx:a.Ly:a.Lm:x=y.Ln:x=y.Lr:m=n.Ls:m=n.Lf:a->b.Lq:r=s.ap (Lt:m=n.ap (Lp:x=y.ap f p) t) q");
     addRule("@定义", "ap3:=@ap3 _ _ _ _ _ _ _ _ _ _");
     addRule("_定义", "ap3");
+    typeName = "eq.hit_ap2";
+    addRule("@定义", "@hit_ap2:=(Lu:U@.Lv:U@.La:Uu.Lb:Uv.Lx:a.Ly:a.Lp:x=y.Lq:x=y.Lf:a->b.Lr:p=q.ap (ap f) r):(Pu:U@,Pv:U@,Pa:Uu,Pb:Uv,Px:a,Py:a,Pp:x=y,Pq:x=y,Pf:a->b,Pr:p=q,(ap f p)=(ap f q))");
+    addRule("@定义", "hit_ap2:=@hit_ap2 _ _ _ _ _ _ _ _");
 
     typeName = "S2.ind";
     addRule("@解构", "@ind_S2: Pu:U@,PC:S2->Uu,Pcb:C base2,Pcs:refl cb=(trans2 C surf cb)*(refl cb),Px:S2,C x");
