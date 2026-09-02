@@ -115,6 +115,10 @@ Legacy versions 3 through 5 are normalized once at the Core boundary; sandbox
 saves retain source declarations rather than persisting derived metadata.
 The sandbox authoring model follows the same rule: `SandboxHitDeclaration`
 stores point constructors separately and has no parallel legacy path arrays.
+The browser sandbox applies finite declaration, source-character, syntax-node,
+validation-step, and time budgets. Source characters and unsupported path
+dimensions are inspected before AST construction; only dimensions 1 through 3
+can reach lowering or Core registration.
 
 ## Type-theory Proof Pages / 类型论证明页
 

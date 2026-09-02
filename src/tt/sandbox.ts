@@ -25,13 +25,13 @@ import {
 } from "./surface-syntax-migration.js";
 import { expandTypeTheoryAliasesInSurface } from "./symbol-aliases.js";
 import {
+    assertCanonicalHitPathLevels,
     createHitPathLevels,
     flattenHitPathLevels,
     highestHitPathLevel,
     hitPathConstructorsAt,
     hitPathLevelsFromCanonicalOrLegacy,
-    type HitPathLevels,
-    type LegacyHitPathCollections
+    type HitPathLevels
 } from "./hit-path-levels.js";
 
 const parser = new ASTParser();
@@ -86,6 +86,19 @@ export type SandboxSavedDeclaration = Omit<
     SandboxDeclaration,
     "inductive" | "hit" | "generatedNames"
 >;
+
+/** Persist only source-owned declaration state; parsed/lowered fields are rebuilt and re-certified. */
+export function toSandboxSavedDeclaration(
+    declaration: SandboxDeclaration
+): SandboxSavedDeclaration {
+    const {
+        inductive: _inductive,
+        hit: _hit,
+        generatedNames: _generatedNames,
+        ...saved
+    } = declaration;
+    return { ...saved, dependencies: [...saved.dependencies] };
+}
 
 export type SandboxFolder = {
     kind: "folder";
@@ -151,6 +164,8 @@ export type SandboxValidationStatus = "ok" | "invalid" | "cancelled" | "budget-e
 export type SandboxValidationBudget = {
     /** Maximum declarations accepted by one validation request. */
     maxDeclarations?: number;
+    /** Maximum total source characters, checked before constructing parser ASTs. */
+    maxSourceChars?: number;
     /** Maximum syntax AST nodes estimated from the complete declaration set. */
     maxNodes?: number;
     /** Maximum validation accounting steps (declarations plus syntax nodes). */
@@ -287,20 +302,19 @@ export type SandboxHitDeclaration = {
     pathLevels: SandboxHitPathLevels;
 };
 
-type SandboxHitPathSource = LegacyHitPathCollections<
-    SandboxHitPathConstructor,
-    SandboxHitTwoPathConstructor,
-    SandboxHitThreePathConstructor
-> & { pathLevels?: SandboxHitPathLevels };
+type SandboxHitPathSource =
+    | { pathLevels: SandboxHitPathLevels }
+    | {
+        pathLevels?: undefined;
+        pathConstructors: readonly SandboxHitPathConstructor[];
+        twoPathConstructors?: readonly SandboxHitTwoPathConstructor[];
+        threePathConstructors?: readonly SandboxHitThreePathConstructor[];
+    };
 
 export function sandboxHitPathLevels(
     signature: SandboxHitPathSource
 ): SandboxHitPathLevels {
     return hitPathLevelsFromCanonicalOrLegacy(signature);
-}
-
-function normalizeSandboxHitPathLevels(signature: SandboxHitDeclaration): SandboxHitDeclaration {
-    return { ...signature, pathLevels: sandboxHitPathLevels(signature) };
 }
 
 export type SandboxInductiveMetadata = {
@@ -389,10 +403,20 @@ export type SandboxEnvironmentOptions = {
     semanticResourceScale?: number;
     /** Per-request sandbox validation limits. */
     validationMaxDeclarations?: number;
+    validationMaxSourceChars?: number;
     validationMaxNodes?: number;
     validationMaxSteps?: number;
     validationTimeoutMs?: number;
 };
+
+/** Generous browser defaults that still bound malformed or accidentally enormous sandbox input. */
+export const browserSandboxValidationLimits = Object.freeze({
+    validationMaxDeclarations: 2_048,
+    validationMaxSourceChars: 1_000_000,
+    validationMaxNodes: 1_000_000,
+    validationMaxSteps: 1_250_000,
+    validationTimeoutMs: 120_000
+}) satisfies SandboxEnvironmentOptions;
 
 const sandboxTypeSystemRules = Object.freeze(initTypeSystem());
 const defaultSandboxSystemRuleIds = Object.freeze(
@@ -1299,6 +1323,14 @@ function elaborateHitThreePathEndpoint(
 /** Parse a parameterized, non-indexed higher inductive declaration. */
 export function parseSandboxHit(source: string): SandboxHitDeclaration {
     const text = normalizeSandboxSource(source);
+    const inspection = inspectSandboxHitSource(text);
+    if (inspection.firstUnsupportedPath) {
+        const unsupported = inspection.firstUnsupportedPath;
+        throw new Error(
+            `当前沙盒最高只解析三维 HIT：第 ${unsupported.sectionIndex} 个路径构造段`
+            + `（字符偏移 ${unsupported.offset}）不支持 path${unsupported.level}`
+        );
+    }
     const [rawHeader, ...rawConstructors] = splitInductiveSections(text);
     const header = new RegExp(String.raw`^hit\s+(${sandboxNamePattern})([\s\S]*)$`, "i")
         .exec(rawHeader);
@@ -1310,12 +1342,6 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
         .map(part => part.trim())
         .filter(Boolean)
         .map(raw => {
-            const unsupportedPath = /^path(\d+)\s+/i.exec(raw);
-            if (unsupportedPath && Number(unsupportedPath[1]) > 3) {
-                throw new Error(
-                    `当前沙盒最高只解析三维 HIT：不支持 ${unsupportedPath[0].trim()} 高阶路径构造子`
-                );
-            }
             const twoPath = /^path2\s+/i.test(raw);
             const threePath = /^path3\s+/i.test(raw);
             const normalized = twoPath || threePath
@@ -2523,7 +2549,7 @@ function sandboxRenameHitUniformParameters(
 
 /** Lower a HIT while keeping path computation propositional. */
 export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInductiveBundle {
-    signature = normalizeSandboxHitPathLevels(signature);
+    assertCanonicalHitPathLevels(signature.pathLevels);
     const inputPathConstructors = hitPathConstructorsAt(signature.pathLevels, 1);
     const inputTwoPathConstructors = hitPathConstructorsAt(signature.pathLevels, 2);
     const inputThreePathConstructors = hitPathConstructorsAt(signature.pathLevels, 3);
@@ -4167,12 +4193,50 @@ function parseSandboxStoredDeclaration(source: string): ParsedSandboxDeclaration
     }
 }
 
-export function createSandboxDeclaration(source: string, id: string): SandboxDeclaration {
+export function createSandboxDeclaration(
+    source: string,
+    id: string,
+    maxSourceChars?: number
+): SandboxDeclaration {
     // Keep the creation path consistent with the strict editor boundary.
     // The keyboard normally expands aliases on Space, but pasted text can
     // reach this API directly (and the GUI passes the original input after
     // validation).  Expand it here before the compatibility parser sees it.
-    const text = expandTypeTheoryAliasesInSurface(normalizeSandboxSource(source));
+    const rawSource = String(source ?? "");
+    const normalizedMaxSourceChars = normalizeSandboxLimit(maxSourceChars);
+    const rawLimitError = sandboxSourceLimitError(rawSource, normalizedMaxSourceChars);
+    if (rawLimitError) {
+        return {
+            id,
+            name: "",
+            kind: "term",
+            source: rawSource,
+            typeSource: "",
+            enabled: true,
+            trusted: true,
+            status: "unchecked",
+            error: rawLimitError,
+            dependencies: [],
+            folderId: null
+        };
+    }
+    const text = expandTypeTheoryAliasesInSurface(normalizeSandboxSource(rawSource));
+    const expandedLimitError = sandboxSourceLimitError(text, normalizedMaxSourceChars);
+    if (expandedLimitError) {
+        return {
+            id,
+            name: "",
+            kind: "term",
+            source: text,
+            typeSource: "",
+            enabled: true,
+            trusted: true,
+            status: "unchecked",
+            error: expandedLimitError,
+            dependencies: [],
+            folderId: null
+        };
+    }
     try {
         // New declarations use the Unicode surface parser so names such as
         // `SurfaceX` and `Pfoo` survive the compact parser's historical
@@ -4261,7 +4325,7 @@ function sandboxInductiveGeneratedNames(signature: SandboxInductiveDeclaration) 
 }
 
 function sandboxHitGeneratedNames(signature: SandboxHitDeclaration) {
-    const pathLevels = sandboxHitPathLevels(signature);
+    const pathLevels = signature.pathLevels;
     const pathConstructors = hitPathConstructorsAt(pathLevels, 1);
     const twoPathConstructors = hitPathConstructorsAt(pathLevels, 2);
     const threePathConstructors = hitPathConstructorsAt(pathLevels, 3);
@@ -4317,7 +4381,7 @@ function collectInductiveDependencies(signature: SandboxInductiveDeclaration) {
 }
 
 function collectHitDependencies(signature: SandboxHitDeclaration) {
-    const pathLevels = sandboxHitPathLevels(signature);
+    const pathLevels = signature.pathLevels;
     const own = new Set(sandboxHitGeneratedNames(signature));
     for (const parameter of signature.parameters) own.add(parameter.name);
     const names = new Set<string>();
@@ -4338,6 +4402,52 @@ function normalizeSandboxLimit(value: unknown): number | undefined {
     const numeric = Number(value);
     return Number.isFinite(numeric) && numeric >= 0
         ? Math.floor(numeric)
+        : undefined;
+}
+
+export type SandboxHitSourceInspection = {
+    sourceChars: number;
+    maxPathLevel: number;
+    firstUnsupportedPath?: {
+        level: number;
+        sectionIndex: number;
+        offset: number;
+    };
+};
+
+/** Linear preflight for resource and dimension checks; deliberately constructs no parser AST. */
+export function inspectSandboxHitSource(source: string): SandboxHitSourceInspection {
+    const text = String(source ?? "");
+    const pattern = /(?:^|\|)\s*path([0-9]+)\b/gi;
+    let maxPathLevel = 0;
+    let sectionIndex = 0;
+    let firstUnsupportedPath: SandboxHitSourceInspection["firstUnsupportedPath"];
+    for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+        sectionIndex++;
+        const level = Number(match[1]);
+        if (!Number.isSafeInteger(level)) continue;
+        maxPathLevel = Math.max(maxPathLevel, level);
+        if (level <= 3 || firstUnsupportedPath) continue;
+        const pathOffset = match[0].toLowerCase().lastIndexOf("path");
+        firstUnsupportedPath = {
+            level,
+            sectionIndex,
+            offset: match.index + Math.max(0, pathOffset)
+        };
+    }
+    return {
+        sourceChars: text.length,
+        maxPathLevel,
+        ...(firstUnsupportedPath ? { firstUnsupportedPath } : {})
+    };
+}
+
+export function sandboxSourceLimitError(source: string, maxSourceChars: number | undefined) {
+    const normalizedMaxSourceChars = normalizeSandboxLimit(maxSourceChars);
+    if (normalizedMaxSourceChars === undefined) return undefined;
+    const sourceChars = String(source ?? "").length;
+    return sourceChars > normalizedMaxSourceChars
+        ? `沙盒验证资源上限：源码字符 ${sourceChars} 超过 ${normalizedMaxSourceChars}`
         : undefined;
 }
 
@@ -4425,6 +4535,7 @@ export class SandboxEnvironment {
         );
         this.validationBudget = Object.freeze({
             maxDeclarations: normalizeSandboxLimit(options.validationMaxDeclarations),
+            maxSourceChars: normalizeSandboxLimit(options.validationMaxSourceChars),
             maxNodes: normalizeSandboxLimit(options.validationMaxNodes),
             maxSteps: normalizeSandboxLimit(options.validationMaxSteps),
             timeoutMs: normalizeSandboxLimit(options.validationTimeoutMs)
@@ -4462,7 +4573,11 @@ export class SandboxEnvironment {
         }
         const before = this.validationSignatures();
         const id = `sandbox-${this.nextId++}`;
-        const declaration = createSandboxDeclaration(source, id);
+        const declaration = createSandboxDeclaration(
+            source,
+            id,
+            this.validationBudget.maxSourceChars
+        );
         declaration.folderId = folderId;
         this.declarations.push(declaration);
         this.order.push(id);
@@ -4480,7 +4595,11 @@ export class SandboxEnvironment {
         if (index < 0) throw new Error(`找不到沙盒声明：${id}`);
         const declarationIndex = this.declarations.findIndex(declaration => declaration.id === id);
         const previous = this.declarations[declarationIndex];
-        const replacement = createSandboxDeclaration(source, id);
+        const replacement = createSandboxDeclaration(
+            source,
+            id,
+            this.validationBudget.maxSourceChars
+        );
         replacement.folderId = previous.folderId;
         replacement.enabled = previous.enabled;
         this.declarations[declarationIndex] = replacement;
@@ -4633,6 +4752,19 @@ export class SandboxEnvironment {
             .map(item => this.declarations.find(declaration => declaration.id === item.id))
             .filter((declaration): declaration is SandboxDeclaration => !!declaration);
         const budget = this.validationBudgetFor(options);
+        const sourceChars = orderedDeclarations.reduce(
+            (total, declaration) => total + declaration.source.length,
+            0
+        );
+        if (budget.maxSourceChars !== undefined && sourceChars > budget.maxSourceChars) {
+            return this.validationInterrupted(
+                "budget-exhausted",
+                started,
+                0,
+                0,
+                `沙盒验证资源上限：源码字符 ${sourceChars} 超过 ${budget.maxSourceChars}`
+            );
+        }
         const estimatedNodes = budget.maxNodes === undefined && budget.maxSteps === undefined
             ? 0
             : orderedDeclarations.reduce(
@@ -5073,15 +5205,7 @@ export class SandboxEnvironment {
         const validationCache = this.buildValidationCache();
         return {
             version: SANDBOX_SAVE_VERSION,
-            declarations: this.declarations.map(declaration => {
-                const {
-                    inductive: _inductive,
-                    hit: _hit,
-                    generatedNames: _generatedNames,
-                    ...saved
-                } = declaration;
-                return { ...saved, dependencies: [...saved.dependencies] };
-            }),
+            declarations: this.declarations.map(toSandboxSavedDeclaration),
             folders: snapshot
                 .filter((item): item is Extract<TheoremWorkspaceItem, { kind: "folder" }> => item.kind === "folder")
                 .map(folder => ({ ...folder })),
@@ -5096,6 +5220,25 @@ export class SandboxEnvironment {
 
     load(value: unknown, validationOptions: SandboxValidationOptions = {}) {
         const parsed = typeof value === "string" ? JSON.parse(value) : value;
+        const rawDeclarations = (parsed as { declarations?: unknown } | null)?.declarations;
+        const loadBudget = this.validationBudgetFor(validationOptions);
+        if (Array.isArray(rawDeclarations) && loadBudget.maxSourceChars !== undefined) {
+            const rawSourceChars = rawDeclarations.reduce((total, declaration) => {
+                const source = declaration && typeof declaration === "object"
+                    ? (declaration as { source?: unknown }).source
+                    : "";
+                return total + String(source ?? "").length;
+            }, 0);
+            if (rawSourceChars > loadBudget.maxSourceChars) {
+                return this.validationInterrupted(
+                    "budget-exhausted",
+                    performance.now(),
+                    0,
+                    0,
+                    `沙盒验证资源上限：源码字符 ${rawSourceChars} 超过 ${loadBudget.maxSourceChars}`
+                );
+            }
+        }
         const save = migrateLegacySandboxSave(parsed) as Partial<SandboxSave> & {
             declarations?: Array<Partial<SandboxDeclaration>>;
         };
@@ -5127,7 +5270,11 @@ export class SandboxEnvironment {
         const folderIds = new Set(this.folders.map(folder => folder.id));
         this.declarations = save.declarations.map((raw: Partial<SandboxDeclaration>, index: number) => {
             const source = String(raw.source ?? (raw.name && raw.typeSource ? `${raw.name} : ${raw.typeSource}` : ""));
-            const declaration = createSandboxDeclaration(source, String(raw.id || `sandbox-${index + 1}`));
+            const declaration = createSandboxDeclaration(
+                source,
+                String(raw.id || `sandbox-${index + 1}`),
+                this.validationBudget.maxSourceChars
+            );
             declaration.enabled = raw.enabled !== false;
             declaration.folderId = raw.folderId && folderIds.has(raw.folderId) ? raw.folderId : null;
             return declaration;
@@ -5661,6 +5808,9 @@ export class SandboxEnvironment {
         return {
             maxDeclarations: normalizeSandboxLimit(
                 options.maxDeclarations ?? this.validationBudget.maxDeclarations
+            ),
+            maxSourceChars: normalizeSandboxLimit(
+                options.maxSourceChars ?? this.validationBudget.maxSourceChars
             ),
             maxNodes: normalizeSandboxLimit(options.maxNodes ?? this.validationBudget.maxNodes),
             maxSteps: normalizeSandboxLimit(options.maxSteps ?? this.validationBudget.maxSteps),

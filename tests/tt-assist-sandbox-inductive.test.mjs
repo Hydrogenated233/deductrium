@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 
+import { ASTParser } from "../js/tt/astparser.js";
 import { TTAssistEngine } from "../js/tt/assist-engine.js";
 import {
     lowerSandboxInductive,
@@ -217,5 +218,30 @@ snapshot = cubeHitEngine.apply("intro x");
 snapshot = cubeHitEngine.apply("induction x");
 assert.equal(snapshot.goals.length, 6,
     "a 3-dimensional HIT induction must expose point, path, 2-path, and 3-path branches");
+
+const cubeEliminatorSource = new ASTParser().stringify(cubeHitBundle.eliminator[1]);
+snapshot = cubeHitEngine.start(cubeEliminatorSource, options);
+for (const command of [
+    "intro C",
+    "intro c0",
+    "intro p0",
+    "intro p1",
+    "intro p2_0",
+    "intro p2_1",
+    "intro p3_0",
+    "intro x",
+    "induction x",
+    "exact c0",
+    "exact p0",
+    "exact p1",
+    "exact p2_0",
+    "exact p2_1",
+    "exact p3_0"
+]) {
+    snapshot = cubeHitEngine.apply(command);
+}
+assert.equal(snapshot.goals.length, 0,
+    "the public 3-dimensional eliminator must be constructible end to end in the proof assistant");
+assert.match(cubeHitEngine.qed().proof, /ind_CubeAssist/);
 
 console.log("sandbox ordinary-inductive proof-assistant regression passed");

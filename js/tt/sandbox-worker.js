@@ -4,6 +4,7 @@ function optionsKey(options) {
         systemRuleIds: options?.systemRuleIds ?? null,
         semanticResourceScale: options?.semanticResourceScale ?? null,
         validationMaxDeclarations: options?.validationMaxDeclarations ?? null,
+        validationMaxSourceChars: options?.validationMaxSourceChars ?? null,
         validationMaxNodes: options?.validationMaxNodes ?? null,
         validationMaxSteps: options?.validationMaxSteps ?? null,
         validationTimeoutMs: options?.validationTimeoutMs ?? null

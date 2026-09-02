@@ -11,11 +11,14 @@ import {
     SandboxEnvironmentOptions,
     SandboxHitDeclaration,
     SandboxInductiveDeclaration,
+    browserSandboxValidationLimits,
     createSandboxDeclaration,
     parseSandboxDeclaration,
     parseSandboxDeclarationSurface,
     migrateLegacySandboxSave,
-    sandboxHitPathLevels
+    sandboxSourceLimitError,
+    sandboxHitPathLevels,
+    toSandboxSavedDeclaration
 } from "./sandbox.js";
 import {
     highestHitPathLevel,
@@ -61,6 +64,19 @@ export type SandboxBridgeChangeOptions = {
     /** Final publication revalidates the theorem workspace; provisional revocation does not. */
     revalidate?: boolean;
 };
+
+/** Apply the production browser guardrails while preserving explicit caller overrides. */
+export function sandboxBrowserEnvironmentOptions(
+    environmentOptions: SandboxEnvironmentOptions = {}
+): SandboxEnvironmentOptions {
+    return {
+        ...browserSandboxValidationLimits,
+        ...environmentOptions,
+        systemRuleIds: environmentOptions.systemRuleIds
+            ? [...environmentOptions.systemRuleIds]
+            : undefined
+    };
+}
 
 function sandboxStructuredDisplayDeclaration(declaration: SandboxDeclaration) {
     if (declaration.hit || declaration.inductive) {
@@ -284,12 +300,7 @@ export class TTSandboxGui {
     ) {
         this.onAxiomsChange = onAxiomsChange;
         this.renderAst = renderAst;
-        this.environmentOptions = {
-            ...environmentOptions,
-            systemRuleIds: environmentOptions.systemRuleIds
-                ? [...environmentOptions.systemRuleIds]
-                : undefined
-        };
+        this.environmentOptions = sandboxBrowserEnvironmentOptions(environmentOptions);
         this.worker = new SandboxWorkerClient(this.environmentOptions);
         this.root = root;
         this.list = root.querySelector("#sandbox-list") as HTMLElement;
@@ -370,6 +381,14 @@ export class TTSandboxGui {
     private addToFolder(folderId: string | null) {
         const source = this.input.value.trim();
         if (!source) return;
+        const sourceLimitError = sandboxSourceLimitError(
+            source,
+            this.environmentOptions?.validationMaxSourceChars
+        );
+        if (sourceLimitError) {
+            this.setStatus(sourceLimitError, true);
+            return;
+        }
         try {
             parseSandboxDeclarationSurface(source);
         } catch (error) {
@@ -385,7 +404,11 @@ export class TTSandboxGui {
             const match = declaration.id.match(/^sandbox-(\d+)$/);
             return match ? Math.max(max, Number(match[1])) : max;
         }, 0) + 1;
-        const declaration = createSandboxDeclaration(source, `sandbox-${next}`);
+        const declaration = createSandboxDeclaration(
+            source,
+            `sandbox-${next}`,
+            this.environmentOptions?.validationMaxSourceChars
+        );
         this.declarations.push(declaration);
         this.order.push(declaration.id);
         this.syncWorkspaceFromState();
@@ -671,6 +694,16 @@ export class TTSandboxGui {
         });
         const finishEdit = () => {
             if (source.value !== declaration.source) {
+                const sourceLimitError = sandboxSourceLimitError(
+                    source.value,
+                    this.environmentOptions?.validationMaxSourceChars
+                );
+                if (sourceLimitError) {
+                    this.setStatus(sourceLimitError, true);
+                    source.classList.remove("hide");
+                    display.classList.add("hide");
+                    return;
+                }
                 try {
                     parseSandboxDeclarationSurface(source.value.trim());
                 } catch (error) {
@@ -925,7 +958,11 @@ export class TTSandboxGui {
         const folderIds = new Set(this.folders.map(folder => folder.id));
         this.declarations = migrated.declarations.map((declaration, index) => {
             const source = declaration.source || `${declaration.name} : ${declaration.typeSource}`;
-            const restored = createSandboxDeclaration(source, declaration.id || `sandbox-${index + 1}`);
+            const restored = createSandboxDeclaration(
+                source,
+                declaration.id || `sandbox-${index + 1}`,
+                this.environmentOptions?.validationMaxSourceChars
+            );
             restored.enabled = declaration.enabled !== false;
             restored.folderId = declaration.folderId && folderIds.has(declaration.folderId)
                 ? declaration.folderId
@@ -952,7 +989,7 @@ export class TTSandboxGui {
     private toSave(): SandboxSave {
         return {
             version: SANDBOX_SAVE_VERSION,
-            declarations: this.declarations.map(declaration => ({ ...declaration, dependencies: [...declaration.dependencies] })),
+            declarations: this.declarations.map(toSandboxSavedDeclaration),
             folders: this.folders.map(folder => ({ ...folder })),
             order: [...this.order],
             ...(this.validationCache ? { validationCache: this.validationCache } : {})

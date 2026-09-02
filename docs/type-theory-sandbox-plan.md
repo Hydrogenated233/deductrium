@@ -204,7 +204,7 @@ hit Circle2 : U
 - 提供沙盒包导入、导出、复制、禁用和清空功能。
 - 对不同版本生成的沙盒包执行兼容性迁移或明确拒绝加载。
 
-### 当前实现状态（2026-09-02）
+### 当前实现状态（2026-09-03）
 
 - 二维 HIT 已完成结构解析、消去器 lowering、命题计算规则和 Core schema 认证。
 - 三维扩展第一批已支持 `path3` 的结构化解析：端点必须是直接的二阶路径构造子应用，统一参数、局部参数、共享一阶路径边界和点边界都会被检查；`path4` 及更高维仍明确拒绝。
@@ -213,7 +213,8 @@ hit Circle2 : U
 - 非依赖三阶 action 已生成 `ap3_<path3>`：它使用两端已认证的 `ap2_<path2>`、低维 `ap_<path1>` 和用户 `q3` 构造校正公式，并由 Core 独立重建类型。
 - 依赖三阶 `apd3_<path3>` 命题计算规则已开放：生成式通过 `hit_map_transport` 构造随二阶路径变化的 dependent correction naturality，Core 会从 metadata 和消去器 telescope 独立重建公开/完整类型后再使用局部资源额度检查。
 - 普通用户表达式仍使用全局 NbE 资源上限；只有已通过 Core canonical 重建的三维计算系统类型可以使用更高的调用级形成/输出额度。
-- 沙盒主存档只保存声明源码和工作区状态，不保存派生的 `hit`、`inductive`、`generatedNames` 或 `pathLevels`；Worker 每次从源码重新 lowering，validation cache 仅作为需经 Core 重认证的优化提示。
+- 浏览器沙盒现在默认启用声明数、源码字符、语法节点、验证步骤和时间预算；源码字符与 `path4` 位置在构造 AST 前线性预检，资源错误优先于后续 parser 诊断。
+- 沙盒环境和 GUI 主存档共用 source-only 投影，只保存声明源码和工作区状态，不保存派生的 `hit`、`inductive`、`generatedNames` 或 `pathLevels`；Worker 每次从源码重新 lowering，validation cache 仅作为需经 Core 重认证的优化提示。
 
 ### 验收标准
 

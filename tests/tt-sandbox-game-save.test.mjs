@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 
 import { GameSaveLoad } from "../js/saveload.js";
-import { SANDBOX_SAVE_VERSION } from "../js/tt/sandbox.js";
+import {
+    SandboxEnvironment,
+    SANDBOX_SAVE_VERSION,
+    creativeSandboxSystemRuleIds
+} from "../js/tt/sandbox.js";
+import { SandboxWorkerSession } from "../js/tt/sandbox-worker.js";
 
 const loader = Object.create(GameSaveLoad.prototype);
 const restored = [];
@@ -61,7 +66,8 @@ loader.restoreSandbox({ creative: false, sandboxGui }, JSON.stringify({
 assert.equal(restored.length, 3,
     "survival mode must ignore sandbox save data completely");
 
-const gui = Object.create((await import("../js/tt/sandbox-gui.js")).TTSandboxGui.prototype);
+const { TTSandboxGui } = await import("../js/tt/sandbox-gui.js");
+const gui = Object.create(TTSandboxGui.prototype);
 gui.declarations = [{
     id: "sandbox-1",
     name: "A",
@@ -82,6 +88,61 @@ assert.deepEqual(gui.serializeGameSave(), {
     folders: [],
     order: ["sandbox-1"]
 }, "the GUI must expose the same versioned snapshot used by standalone export");
+
+const hit3Source = "hit SaveCube3 : U "
+    + "| saveBase3 : SaveCube3 "
+    + "| saveLoopA3 : saveBase3 = saveBase3 "
+    + "| saveLoopB3 : saveBase3 = saveBase3 "
+    + "| path2 saveFaceA3 : saveLoopA3 = saveLoopB3 "
+    + "| path2 saveFaceB3 : saveLoopA3 = saveLoopB3 "
+    + "| path3 saveCell3 : saveFaceA3 = saveFaceB3";
+const hit3Options = { systemRuleIds: creativeSandboxSystemRuleIds };
+const hit3Environment = new SandboxEnvironment(hit3Options);
+const hit3Added = hit3Environment.add(hit3Source);
+assert.equal(hit3Added.ok, true, hit3Added.error);
+
+const hit3Gui = Object.create(TTSandboxGui.prototype);
+hit3Gui.declarations = hit3Environment.getDeclarations();
+hit3Gui.folders = [];
+hit3Gui.order = hit3Gui.declarations.map(declaration => declaration.id);
+hit3Gui.validationCache = undefined;
+const hit3Save = hit3Gui.serializeGameSave();
+const hit3SavedDeclaration = hit3Save.declarations[0];
+for (const derivedField of ["hit", "inductive", "generatedNames"]) {
+    assert.equal(Object.hasOwn(hit3SavedDeclaration, derivedField), false,
+        `creative game saves must not persist derived HIT field ${derivedField}`);
+}
+assert.equal(hit3SavedDeclaration.source, hit3Source,
+    "the source-only game save must retain the complete third-dimensional HIT declaration");
+
+const persistedHit3Save = JSON.parse(JSON.stringify(hit3Save));
+const hit3Worker = new SandboxWorkerSession();
+const hit3Restored = hit3Worker.handle({
+    id: 1,
+    kind: "load",
+    save: persistedHit3Save,
+    options: hit3Options
+});
+assert.equal(hit3Restored.ok, true, hit3Restored.error);
+const restoredHit3Bundle = hit3Restored.bridge?.inductives.find(bundle =>
+    bundle.metadata?.typeName === "SaveCube3"
+);
+assert.equal(restoredHit3Bundle?.metadata?.kind, "hit3",
+    "the Worker must lower and certify the source-only declaration back into a hit3 bridge");
+assert.equal(restoredHit3Bundle?.metadata?.dimension, 3);
+for (const [id, source] of [
+    [2, "apd3_saveCell3"],
+    [3, "ap3_saveCell3"]
+]) {
+    const checked = hit3Worker.handle({
+        id,
+        kind: "check",
+        source,
+        options: hit3Options
+    });
+    assert.equal(checked.ok, true,
+        `${source} must be regenerated from source after the creative game-save roundtrip`);
+}
 
 const originalDocument = globalThis.document;
 const originalLocalStorage = globalThis.localStorage;

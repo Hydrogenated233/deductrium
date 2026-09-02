@@ -1,6 +1,6 @@
 import { ASTParser } from "./astparser.js";
 import { Core } from "./core.js";
-import { SANDBOX_SAVE_VERSION, SandboxEnvironment, createSandboxDeclaration, parseSandboxDeclaration, parseSandboxDeclarationSurface, migrateLegacySandboxSave, sandboxHitPathLevels } from "./sandbox.js";
+import { SANDBOX_SAVE_VERSION, SandboxEnvironment, browserSandboxValidationLimits, createSandboxDeclaration, parseSandboxDeclaration, parseSandboxDeclarationSurface, migrateLegacySandboxSave, sandboxSourceLimitError, sandboxHitPathLevels, toSandboxSavedDeclaration } from "./sandbox.js";
 import { highestHitPathLevel, hitPathConstructorsAt } from "./hit-path-levels.js";
 import { SandboxWorkerCancelledError, SandboxWorkerClient } from "./sandbox-worker-client.js";
 import { ListDragger } from "../fs/itemdragger.js";
@@ -16,6 +16,16 @@ const emptyBridge = () => ({ axioms: [], inductives: [], definitions: [] });
  * without constructing the browser UI. */
 export function normalizeSandboxCheckInput(source) {
     return expandTypeTheoryAliasesInSurface(String(source ?? "").trim());
+}
+/** Apply the production browser guardrails while preserving explicit caller overrides. */
+export function sandboxBrowserEnvironmentOptions(environmentOptions = {}) {
+    return {
+        ...browserSandboxValidationLimits,
+        ...environmentOptions,
+        systemRuleIds: environmentOptions.systemRuleIds
+            ? [...environmentOptions.systemRuleIds]
+            : undefined
+    };
 }
 function sandboxStructuredDisplayDeclaration(declaration) {
     if (declaration.hit || declaration.inductive) {
@@ -207,12 +217,7 @@ export class TTSandboxGui {
     constructor(root, onAxiomsChange, renderAst, environmentOptions = {}, deferInitialLoad = false) {
         this.onAxiomsChange = onAxiomsChange;
         this.renderAst = renderAst;
-        this.environmentOptions = {
-            ...environmentOptions,
-            systemRuleIds: environmentOptions.systemRuleIds
-                ? [...environmentOptions.systemRuleIds]
-                : undefined
-        };
+        this.environmentOptions = sandboxBrowserEnvironmentOptions(environmentOptions);
         this.worker = new SandboxWorkerClient(this.environmentOptions);
         this.root = root;
         this.list = root.querySelector("#sandbox-list");
@@ -295,6 +300,11 @@ export class TTSandboxGui {
         const source = this.input.value.trim();
         if (!source)
             return;
+        const sourceLimitError = sandboxSourceLimitError(source, this.environmentOptions?.validationMaxSourceChars);
+        if (sourceLimitError) {
+            this.setStatus(sourceLimitError, true);
+            return;
+        }
         try {
             parseSandboxDeclarationSurface(source);
         }
@@ -313,7 +323,7 @@ export class TTSandboxGui {
             const match = declaration.id.match(/^sandbox-(\d+)$/);
             return match ? Math.max(max, Number(match[1])) : max;
         }, 0) + 1;
-        const declaration = createSandboxDeclaration(source, `sandbox-${next}`);
+        const declaration = createSandboxDeclaration(source, `sandbox-${next}`, this.environmentOptions?.validationMaxSourceChars);
         this.declarations.push(declaration);
         this.order.push(declaration.id);
         this.syncWorkspaceFromState();
@@ -601,6 +611,13 @@ export class TTSandboxGui {
         });
         const finishEdit = () => {
             if (source.value !== declaration.source) {
+                const sourceLimitError = sandboxSourceLimitError(source.value, this.environmentOptions?.validationMaxSourceChars);
+                if (sourceLimitError) {
+                    this.setStatus(sourceLimitError, true);
+                    source.classList.remove("hide");
+                    display.classList.add("hide");
+                    return;
+                }
                 try {
                     parseSandboxDeclarationSurface(source.value.trim());
                 }
@@ -866,7 +883,7 @@ export class TTSandboxGui {
         const folderIds = new Set(this.folders.map(folder => folder.id));
         this.declarations = migrated.declarations.map((declaration, index) => {
             const source = declaration.source || `${declaration.name} : ${declaration.typeSource}`;
-            const restored = createSandboxDeclaration(source, declaration.id || `sandbox-${index + 1}`);
+            const restored = createSandboxDeclaration(source, declaration.id || `sandbox-${index + 1}`, this.environmentOptions?.validationMaxSourceChars);
             restored.enabled = declaration.enabled !== false;
             restored.folderId = declaration.folderId && folderIds.has(declaration.folderId)
                 ? declaration.folderId
@@ -895,7 +912,7 @@ export class TTSandboxGui {
     toSave() {
         return {
             version: SANDBOX_SAVE_VERSION,
-            declarations: this.declarations.map(declaration => ({ ...declaration, dependencies: [...declaration.dependencies] })),
+            declarations: this.declarations.map(toSandboxSavedDeclaration),
             folders: this.folders.map(folder => ({ ...folder })),
             order: [...this.order],
             ...(this.validationCache ? { validationCache: this.validationCache } : {})
