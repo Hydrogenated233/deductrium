@@ -1,0 +1,8 @@
+hit LoopTree3 : U
+| leaf3 : LoopTree3
+| step3 : LoopTree3 → LoopTree3
+| loopA3 : step3 leaf3 = step3 leaf3
+| loopB3 : step3 leaf3 = step3 leaf3
+| path2 faceA3 : loopA3 = loopB3
+| path2 faceB3 : loopA3 = loopB3
+| path3 cell3 : faceA3 = faceB3

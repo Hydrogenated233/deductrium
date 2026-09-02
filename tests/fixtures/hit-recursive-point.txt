@@ -1,0 +1,5 @@
+hit LoopTree : U
+| leaf : LoopTree
+| step : LoopTree → LoopTree
+| loopLeaf : leaf = leaf
+| loopStep : step leaf = step leaf

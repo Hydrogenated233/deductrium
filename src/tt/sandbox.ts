@@ -44,7 +44,7 @@ export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
  * change. Persisted validation data is an optimization hint, never authority.
  */
 export const SANDBOX_VALIDATION_SEMANTIC_EPOCH =
-    "sandbox-nbe-hit3-composite-metadata-v7-2026-09-02";
+    "sandbox-nbe-recursive-hit-points-v1-2026-09-02";
 
 const SANDBOX_VALIDATION_CACHE_MAX_ENTRIES = 4_096;
 const SANDBOX_VALIDATION_CACHE_MAX_OBJECTS = 500_000;
@@ -1617,12 +1617,6 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
         })
     };
     if (ordinary.indices.length) throw new Error("一阶 HIT 第一版暂不支持索引");
-    for (const constructor of ordinary.constructors) {
-        if (constructor.argumentAsts.some(argument => argument.recursiveTelescope !== null)) {
-            throw new Error(`一阶 HIT 暂不支持递归点构造子：${constructor.name}`);
-        }
-    }
-
     const names = new Set([ordinary.name, ...ordinary.constructors.map(constructor => constructor.name)]);
     const parameterNames = new Set(ordinary.parameters.map(parameter => parameter.name));
     const pathConstructors: SandboxHitPathConstructor[] = [];
@@ -2313,15 +2307,59 @@ function sandboxHitBranchValue(
     endpoint: AST,
     parameters: readonly SandboxInductiveBinder[],
     pointConstructors: readonly SandboxInductiveConstructor[],
-    branchNames: readonly string[]
+    branchNames: readonly string[],
+    state = { nodes: 0 },
+    depth = 0
 ) {
+    if (depth > 128) throw new Error("HIT 点端点构造表达式嵌套过深");
+    if (++state.nodes > 4_096) throw new Error("HIT 点端点构造表达式节点过多");
     const terms = flattenApplication(endpoint);
     const constructorName = terms[0]?.name;
     const constructorIndex = pointConstructors.findIndex(ctor => ctor.name === constructorName);
     if (constructorIndex < 0) throw new Error(`未知的 HIT 点构造子端点：${constructorName || ""}`);
-    const arguments_ = terms.slice(1 + parameters.length).map(argument => Core.clone(argument));
-    return arguments_.length
-        ? sandboxApply(sandboxVar(branchNames[constructorIndex]), ...arguments_)
+    const constructor = pointConstructors[constructorIndex];
+    const supplied = terms.slice(1);
+    const localCount = constructor.argumentAsts.length;
+    const fullCount = parameters.length + localCount;
+    let arguments_: AST[];
+    if (supplied.length === localCount) {
+        arguments_ = supplied.map(argument => Core.clone(argument));
+    } else if (supplied.length === fullCount) {
+        for (let index = 0; index < parameters.length; index++) {
+            if (!sameSandboxAst(supplied[index], sandboxVar(parameters[index].name))) {
+                throw new Error(
+                    `HIT 点端点 ${constructorName} 未保持统一参数 ${parameters[index].name}`
+                );
+            }
+        }
+        arguments_ = supplied.slice(parameters.length).map(argument => Core.clone(argument));
+    } else {
+        throw new Error(
+            `HIT 点端点 ${constructorName} 参数数量错误：需要 ${localCount} 个点参数`
+        );
+    }
+    const methodArguments: AST[] = [];
+    for (let index = 0; index < constructor.argumentAsts.length; index++) {
+        const argument = arguments_[index];
+        methodArguments.push(Core.clone(argument));
+        const recursive = constructor.argumentAsts[index].recursiveTelescope;
+        if (!recursive) continue;
+        if (recursive.length) {
+            throw new Error(
+                `HIT 路径端点暂不支持函数型递归点参数：${constructorName}.${constructor.argumentAsts[index].name}`
+            );
+        }
+        methodArguments.push(sandboxHitBranchValue(
+            argument,
+            parameters,
+            pointConstructors,
+            branchNames,
+            state,
+            depth + 1
+        ));
+    }
+    return methodArguments.length
+        ? sandboxApply(sandboxVar(branchNames[constructorIndex]), ...methodArguments)
         : sandboxVar(branchNames[constructorIndex]);
 }
 
@@ -2827,11 +2865,6 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
     const inputThreePathConstructors = hitPathConstructorsAt(signature.pathLevels, 3);
     if (signature.indices.length) throw new Error("一阶 HIT 第一版暂不支持索引");
     if (!inputPathConstructors.length) throw new Error("一阶 HIT 至少需要一个一阶路径构造子");
-    for (const constructor of signature.pointConstructors) {
-        if (constructor.argumentAsts.some(argument => argument.recursiveTelescope !== null)) {
-            throw new Error(`一阶 HIT 暂不支持递归点构造子：${constructor.name}`);
-        }
-    }
     const uniformParameterReserved = new Set([
         signature.name,
         ...signature.pointConstructors.map(constructor => constructor.name),
@@ -3328,6 +3361,32 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
     const recursorThreePathPatternVariables = recursorThreePathMethodNames.map((_, index) =>
         sandboxVar(`?hitRecThreePath${index}`)
     );
+    const insertHitMethodArguments = (
+        source: AST,
+        targetHead: string,
+        insertion: number,
+        additions: readonly AST[]
+    ): AST => {
+        const visit = (node: AST): AST => {
+            if (node.type === "apply") {
+                const terms = flattenApplication(node);
+                const head = terms[0];
+                if (head?.type === "var" && head.name === targetHead) {
+                    const arguments_ = terms.slice(1).map(visit);
+                    return sandboxApply(
+                        Core.clone(head),
+                        ...arguments_.slice(0, insertion),
+                        ...additions.map(argument => Core.clone(argument)),
+                        ...arguments_.slice(insertion)
+                    );
+                }
+            }
+            const clone = Core.clone(node);
+            clone.nodes = clone.nodes?.map(visit);
+            return clone;
+        };
+        return visit(source);
+    };
     const computeRules = Object.fromEntries(
         Object.entries(base.computeRules ?? {}).map(([head, rules]) => [
             head,
@@ -3352,7 +3411,30 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                         ])
                         .map(term => Core.clone(term))
                 );
-                return { pattern, result: Core.clone(rule.result) };
+                const methodArguments = head.includes("rec_")
+                    ? [
+                        ...recursorPathPatternVariables,
+                        ...recursorTwoPathPatternVariables,
+                        ...recursorThreePathPatternVariables
+                    ]
+                    : [
+                        ...pathPatternVariables,
+                        ...twoPathPatternVariables,
+                        ...threePathPatternVariables
+                    ];
+                const resultInsertion = (full ? 1 : 0)
+                    + signature.parameters.length
+                    + 1
+                    + signature.pointConstructors.length;
+                return {
+                    pattern,
+                    result: insertHitMethodArguments(
+                        rule.result,
+                        head,
+                        resultInsertion,
+                        methodArguments
+                    )
+                };
             })
         ])
     ) as Record<string, { pattern: AST[]; result: AST }[]>;
@@ -4740,12 +4822,19 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             fullEliminatorName: `@ind_${signature.name}`,
             recursorName: `rec_${signature.name}`,
             fullRecursorName: `@rec_${signature.name}`,
-            constructors: signature.pointConstructors.map(constructor => ({
+            constructors: (base.metadata?.constructors ?? []).map(constructor => ({
                 name: constructor.name,
-                argumentTypes: constructor.argumentAsts.map(argument => Core.clone(argument.type)),
-                argumentNames: constructor.argumentAsts.map(argument => argument.name),
-                recursiveArguments: [],
-                resultIndices: []
+                argumentTypes: constructor.argumentTypes.map(type => Core.clone(type)),
+                argumentNames: constructor.argumentNames ? [...constructor.argumentNames] : undefined,
+                recursiveArguments: constructor.recursiveArguments?.map(argument => ({
+                    index: argument.index,
+                    telescope: argument.telescope.map(binder => ({
+                        name: binder.name,
+                        type: Core.clone(binder.type)
+                    })),
+                    resultIndices: argument.resultIndices.map(index => Core.clone(index))
+                })),
+                resultIndices: constructor.resultIndices?.map(index => Core.clone(index))
             })),
             pathLevels: metadataPathLevels
         },

@@ -2254,6 +2254,58 @@ export class Core {
                 pointTypes.set(name, this.desugar(Core.clone(type), true));
             }
             const normalizedMetadataAst = (ast: AST) => this.desugar(Core.clone(ast), true);
+            const hitBranchValue = (
+                point: AST,
+                branchNames: readonly string[],
+                label: string,
+                state = { nodes: 0 },
+                depth = 0
+            ): AST => {
+                if (depth > 128) throw new Error(`${label} 点构造表达式嵌套过深`);
+                if (++state.nodes > 4_096) throw new Error(`${label} 点构造表达式节点过多`);
+                const application = generatedApplicationParts(point);
+                const headName = generatedFreeConstantName(application.head) ?? "";
+                const constructorIndex = metadata.constructors
+                    .findIndex(entry => entry.name === headName);
+                if (constructorIndex < 0) {
+                    throw new Error(`${label} 引用了未知点端点：${headName || "<非常量>"}`);
+                }
+                const constructor = metadata.constructors[constructorIndex];
+                if (application.arguments.length !== parameters.length + constructor.argumentTypes.length) {
+                    throw new Error(`${label} 点端点 ${headName} 参数数量与 metadata 不一致`);
+                }
+                for (let index = 0; index < parameters.length; index++) {
+                    if (!sameGeneratedAst(application.arguments[index], wrapVar(parameters[index].name))) {
+                        throw new Error(`${label} 点端点 ${headName} 未保持统一参数 ${parameters[index].name}`);
+                    }
+                }
+                const arguments_ = application.arguments
+                    .slice(parameters.length)
+                    .map(argument => Core.clone(argument));
+                const methodArguments: AST[] = [];
+                for (let index = 0; index < arguments_.length; index++) {
+                    methodArguments.push(Core.clone(arguments_[index]));
+                    const recursive = constructor.recursiveArguments
+                        ?.find(argument => argument.index === index);
+                    if (!recursive) continue;
+                    if (recursive.telescope.length) {
+                        throw new Error(
+                            `${label} 暂不支持函数型递归点参数：${headName}.${constructor.argumentNames?.[index] ?? index}`
+                        );
+                    }
+                    methodArguments.push(hitBranchValue(
+                        arguments_[index],
+                        branchNames,
+                        label,
+                        state,
+                        depth + 1
+                    ));
+                }
+                return wrapApply(
+                    wrapVar(branchNames[constructorIndex]),
+                    ...methodArguments
+                );
+            };
             const consumeTelescope = (
                 source: AST,
                 domains: readonly AST[],
@@ -3229,23 +3281,11 @@ export class Core {
                         ...prefixValues.map(value => Core.clone(value))
                     );
 
-                    const pointBranchValue = (endpoint: AST) => {
-                        const application = generatedApplicationParts(endpoint);
-                        const endpointName = generatedFreeConstantName(application.head) ?? "";
-                        const endpointIndex = metadata.constructors
-                            .findIndex(entry => entry.name === endpointName);
-                        if (endpointIndex < 0) {
-                            throw new Error(
-                                `${computationName} 引用了未知点构造子：${endpointName || "<非常量>"}`
-                            );
-                        }
-                        return wrapApply(
-                            wrapVar(branchNames[endpointIndex]),
-                            ...application.arguments
-                                .slice(parameters.length)
-                                .map(argument => Core.clone(argument))
-                        );
-                    };
+                    const pointBranchValue = (endpoint: AST) => hitBranchValue(
+                        endpoint,
+                        branchNames,
+                        computationName
+                    );
                     const pathMethodValue = (endpoint: AST) => {
                         const application = generatedApplicationParts(endpoint);
                         const endpointName = generatedFreeConstantName(application.head) ?? "";
@@ -3715,16 +3755,7 @@ export class Core {
                     point: AST,
                     branchNames: readonly string[],
                     label: string
-                ) => {
-                    const application = generatedApplicationParts(point);
-                    const headName = generatedFreeConstantName(application.head) ?? "";
-                    const index = metadata.constructors.findIndex(entry => entry.name === headName);
-                    if (index < 0) throw new Error(`${label} 引用了未知点端点：${headName}`);
-                    return wrapApply(
-                        wrapVar(branchNames[index]),
-                        ...application.arguments.slice(parameters.length).map(argument => Core.clone(argument))
-                    );
-                };
+                ) => hitBranchValue(point, branchNames, label);
                 const validateThreeCoherenceTelescope = (
                     source: AST,
                     full: boolean,

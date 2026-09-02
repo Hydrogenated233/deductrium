@@ -173,6 +173,7 @@ const tests = [
     "./tt-hit-metadata-v6.test.mjs",
     "./tt-core-hit-metadata.test.mjs",
     "./tt-sandbox-hit1.test.mjs",
+    "./tt-sandbox-hit-recursive-point.test.mjs",
     "./tt-sandbox-hit2.test.mjs",
     "./tt-sandbox-hit3.test.mjs",
     "./tt-sandbox-hit3-composite.test.mjs",
