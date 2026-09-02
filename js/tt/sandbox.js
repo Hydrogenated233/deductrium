@@ -12,7 +12,7 @@ export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
  * Bump whenever parsing, lowering, Core registration, or NbE cache semantics
  * change. Persisted validation data is an optimization hint, never authority.
  */
-export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit2-rule-schema1-2026-09-02";
+export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit3-parser-v1-2026-09-02";
 const SANDBOX_VALIDATION_CACHE_MAX_ENTRIES = 4_096;
 const SANDBOX_VALIDATION_CACHE_MAX_OBJECTS = 500_000;
 const SANDBOX_VALIDATION_CACHE_MAX_DEPTH = 256;
@@ -745,14 +745,59 @@ function elaborateHitTwoPathEndpoint(endpoint, signatureName, parameters, pointC
         rightPoint: substituteSandboxFreeVars(path.right, argumentReplacements)
     };
 }
-/** Parse a parameterized, non-indexed first-order higher inductive declaration. */
+function elaborateHitThreePathEndpoint(endpoint, signatureName, parameters, twoPathConstructors, pathName, boundNames) {
+    const terms = flattenApplication(endpoint);
+    const headName = terms[0]?.type === "var" ? terms[0].name : "";
+    if (boundNames.has(headName)) {
+        throw new Error(`三阶路径构造子 ${pathName} 的端点 ${headName} 被局部参数遮蔽`);
+    }
+    const twoPath = twoPathConstructors.find(candidate => candidate.name === headName);
+    if (!twoPath) {
+        throw new Error(`三阶路径构造子 ${pathName} 的端点必须由 ${signatureName} 的二阶路径构造子形成`);
+    }
+    const supplied = terms.slice(1);
+    const fullArgumentCount = parameters.length + twoPath.arguments.length;
+    let arguments_;
+    if (supplied.length === twoPath.arguments.length) {
+        arguments_ = [
+            ...parameters.map(parameter => sandboxVar(parameter.name)),
+            ...supplied.map(argument => Core.clone(argument))
+        ];
+    }
+    else if (supplied.length === fullArgumentCount) {
+        for (let index = 0; index < parameters.length; index++) {
+            const argument = supplied[index];
+            if (argument?.type !== "var" || argument.name !== parameters[index].name) {
+                throw new Error(`三阶路径构造子 ${pathName} 的端点必须保持统一参数 ${parameters[index].name}`);
+            }
+        }
+        arguments_ = supplied.map(argument => Core.clone(argument));
+    }
+    else {
+        throw new Error(`三阶路径构造子 ${pathName} 的端点 ${headName} 参数数量错误：需要 ${twoPath.arguments.length} 个路径参数`);
+    }
+    const twoPathTerm = sandboxConstructorTerm(headName, arguments_);
+    const argumentReplacements = new Map();
+    twoPath.arguments.forEach((argument, index) => {
+        argumentReplacements.set(argument.name, arguments_[parameters.length + index]);
+    });
+    return {
+        twoPathTerm,
+        twoPath,
+        sourcePath: substituteSandboxFreeVars(twoPath.left, argumentReplacements),
+        targetPath: substituteSandboxFreeVars(twoPath.right, argumentReplacements),
+        sourcePoint: substituteSandboxFreeVars(twoPath.leftPoint, argumentReplacements),
+        targetPoint: substituteSandboxFreeVars(twoPath.rightPoint, argumentReplacements)
+    };
+}
+/** Parse a parameterized, non-indexed higher inductive declaration. */
 export function parseSandboxHit(source) {
     const text = normalizeSandboxSource(source);
     const [rawHeader, ...rawConstructors] = splitInductiveSections(text);
     const header = new RegExp(String.raw `^hit\s+(${sandboxNamePattern})([\s\S]*)$`, "i")
         .exec(rawHeader);
     if (!header) {
-        throw new Error("一阶 HIT 声明必须使用 hit 名称 [(参数 : 类型)] : Universe 格式");
+        throw new Error("HIT 声明必须使用 hit 名称 [(参数 : 类型)] : Universe 格式");
     }
     const declaredName = header[1];
     const constructorParts = rawConstructors
@@ -760,15 +805,25 @@ export function parseSandboxHit(source) {
         .filter(Boolean)
         .map(raw => {
         const unsupportedPath = /^path(\d+)\s+/i.exec(raw);
-        if (unsupportedPath && Number(unsupportedPath[1]) > 2) {
-            throw new Error(`当前沙盒仅支持二维 HIT：不支持 ${unsupportedPath[0].trim()} 高阶路径构造子`);
+        if (unsupportedPath && Number(unsupportedPath[1]) > 3) {
+            throw new Error(`当前沙盒最高只解析三维 HIT：不支持 ${unsupportedPath[0].trim()} 高阶路径构造子`);
         }
         const twoPath = /^path2\s+/i.test(raw);
-        const normalized = twoPath ? raw.replace(/^path2\s+/i, "") : raw;
+        const threePath = /^path3\s+/i.test(raw);
+        const normalized = twoPath || threePath
+            ? raw.replace(/^path[23]\s+/i, "")
+            : raw;
         const match = new RegExp(String.raw `^(${sandboxNamePattern})\s*(?::\s*([\s\S]*))?$`).exec(normalized);
         if (!match)
             throw new Error(`HIT 构造子格式错误：${raw}`);
-        return { raw, normalized, name: match[1], typeSource: match[2]?.trim(), twoPath };
+        return {
+            raw,
+            normalized,
+            name: match[1],
+            typeSource: match[2]?.trim(),
+            twoPath,
+            threePath
+        };
     });
     // ASTParser reserves leading P/S/W/L/X as binder tokens. Parse every
     // declaration-owned identifier through a fresh, source-absent alias so
@@ -783,16 +838,21 @@ export function parseSandboxHit(source) {
     const pointSections = [];
     const pathSections = [];
     const twoPathSections = [];
+    const threePathSections = [];
     let sawPath = false;
     let sawTwoPath = false;
+    let sawThreePath = false;
     for (const part of constructorParts) {
         const constructorName = part.name;
         const typeSource = part.typeSource;
         if (!typeSource) {
+            if (part.threePath)
+                throw new Error("三阶路径构造子必须声明类型");
             if (part.twoPath)
                 throw new Error("二阶路径构造子必须声明类型");
-            if (sawPath || sawTwoPath)
+            if (sawPath || sawTwoPath || sawThreePath) {
                 throw new Error("点构造子必须写在路径构造子之前");
+            }
             pointSections.push(part.raw);
             continue;
         }
@@ -804,23 +864,35 @@ export function parseSandboxHit(source) {
             throw new Error(`构造子 ${constructorName} 类型格式错误：${String(error)}`);
         }
         const tail = sandboxPathTelescope(type, constructorName).body;
-        if (part.twoPath) {
+        if (part.threePath) {
+            if (!sawTwoPath)
+                throw new Error("三阶路径构造子必须写在二阶路径构造子之后");
+            if (tail.type !== "=")
+                throw new Error(`三阶路径构造子 ${constructorName} 必须以等式为结论`);
+            sawThreePath = true;
+            threePathSections.push({ raw: part.normalized, name: constructorName, type, typeSource });
+        }
+        else if (part.twoPath) {
             if (!sawPath)
                 throw new Error("二阶路径构造子必须写在一阶路径构造子之后");
+            if (sawThreePath)
+                throw new Error("二阶路径构造子必须写在三阶路径构造子之前");
             if (tail.type !== "=")
                 throw new Error(`二阶路径构造子 ${constructorName} 必须以等式为结论`);
             sawTwoPath = true;
             twoPathSections.push({ raw: part.normalized, name: constructorName, type, typeSource });
         }
         else if (tail.type === "=") {
-            if (sawTwoPath)
-                throw new Error("一阶路径构造子必须写在二阶路径构造子之前");
+            if (sawTwoPath || sawThreePath) {
+                throw new Error("一阶路径构造子必须写在高阶路径构造子之前");
+            }
             sawPath = true;
             pathSections.push({ raw: part.raw, name: constructorName, type, typeSource });
         }
         else {
-            if (sawPath || sawTwoPath)
+            if (sawPath || sawTwoPath || sawThreePath) {
                 throw new Error("点构造子必须写在路径构造子之前");
+            }
             pointSections.push(part.raw);
         }
     }
@@ -953,6 +1025,50 @@ export function parseSandboxHit(source) {
             rightPoint: right.rightPoint
         });
     }
+    const threePathConstructors = [];
+    for (const path3 of threePathSections) {
+        if (names.has(path3.name))
+            throw new Error(`HIT 构造子名称冲突：${path3.name}`);
+        names.add(path3.name);
+        const { arguments: arguments_, body } = sandboxPathTelescope(path3.type, path3.name);
+        if (body.type !== "=" || !body.nodes?.[0] || !body.nodes?.[1]) {
+            throw new Error(`三阶路径构造子 ${path3.name} 必须以等式为结论`);
+        }
+        for (const argument of arguments_) {
+            if (parameterNames.has(argument.name)) {
+                throw new Error(`三阶路径构造子 ${path3.name} 的参数不能遮蔽统一参数：${argument.name}`);
+            }
+        }
+        const endpointBoundNames = new Set([
+            ...ordinary.parameters.map(parameter => parameter.name),
+            ...arguments_.map(argument => argument.name)
+        ]);
+        const left = elaborateHitThreePathEndpoint(body.nodes[0], ordinary.name, ordinary.parameters, twoPathConstructors, path3.name, endpointBoundNames);
+        const right = elaborateHitThreePathEndpoint(body.nodes[1], ordinary.name, ordinary.parameters, twoPathConstructors, path3.name, endpointBoundNames);
+        if (!sameSandboxAst(left.sourcePath, right.sourcePath)
+            || !sameSandboxAst(left.targetPath, right.targetPath)) {
+            throw new Error(`三阶路径构造子 ${path3.name} 的二阶路径边界不一致`);
+        }
+        if (!sameSandboxAst(left.sourcePoint, right.sourcePoint)
+            || !sameSandboxAst(left.targetPoint, right.targetPoint)) {
+            throw new Error(`三阶路径构造子 ${path3.name} 的一阶路径边界不一致`);
+        }
+        const elaboratedType = sandboxWrapPis(arguments_, sandboxEquality(Core.clone(left.twoPathTerm), Core.clone(right.twoPathTerm)));
+        threePathConstructors.push({
+            name: path3.name,
+            arguments: arguments_,
+            type: elaboratedType,
+            typeSource: parser.stringify(elaboratedType),
+            left: left.twoPathTerm,
+            right: right.twoPathTerm,
+            leftTwoPath: left.twoPath.name,
+            rightTwoPath: right.twoPath.name,
+            sourcePath: left.sourcePath,
+            targetPath: left.targetPath,
+            sourcePoint: left.sourcePoint,
+            targetPoint: left.targetPoint
+        });
+    }
     return {
         name: ordinary.name,
         parameters: ordinary.parameters,
@@ -961,7 +1077,8 @@ export function parseSandboxHit(source) {
         universeAst: ordinary.universeAst,
         pointConstructors: ordinary.constructors,
         pathConstructors,
-        twoPathConstructors
+        twoPathConstructors,
+        threePathConstructors
     };
 }
 function sameSandboxAst(left, right) {
@@ -1448,6 +1565,18 @@ function sandboxRenameHitUniformParameters(signature, reserved) {
         collectSandboxAstNames(path.leftPoint, occupied);
         collectSandboxAstNames(path.rightPoint, occupied);
     }
+    for (const path of signature.threePathConstructors) {
+        occupied.add(path.name);
+        collectSandboxAstNames(path.type, occupied);
+        for (const argument of path.arguments)
+            collectBinder(argument);
+        collectSandboxAstNames(path.left, occupied);
+        collectSandboxAstNames(path.right, occupied);
+        collectSandboxAstNames(path.sourcePath, occupied);
+        collectSandboxAstNames(path.targetPath, occupied);
+        collectSandboxAstNames(path.sourcePoint, occupied);
+        collectSandboxAstNames(path.targetPoint, occupied);
+    }
     const replacements = new Map();
     const parameters = signature.parameters.map(parameter => {
         const type = renameFreeInductiveNames(parameter.type, replacements);
@@ -1507,6 +1636,21 @@ function sandboxRenameHitUniformParameters(signature, reserved) {
             rightPoint: rename(path.rightPoint)
         };
     });
+    const threePathConstructors = signature.threePathConstructors.map(path => {
+        const type = rename(path.type);
+        return {
+            ...path,
+            arguments: path.arguments.map(renameBinder),
+            type,
+            typeSource: parser.stringify(type),
+            left: rename(path.left),
+            right: rename(path.right),
+            sourcePath: rename(path.sourcePath),
+            targetPath: rename(path.targetPath),
+            sourcePoint: rename(path.sourcePoint),
+            targetPoint: rename(path.targetPoint)
+        };
+    });
     const universeAst = rename(signature.universeAst);
     return {
         ...signature,
@@ -1515,7 +1659,8 @@ function sandboxRenameHitUniformParameters(signature, reserved) {
         universeAst,
         pointConstructors,
         pathConstructors,
-        twoPathConstructors
+        twoPathConstructors,
+        threePathConstructors
     };
 }
 /** Lower a HIT while keeping path computation propositional. */
@@ -1524,6 +1669,9 @@ export function lowerSandboxHit(signature) {
         throw new Error("一阶 HIT 第一版暂不支持索引");
     if (!signature.pathConstructors.length)
         throw new Error("一阶 HIT 至少需要一个一阶路径构造子");
+    if (signature.threePathConstructors.length) {
+        throw new Error("三维 HIT 已完成结构解析，但 Core lowering 尚未启用；不会把三阶 coherence 降级为二维规则");
+    }
     for (const constructor of signature.pointConstructors) {
         if (constructor.argumentAsts.some(argument => argument.recursiveTelescope !== null)) {
             throw new Error(`一阶 HIT 暂不支持递归点构造子：${constructor.name}`);
@@ -2104,6 +2252,7 @@ function sandboxHitGeneratedNames(signature) {
         ...signature.pointConstructors.map(ctor => ctor.name),
         ...signature.pathConstructors.map(ctor => ctor.name),
         ...signature.twoPathConstructors.map(ctor => ctor.name),
+        ...signature.threePathConstructors.map(ctor => ctor.name),
         `ind_${signature.name}`,
         `@ind_${signature.name}`,
         `rec_${signature.name}`,
@@ -2115,6 +2264,12 @@ function sandboxHitGeneratedNames(signature) {
             `@ap_${path.name}`
         ]),
         ...signature.twoPathConstructors.flatMap(path => [
+            `apd_${path.name}`,
+            `@apd_${path.name}`,
+            `ap_${path.name}`,
+            `@ap_${path.name}`
+        ]),
+        ...signature.threePathConstructors.flatMap(path => [
             `apd_${path.name}`,
             `@apd_${path.name}`,
             `ap_${path.name}`,
@@ -2165,6 +2320,9 @@ function collectHitDependencies(signature) {
         collect(path.type);
     }
     for (const path of signature.twoPathConstructors) {
+        collect(path.type);
+    }
+    for (const path of signature.threePathConstructors) {
         collect(path.type);
     }
     return [...names];

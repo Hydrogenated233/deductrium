@@ -92,13 +92,26 @@ export function cloneInductiveBundle(bundle) {
                     leftPath: ctor.leftPath,
                     rightPath: ctor.rightPath,
                     computationName: ctor.computationName
+                })),
+                threePathConstructors: bundle.metadata.threePathConstructors?.map(ctor => ({
+                    name: ctor.name,
+                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    left: Core.clone(ctor.left),
+                    right: Core.clone(ctor.right),
+                    leftTwoPath: ctor.leftTwoPath,
+                    rightTwoPath: ctor.rightTwoPath,
+                    sourcePath: Core.clone(ctor.sourcePath),
+                    targetPath: Core.clone(ctor.targetPath),
+                    computationName: ctor.computationName
                 }))
             }
             : undefined
     };
 }
 function sandboxInductiveBundlePrefix(bundle) {
-    return bundle.metadata?.kind === "hit1" || bundle.metadata?.kind === "hit2"
+    return bundle.metadata?.kind === "hit1"
+        || bundle.metadata?.kind === "hit2"
+        || bundle.metadata?.kind === "hit3"
         ? "sandbox HIT"
         : "sandbox inductive";
 }
@@ -107,7 +120,8 @@ export function sandboxInductiveEntryPresentation(bundle, name, fallback) {
     const prefix = sandboxInductiveBundlePrefix(bundle);
     const paths = [
         ...(bundle.metadata?.pathConstructors ?? []),
-        ...(bundle.metadata?.twoPathConstructors ?? [])
+        ...(bundle.metadata?.twoPathConstructors ?? []),
+        ...(bundle.metadata?.threePathConstructors ?? [])
     ];
     const publicName = name.startsWith("@") ? name.slice(1) : name;
     if (paths.some(path => path.name === publicName)) {

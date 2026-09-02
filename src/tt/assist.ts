@@ -1836,9 +1836,11 @@ export class Assist {
         // compatibility path for legacy and built-in eliminators.
         const metadataBranchCount = dynamicInductive?.kind === "hit1"
             || dynamicInductive?.kind === "hit2"
+            || dynamicInductive?.kind === "hit3"
             ? dynamicInductive.constructors.length
                 + (dynamicInductive.pathConstructors?.length ?? 0)
                 + (dynamicInductive.twoPathConstructors?.length ?? 0)
+                + (dynamicInductive.threePathConstructors?.length ?? 0)
             : undefined;
         const ctorNumbers = metadataBranchCount ?? inferredBranchCount;
         if (ctorNumbers < 0 || holes.length < ctorNumbers) {

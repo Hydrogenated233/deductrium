@@ -112,6 +112,29 @@ clonedHit2.metadata.twoPathConstructors[0].right.name = "mutatedLoop";
 assert.equal(clonedHit2.metadata.twoPathConstructors[0].left.name, "loopSquareA");
 assert.equal(hit2Bundle.metadata.twoPathConstructors[0].right.name, "loopSquareB");
 
+const hit3Bundle = structuredClone(hit2Bundle);
+hit3Bundle.metadata.version = 5;
+hit3Bundle.metadata.kind = "hit3";
+hit3Bundle.metadata.dimension = 3;
+hit3Bundle.metadata.threePathConstructors = [{
+    name: "cubePath",
+    argumentTypes: [parse("True")],
+    left: parse("squarePath"),
+    right: parse("squarePath"),
+    leftTwoPath: "squarePath",
+    rightTwoPath: "squarePath",
+    sourcePath: parse("loopSquareA"),
+    targetPath: parse("loopSquareB"),
+    computationName: "apd_cubePath"
+}];
+const clonedHit3 = cloneInductiveBundle(hit3Bundle);
+assert.equal(clonedHit3.metadata.kind, "hit3");
+assert.equal(clonedHit3.metadata.threePathConstructors[0].leftTwoPath, "squarePath");
+assert.notEqual(clonedHit3.metadata.threePathConstructors[0].left,
+    hit3Bundle.metadata.threePathConstructors[0].left);
+assert.notEqual(clonedHit3.metadata.threePathConstructors[0].sourcePath,
+    hit3Bundle.metadata.threePathConstructors[0].sourcePath);
+
 for (const name of ["squarePath", "@squarePath"]) {
     assert.deepEqual(
         sandboxInductiveEntryPresentation(hit2Bundle, name, {
@@ -207,6 +230,25 @@ assert.deepEqual(sandboxDeclarationDisplayKind({
     trust: "二维高阶路径归纳",
     trustClass: "sandbox-hit"
 });
+const cubeDeclaration = createSandboxDeclaration(
+    "hit CubeDisplay : U | baseCube : CubeDisplay "
+        + "| loopCubeA : baseCube=baseCube | loopCubeB : baseCube=baseCube "
+        + "| path2 faceCubeA : loopCubeA=loopCubeB "
+        + "| path2 faceCubeB : loopCubeA=loopCubeB "
+        + "| path3 cellCube : faceCubeA=faceCubeB",
+    "display-cube"
+);
+assert.deepEqual(sandboxDeclarationDisplayKind(cubeDeclaration), {
+    kind: "HIT",
+    trust: "三维高阶路径（实验解析）",
+    trustClass: "sandbox-hit"
+});
+const cubeSources = sandboxInductiveDisplaySources(cubeDeclaration);
+assert.equal(cubeSources.at(-1), "path3 cellCube : (faceCubeA=faceCubeB)");
+const cubeEntries = sandboxInductiveDisplayAsts(cubeDeclaration);
+assert.ok(cubeEntries);
+assert.equal(cubeEntries.at(-1).prefix, "path3 ");
+assert.equal(cubeEntries.at(-1).ast.nodes[0].name, "cellCube");
 assert.deepEqual(sandboxInductiveDisplaySources(hitDeclaration), [
     "CircleDisplay : U",
     "baseDisplay : CircleDisplay",
@@ -278,7 +320,7 @@ const indexHtml = await readFile(new URL("../index.html", import.meta.url), "utf
 assert.match(indexHtml, /hit Circle2 : U \| base2 : Circle2 \| loop2 : base2 = base2/);
 assert.match(indexHtml, /apd_loop2[\s\S]*ap_loop2/);
 assert.match(indexHtml, /path2[\s\S]*apd_squareS[\s\S]*ap_squareS/);
-assert.match(indexHtml, /最高维度是二维[\s\S]*path3/);
+assert.match(indexHtml, /可注册的最高维度是二维[\s\S]*path3[\s\S]*Core lowering/);
 assert.match(indexHtml, /路径构造子的 <code>apd_<\/code>\/<code>ap_<\/code> 规则是需要显式使用的命题/);
 
 console.log("sandbox HIT bridge and display regression passed");

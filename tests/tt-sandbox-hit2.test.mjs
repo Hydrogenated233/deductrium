@@ -51,9 +51,12 @@ assert.throws(
 assert.throws(
     () => parseSandboxHit(
         "hit FutureHigher : U | baseF : FutureHigher "
-            + "| loopF : baseF = baseF | path3 cubeF : loopF = loopF"
+            + "| loopF : baseF = baseF "
+            + "| path2 faceF : loopF = loopF "
+            + "| path3 cubeF : faceF = faceF "
+            + "| path4 hyperF : cubeF = cubeF"
     ),
-    /仅支持二维 HIT.*path3/
+    /最高只解析三维 HIT.*path4/
 );
 
 const bundle = lowerSandboxHit(parsed);

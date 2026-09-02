@@ -607,6 +607,19 @@ export function initTypeSystem() {
     addRule("计算", "apd2 ?f (refl ?p) === refl (apd ?f ?p)");
     addRule("@计算", "apd2 ?f (@refl ?1 ?2 ?p) === refl (apd ?f ?p)");
 
+    typeName = "eq.trans3";
+    addRule("@定义", "@trans3:=Lu:U@.Lv:U@.La:Uu.Lx:a.Ly:a.Lm:x=y.Ln:x=y.Lr:m=n.Ls:m=n.Lb:a->Uv.Lq:r=s.Lz:b x.ap (Lt:m=n.trans2 b t z) q");
+    addRule("@定义", "trans3:=@trans3 _ _ _ _ _ _ _ _ _");
+    addRule("_定义", "trans3");
+    typeName = "eq.apd3";
+    addRule("@定义", "@apd3:=Lu:U@.Lv:U@.La:Uu.Lx:a.Ly:a.Lm:x=y.Ln:x=y.Lr:m=n.Ls:m=n.Lb:a->Uv.Lf:Px:a,b x.Lq:r=s.apd (Lt:m=n.apd2 f t) q");
+    addRule("@定义", "apd3:=@apd3 _ _ _ _ _ _ _ _ _ _");
+    addRule("_定义", "apd3");
+    typeName = "eq.ap3";
+    addRule("@定义", "@ap3:=Lu:U@.Lv:U@.La:Uu.Lb:Uv.Lx:a.Ly:a.Lm:x=y.Ln:x=y.Lr:m=n.Ls:m=n.Lf:a->b.Lq:r=s.ap (Lt:m=n.ap (Lp:x=y.ap f p) t) q");
+    addRule("@定义", "ap3:=@ap3 _ _ _ _ _ _ _ _ _ _");
+    addRule("_定义", "ap3");
+
     typeName = "S2.ind";
     addRule("@解构", "@ind_S2: Pu:U@,PC:S2->Uu,Pcb:C base2,Pcs:refl cb=(trans2 C surf cb)*(refl cb),Px:S2,C x");
     addRule("@解构", "ind_S2:=@ind_S2 _");

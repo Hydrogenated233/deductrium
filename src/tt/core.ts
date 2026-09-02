@@ -431,8 +431,8 @@ export type CoreSystemInductiveBundle = {
     metadata?: {
         /** Version 2 distinguishes uniform parameters from family indices. */
         version?: number;
-        /** Ordinary inductive data or a first-order higher inductive type. */
-        kind?: "inductive" | "hit1" | "hit2";
+        /** Ordinary inductive data or a higher inductive type. */
+        kind?: "inductive" | "hit1" | "hit2" | "hit3";
         /** Highest path dimension represented by this metadata. */
         dimension?: number;
         /** Canonical sandbox compute-rule schema validated by Core. */
@@ -478,6 +478,17 @@ export type CoreSystemInductiveBundle = {
             right: AST;
             leftPath: string;
             rightPath: string;
+            computationName?: string;
+        }[];
+        threePathConstructors?: readonly {
+            name: string;
+            argumentTypes: AST[];
+            left: AST;
+            right: AST;
+            leftTwoPath: string;
+            rightTwoPath: string;
+            sourcePath: AST;
+            targetPath: AST;
             computationName?: string;
         }[];
     };
@@ -1600,13 +1611,20 @@ export class Core {
             );
         }
         const metadataVersion = Number(bundle.metadata?.version);
-        if ([2, 3, 4].includes(metadataVersion)
+        if ([2, 3, 4, 5].includes(metadataVersion)
             && bundle.metadata?.ruleSchemaVersion !== 1) {
             throw new Error(`沙盒归纳 metadata v${metadataVersion} 必须使用计算规则 schema v1`);
         }
         if (bundle.metadata?.ruleSchemaVersion !== undefined
             && bundle.metadata.ruleSchemaVersion !== 1) {
             throw new Error(`不支持的归纳计算规则 schema：${bundle.metadata.ruleSchemaVersion}`);
+        }
+        if (bundle.metadata?.kind === "hit3"
+            || metadataVersion === 5
+            || bundle.metadata?.threePathConstructors?.length) {
+            throw new Error(
+                "三维 HIT metadata 已定义，但 Core 注册尚未启用；拒绝未经认证的三阶 coherence"
+            );
         }
         if (bundle.metadata?.ruleSchemaVersion === 1) {
             const metadata = bundle.metadata;
@@ -2123,6 +2141,17 @@ export class Core {
                     leftPath: ctor.leftPath,
                     rightPath: ctor.rightPath,
                     computationName: ctor.computationName
+                })),
+                threePathConstructors: bundle.metadata.threePathConstructors?.map(ctor => ({
+                    name: ctor.name,
+                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    left: Core.clone(ctor.left),
+                    right: Core.clone(ctor.right),
+                    leftTwoPath: ctor.leftTwoPath,
+                    rightTwoPath: ctor.rightTwoPath,
+                    sourcePath: Core.clone(ctor.sourcePath),
+                    targetPath: Core.clone(ctor.targetPath),
+                    computationName: ctor.computationName
                 }))
             }
             : undefined;
@@ -2215,6 +2244,17 @@ export class Core {
                 right: Core.clone(ctor.right),
                 leftPath: ctor.leftPath,
                 rightPath: ctor.rightPath,
+                computationName: ctor.computationName
+            })),
+            threePathConstructors: metadata.threePathConstructors?.map(ctor => ({
+                name: ctor.name,
+                argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                left: Core.clone(ctor.left),
+                right: Core.clone(ctor.right),
+                leftTwoPath: ctor.leftTwoPath,
+                rightTwoPath: ctor.rightTwoPath,
+                sourcePath: Core.clone(ctor.sourcePath),
+                targetPath: Core.clone(ctor.targetPath),
                 computationName: ctor.computationName
             }))
         };

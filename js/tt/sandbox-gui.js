@@ -45,7 +45,11 @@ export function sandboxDeclarationDisplayKind(declaration) {
         const hit = sandboxHitDisplayDeclaration(declaration);
         return {
             kind: "HIT",
-            trust: hit?.twoPathConstructors?.length ? "二维高阶路径归纳" : "一阶路径归纳",
+            trust: hit?.threePathConstructors?.length
+                ? "三维高阶路径（实验解析）"
+                : hit?.twoPathConstructors?.length
+                    ? "二维高阶路径归纳"
+                    : "一阶路径归纳",
             trustClass: "sandbox-hit"
         };
     }
@@ -69,7 +73,8 @@ export function sandboxInductiveDisplaySources(declaration) {
     return [
         `${signature.name}${parameters}${indices} : ${signature.universe}`,
         ...constructors.map(ctor => `${ctor.name} : ${ctor.typeSource}`),
-        ...(hit?.twoPathConstructors ?? []).map(path => `path2 ${path.name} : ${path.typeSource}`)
+        ...(hit?.twoPathConstructors ?? []).map(path => `path2 ${path.name} : ${path.typeSource}`),
+        ...(hit?.threePathConstructors ?? []).map(path => `path3 ${path.name} : ${path.typeSource}`)
     ];
 }
 function sandboxDeclarationLineAst(name, type) {
@@ -127,6 +132,15 @@ export function sandboxInductiveDisplayAsts(declaration) {
         entries.push({
             ast: sandboxDeclarationLineAst(path.name, type),
             prefix: "path2 "
+        });
+    }
+    for (const path of hit?.threePathConstructors ?? []) {
+        const type = sandboxDisplayTypeAst(path);
+        if (!type)
+            return null;
+        entries.push({
+            ast: sandboxDeclarationLineAst(path.name, type),
+            prefix: "path3 "
         });
     }
     return entries;

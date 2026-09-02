@@ -1304,13 +1304,18 @@ export class Core {
             throw new Error(`归纳类型 metadata 名称与 bundle 不一致：${bundle.metadata.typeName} != ${bundle.type[0]}`);
         }
         const metadataVersion = Number(bundle.metadata?.version);
-        if ([2, 3, 4].includes(metadataVersion)
+        if ([2, 3, 4, 5].includes(metadataVersion)
             && bundle.metadata?.ruleSchemaVersion !== 1) {
             throw new Error(`沙盒归纳 metadata v${metadataVersion} 必须使用计算规则 schema v1`);
         }
         if (bundle.metadata?.ruleSchemaVersion !== undefined
             && bundle.metadata.ruleSchemaVersion !== 1) {
             throw new Error(`不支持的归纳计算规则 schema：${bundle.metadata.ruleSchemaVersion}`);
+        }
+        if (bundle.metadata?.kind === "hit3"
+            || metadataVersion === 5
+            || bundle.metadata?.threePathConstructors?.length) {
+            throw new Error("三维 HIT metadata 已定义，但 Core 注册尚未启用；拒绝未经认证的三阶 coherence");
         }
         if (bundle.metadata?.ruleSchemaVersion === 1) {
             const metadata = bundle.metadata;
@@ -1777,6 +1782,17 @@ export class Core {
                     leftPath: ctor.leftPath,
                     rightPath: ctor.rightPath,
                     computationName: ctor.computationName
+                })),
+                threePathConstructors: bundle.metadata.threePathConstructors?.map(ctor => ({
+                    name: ctor.name,
+                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    left: Core.clone(ctor.left),
+                    right: Core.clone(ctor.right),
+                    leftTwoPath: ctor.leftTwoPath,
+                    rightTwoPath: ctor.rightTwoPath,
+                    sourcePath: Core.clone(ctor.sourcePath),
+                    targetPath: Core.clone(ctor.targetPath),
+                    computationName: ctor.computationName
                 }))
             }
             : undefined;
@@ -1876,6 +1892,17 @@ export class Core {
                 right: Core.clone(ctor.right),
                 leftPath: ctor.leftPath,
                 rightPath: ctor.rightPath,
+                computationName: ctor.computationName
+            })),
+            threePathConstructors: metadata.threePathConstructors?.map(ctor => ({
+                name: ctor.name,
+                argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                left: Core.clone(ctor.left),
+                right: Core.clone(ctor.right),
+                leftTwoPath: ctor.leftTwoPath,
+                rightTwoPath: ctor.rightTwoPath,
+                sourcePath: Core.clone(ctor.sourcePath),
+                targetPath: Core.clone(ctor.targetPath),
                 computationName: ctor.computationName
             }))
         };
