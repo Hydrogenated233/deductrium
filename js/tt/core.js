@@ -14,6 +14,11 @@ const semanticResourceBaseLimits = Object.freeze({
     assertionMaxNodes: 2_048,
     outputMaxNodes: 256
 });
+const certifiedPath3ComputationResourceLimits = Object.freeze({
+    inputMaxNodes: 1_024,
+    synthesisMaxSteps: 12_288,
+    outputMaxNodes: 1_024
+});
 function fitsSemanticNbeBudget(ast, maxNodes, allowRigidMetas = false, context = [], allowHoles = false, allowedMetaNames) {
     if (!ast)
         return false;
@@ -920,6 +925,8 @@ export class Core {
     }
     /** Source-shaped clones used when reporting errors after elaboration mutates ASTs. */
     displaySurfaceNodes = new WeakMap();
+    /** Large system types admitted only after Core reconstructs their canonical schema. */
+    certifiedLargeSystemTypes = new Set();
     silentErrors = 0;
     static assign(ast, value, moveSemantic) {
         // Most substitutions assign a leaf variable/constant. Cloning a leaf
@@ -1350,6 +1357,8 @@ export class Core {
                     `@ap2_${path.name}`
                 ]),
                 ...(metadata.threePathConstructors ?? []).flatMap(path => [
+                    `apd3_${path.name}`,
+                    `@apd3_${path.name}`,
                     `ap3_${path.name}`,
                     `@ap3_${path.name}`
                 ])
@@ -1479,6 +1488,8 @@ export class Core {
                 `@ap_${path.name}`,
                 `ap2_${path.name}`,
                 `@ap2_${path.name}`,
+                `apd3_${path.name}`,
+                `@apd3_${path.name}`,
                 `ap3_${path.name}`,
                 `@ap3_${path.name}`
             ])) {
@@ -1508,6 +1519,7 @@ export class Core {
         const constructorTypes = new Map(normalizedEntries
             .filter(([name]) => bundlePointConstructorNames.includes(name)));
         validateSystemInductiveComputeRules(bundle, normalizedRules, parameters, indexCount, constructorTypes, ast => this.desugar(Core.clone(ast), true));
+        const canonicallyCertifiedTypeFormations = new Set();
         if (bundle.metadata?.kind === "hit1"
             || bundle.metadata?.kind === "hit2"
             || bundle.metadata?.kind === "hit3") {
@@ -1766,8 +1778,8 @@ export class Core {
                     || new Set(path.argumentNames).size !== path.argumentNames.length) {
                     throw new Error(`三维 HIT 三阶路径构造子 ${path.name} argumentNames 与 telescope 不一致`);
                 }
-                if (path.computationName !== undefined) {
-                    throw new Error(`三维 HIT 计算定理尚未开放：${path.computationName}`);
+                if (path.computationName !== `apd3_${path.name}`) {
+                    throw new Error(`三维 HIT dependent 计算定理不存在：${path.computationName ?? ""}`);
                 }
                 if (path.actionComputationName !== `ap3_${path.name}`) {
                     throw new Error(`三维 HIT action 计算定理不存在：${path.actionComputationName ?? ""}`);
@@ -1796,17 +1808,23 @@ export class Core {
                     || !sameGeneratedAstAlpha(leftEndpoint.targetPath, normalizedMetadataAst(path.targetPath))) {
                     throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 的边界 metadata 不一致`);
                 }
-                for (const actionName of [`ap3_${path.name}`, `@ap3_${path.name}`]) {
-                    const actionType = auxiliaryTypes.get(actionName);
-                    if (!actionType) {
-                        throw new Error(`三维 HIT action 计算定理槽位不存在：${actionName}`);
+                for (const computationName of [
+                    `apd3_${path.name}`,
+                    `@apd3_${path.name}`,
+                    `ap3_${path.name}`,
+                    `@ap3_${path.name}`
+                ]) {
+                    const computationType = auxiliaryTypes.get(computationName);
+                    if (!computationType) {
+                        throw new Error(`三维 HIT 计算定理槽位不存在：${computationName}`);
                     }
-                    let actionConclusion = actionType;
-                    while ((actionConclusion.type === "P" || actionConclusion.type === "->")
-                        && actionConclusion.nodes?.[1])
-                        actionConclusion = actionConclusion.nodes[1];
-                    if (!generatedEqualityEndpoints(actionConclusion)) {
-                        throw new Error(`三维 HIT action 计算定理 ${actionName} 不是等式命题`);
+                    let computationConclusion = computationType;
+                    while ((computationConclusion.type === "P" || computationConclusion.type === "->")
+                        && computationConclusion.nodes?.[1]) {
+                        computationConclusion = computationConclusion.nodes[1];
+                    }
+                    if (!generatedEqualityEndpoints(computationConclusion)) {
+                        throw new Error(`三维 HIT 计算定理 ${computationName} 不是等式命题`);
                     }
                 }
             }
@@ -2011,7 +2029,175 @@ export class Core {
                         throw new Error(`三维 HIT action 计算定理 ${computationName} 与 metadata 不一致`);
                     }
                 };
+                const validateThreePathDependentComputation = (path, full) => {
+                    const eliminatorName = full
+                        ? metadata.fullEliminatorName
+                        : metadata.eliminatorName;
+                    const eliminatorType = full
+                        ? (metadata.fullEliminatorName
+                            ? auxiliaryTypes.get(metadata.fullEliminatorName)
+                            : undefined)
+                        : bundle.eliminator?.[1] && normalizedMetadataAst(bundle.eliminator[1]);
+                    const computationName = `${full ? "@" : ""}apd3_${path.name}`;
+                    const actualComputationType = auxiliaryTypes.get(computationName);
+                    if (!eliminatorName || !eliminatorType || !actualComputationType) {
+                        throw new Error(`三维 HIT dependent 计算定理槽位不存在：${computationName}`);
+                    }
+                    const eliminatorBinders = readRecursorTelescope(eliminatorType, full ? "完整消去器" : "公开消去器");
+                    const pathEntries = metadata.pathConstructors ?? [];
+                    const twoPathEntries = metadata.twoPathConstructors ?? [];
+                    const threePathEntries = metadata.threePathConstructors ?? [];
+                    let offset = full ? 1 : 0;
+                    offset += parameters.length;
+                    const motiveName = eliminatorBinders[offset++].name;
+                    const branchNames = eliminatorBinders
+                        .slice(offset, offset + metadata.constructors.length)
+                        .map(binder => binder.name);
+                    offset += metadata.constructors.length;
+                    const pathMethodNames = eliminatorBinders
+                        .slice(offset, offset + pathEntries.length)
+                        .map(binder => binder.name);
+                    offset += pathEntries.length;
+                    const twoPathMethodNames = eliminatorBinders
+                        .slice(offset, offset + twoPathEntries.length)
+                        .map(binder => binder.name);
+                    offset += twoPathEntries.length;
+                    const threePathMethodNames = eliminatorBinders
+                        .slice(offset, offset + threePathEntries.length)
+                        .map(binder => binder.name);
+                    offset += threePathEntries.length;
+                    if (eliminatorBinders.length !== offset + 1) {
+                        throw new Error("三维 HIT 消去器 telescope 与 dependent 计算 metadata 不一致");
+                    }
+                    const prefixBinders = eliminatorBinders.slice(0, offset);
+                    const prefixValues = prefixBinders.map(binder => wrapVar(binder.name));
+                    const argumentNames = path.argumentNames ?? [];
+                    const argumentValues = argumentNames.map(wrapVar);
+                    const localBinders = argumentNames.map((name, index) => ({
+                        name,
+                        type: normalizedMetadataAst(path.argumentTypes[index])
+                    }));
+                    const pathTerm = wrapApply(wrapVar(path.name), ...parameters.map(parameter => wrapVar(parameter.name)), ...argumentValues.map(argument => Core.clone(argument)));
+                    const dependentHead = wrapApply(wrapVar(eliminatorName), ...prefixValues.map(value => Core.clone(value)));
+                    const pointBranchValue = (endpoint) => {
+                        const application = generatedApplicationParts(endpoint);
+                        const endpointName = generatedFreeConstantName(application.head) ?? "";
+                        const endpointIndex = metadata.constructors
+                            .findIndex(entry => entry.name === endpointName);
+                        if (endpointIndex < 0) {
+                            throw new Error(`${computationName} 引用了未知点构造子：${endpointName || "<非常量>"}`);
+                        }
+                        return wrapApply(wrapVar(branchNames[endpointIndex]), ...application.arguments
+                            .slice(parameters.length)
+                            .map(argument => Core.clone(argument)));
+                    };
+                    const pathMethodValue = (endpoint) => {
+                        const application = generatedApplicationParts(endpoint);
+                        const endpointName = generatedFreeConstantName(application.head) ?? "";
+                        const endpointIndex = pathEntries
+                            .findIndex(entry => entry.name === endpointName);
+                        if (endpointIndex < 0) {
+                            throw new Error(`${computationName} 引用了未知一阶路径：${endpointName}`);
+                        }
+                        return wrapApply(wrapVar(pathMethodNames[endpointIndex]), ...application.arguments
+                            .slice(parameters.length)
+                            .map(argument => Core.clone(argument)));
+                    };
+                    const twoPathMethodValue = (endpoint) => {
+                        const application = generatedApplicationParts(endpoint);
+                        const endpointName = generatedFreeConstantName(application.head) ?? "";
+                        const endpointIndex = twoPathEntries
+                            .findIndex(entry => entry.name === endpointName);
+                        if (endpointIndex < 0) {
+                            throw new Error(`${computationName} 引用了未知二阶路径：${endpointName}`);
+                        }
+                        return wrapApply(wrapVar(twoPathMethodNames[endpointIndex]), ...application.arguments
+                            .slice(parameters.length)
+                            .map(argument => Core.clone(argument)));
+                    };
+                    const pathData = (endpoint) => {
+                        const application = generatedApplicationParts(endpoint);
+                        const endpointName = generatedFreeConstantName(application.head) ?? "";
+                        const pointBoundary = validateTwoPathEndpoint(path.name, "dependent 计算", endpoint, endpointName);
+                        const pathTermValue = Core.clone(endpoint);
+                        const leftBranch = pointBranchValue(pointBoundary.sourcePoint);
+                        const rightBranch = pointBranchValue(pointBoundary.targetPoint);
+                        return {
+                            pathTerm: pathTermValue,
+                            type: strongEquality(wrapApply(wrapVar("trans"), wrapVar(motiveName), Core.clone(pathTermValue), leftBranch), rightBranch),
+                            sourcePoint: pointBoundary.sourcePoint
+                        };
+                    };
+                    const pathComputation = (endpoint) => {
+                        const application = generatedApplicationParts(endpoint);
+                        const endpointName = generatedFreeConstantName(application.head) ?? "";
+                        if (!pathMetadataByName.has(endpointName)) {
+                            throw new Error(`${computationName} 引用了未知一阶路径：${endpointName}`);
+                        }
+                        return wrapApply(wrapVar(`${full ? "@" : ""}apd_${endpointName}`), ...prefixValues.map(value => Core.clone(value)), ...application.arguments
+                            .slice(parameters.length)
+                            .map(argument => Core.clone(argument)));
+                    };
+                    const twoPathComputation = (endpoint) => {
+                        const application = generatedApplicationParts(endpoint);
+                        const endpointName = generatedFreeConstantName(application.head) ?? "";
+                        if (!twoPathMetadataByName.has(endpointName)) {
+                            throw new Error(`${computationName} 引用了未知二阶路径：${endpointName}`);
+                        }
+                        return wrapApply(wrapVar(`${full ? "@" : ""}apd_${endpointName}`), ...prefixValues.map(value => Core.clone(value)), ...application.arguments
+                            .slice(parameters.length)
+                            .map(argument => Core.clone(argument)));
+                    };
+                    const sourcePath = normalizedMetadataAst(path.sourcePath);
+                    const targetPath = normalizedMetadataAst(path.targetPath);
+                    const leftTwoPath = normalizedMetadataAst(path.left);
+                    const rightTwoPath = normalizedMetadataAst(path.right);
+                    const sourcePathData = pathData(sourcePath);
+                    const targetPathData = pathData(targetPath);
+                    const sourceMethod = pathMethodValue(sourcePath);
+                    const targetMethod = pathMethodValue(targetPath);
+                    const sourceComputation = pathComputation(sourcePath);
+                    const targetComputation = pathComputation(targetPath);
+                    const leftComputation = twoPathComputation(leftTwoPath);
+                    const rightComputation = twoPathComputation(rightTwoPath);
+                    const leftMethod = twoPathMethodValue(leftTwoPath);
+                    const rightMethod = twoPathMethodValue(rightTwoPath);
+                    const pathIndex = threePathEntries.findIndex(entry => entry.name === path.name);
+                    const methodValue = wrapApply(wrapVar(threePathMethodNames[pathIndex]), ...argumentValues.map(argument => Core.clone(argument)));
+                    const endpointValue = pointBranchValue(sourcePathData.sourcePoint);
+                    const twoPathDomain = strongEquality(Core.clone(sourcePath), Core.clone(targetPath));
+                    const occupied = new Set([
+                        ...prefixBinders.map(binder => binder.name),
+                        ...argumentNames
+                    ]);
+                    const freshName = (base) => {
+                        let result = base;
+                        while (occupied.has(result))
+                            result += "_";
+                        occupied.add(result);
+                        return result;
+                    };
+                    const twoPathName = freshName("dependentTwoPathValue");
+                    const methodName = freshName("dependentTwoPathMethod");
+                    const targetValueName = freshName("dependentTargetPathValue");
+                    const correctedValueName = freshName("dependentCorrectedValue");
+                    const rawFamily = (twoPathValue) => strongEquality(Core.clone(sourceMethod), strongCompose(wrapApply(wrapVar("trans2"), wrapVar(motiveName), twoPathValue, Core.clone(endpointValue)), Core.clone(targetMethod)));
+                    const actualFamily = (twoPathValue) => strongEquality(wrapApply(wrapVar("apd"), Core.clone(dependentHead), Core.clone(sourcePath)), strongCompose(wrapApply(wrapVar("trans2"), wrapVar(motiveName), twoPathValue, Core.clone(endpointValue)), wrapApply(wrapVar("apd"), Core.clone(dependentHead), Core.clone(targetPath))));
+                    const correction = strongLambda(twoPathName, Core.clone(twoPathDomain), strongLambda(methodName, rawFamily(wrapVar(twoPathName)), strongCompose(strongCompose(Core.clone(sourceComputation), wrapVar(methodName)), wrapApply(wrapVar("inveq"), wrapApply(wrapVar("ap"), strongLambda(targetValueName, Core.clone(targetPathData.type), strongCompose(wrapApply(wrapVar("trans2"), wrapVar(motiveName), wrapVar(twoPathName), Core.clone(endpointValue)), wrapVar(targetValueName))), Core.clone(targetComputation))))));
+                    const mappedMethod = wrapApply(wrapVar("hit_map_transport"), correction, Core.clone(leftTwoPath), Core.clone(rightTwoPath), Core.clone(pathTerm), Core.clone(leftMethod), Core.clone(rightMethod), Core.clone(methodValue));
+                    const actualFamilyLambda = strongLambda(twoPathName, Core.clone(twoPathDomain), actualFamily(wrapVar(twoPathName)));
+                    const transportedComputation = wrapApply(wrapVar("ap"), strongLambda(correctedValueName, actualFamily(Core.clone(leftTwoPath)), wrapApply(wrapVar("trans"), Core.clone(actualFamilyLambda), Core.clone(pathTerm), wrapVar(correctedValueName))), Core.clone(leftComputation));
+                    const correctedMethod = strongCompose(strongCompose(transportedComputation, mappedMethod), wrapApply(wrapVar("inveq"), Core.clone(rightComputation)));
+                    const action = wrapApply(wrapVar("apd3"), Core.clone(dependentHead), Core.clone(pathTerm));
+                    const expected = normalizedMetadataAst(strongWrapPis([...prefixBinders, ...localBinders], strongEquality(action, correctedMethod)));
+                    if (!sameGeneratedAstAlpha(actualComputationType, expected)) {
+                        throw new Error(`三维 HIT dependent 计算定理 ${computationName} 与 metadata 不一致`);
+                    }
+                    canonicallyCertifiedTypeFormations.add(computationName);
+                };
                 for (const path of metadata.threePathConstructors ?? []) {
+                    validateThreePathDependentComputation(path, false);
+                    validateThreePathDependentComputation(path, true);
                     validateThreePathActionComputation(path, false);
                     validateThreePathActionComputation(path, true);
                 }
@@ -2194,6 +2380,8 @@ export class Core {
                     `@ap_${path.name}`,
                     `ap2_${path.name}`,
                     `@ap2_${path.name}`,
+                    `apd3_${path.name}`,
+                    `@apd3_${path.name}`,
                     `ap3_${path.name}`,
                     `@ap3_${path.name}`
                 ]) {
@@ -2236,7 +2424,9 @@ export class Core {
             for (const [name, type] of normalizedEntries) {
                 if (!deferredComputationTypes.has(name))
                     continue;
-                this.checkTypeFormation(type, []);
+                this.checkTypeFormation(type, [], canonicallyCertifiedTypeFormations.has(name)
+                    ? certifiedPath3ComputationResourceLimits
+                    : undefined);
             }
         }
         catch (error) {
@@ -2331,8 +2521,12 @@ export class Core {
             previousTypes,
             previousDefinitions,
             previousRules,
+            certifiedLargeSystemTypes: [...canonicallyCertifiedTypeFormations],
             metadata
         });
+        for (const name of canonicallyCertifiedTypeFormations) {
+            this.certifiedLargeSystemTypes.add(name);
+        }
         if (metadata) {
             this.inductiveMetadata.set(metadata.typeName, metadata);
         }
@@ -2362,6 +2556,9 @@ export class Core {
                     this.state.computeRules[head] = previous;
                 else
                     delete this.state.computeRules[head];
+            }
+            for (const name of registration.certifiedLargeSystemTypes) {
+                this.certifiedLargeSystemTypes.delete(name);
             }
             this.inductiveMetadata.delete(typeName);
         }
@@ -2722,9 +2919,9 @@ export class Core {
      * trusted declarations additionally require that synthesized type to be
      * a Universe and that no elaboration metavariable remains.
      */
-    checkTypeFormation(ast, context = []) {
+    checkTypeFormation(ast, context = [], semanticResourceLimits) {
         const candidate = Core.clone(ast);
-        const inferred = this.checkType(candidate, context, false, undefined, false, true, false);
+        const inferred = this.checkType(candidate, context, false, undefined, false, true, false, semanticResourceLimits);
         if (hasSemanticElaborationHole(candidate)
             || collectInferenceMetaNames(candidate).size
             || hasSemanticElaborationHole(inferred)
@@ -2735,7 +2932,8 @@ export class Core {
             return candidate;
         const normalized = this.semanticKernel.tryWhnf(inferred, context, {
             deadline: this.state.time ? this.state.time + Core.timeout : undefined,
-            maxSteps: Core.semanticTypeSynthesisMaxSteps,
+            maxSteps: semanticResourceLimits?.synthesisMaxSteps
+                ?? Core.semanticTypeSynthesisMaxSteps,
             unfoldDefinitions: true
         });
         if (!normalized || !isNbeUniverseType(normalized)) {
@@ -2743,7 +2941,7 @@ export class Core {
         }
         return candidate;
     }
-    checkType(ast, context, allowModify, beforeInferResolution, allowUnsolvedTermMetas = false, requireSemantic = false, preservePresentation = true) {
+    checkType(ast, context, allowModify, beforeInferResolution, allowUnsolvedTermMetas = false, requireSemantic = false, preservePresentation = true, semanticResourceLimits) {
         const semanticPresentation = preservePresentation && (!allowModify
             || (!requireSemantic && hasExplicitAtOccurrence(ast)))
             ? Core.clone(ast)
@@ -2882,6 +3080,7 @@ export class Core {
                 allowUnsolvedTermMetas: hasSemanticElaborationHole(semanticTarget),
                 annotateTerm: !beforeInferResolution,
                 requireElaboratedTerm: semanticElaboration,
+                resourceLimits: semanticResourceLimits,
                 captureGeneralizedMetas: metas => { generalizedMetas = metas; },
                 captureFailure: failure => { semanticFailure = failure; }
             });
@@ -3513,6 +3712,27 @@ export class Core {
         const allowHoles = options.allowHoles ?? false;
         const semanticAst = Core.clone(ast);
         const requestedElaboration = options.elaborateMetas ?? false;
+        const certifiedOutputMaxNodes = (() => {
+            if (!this.certifiedLargeSystemTypes.size)
+                return undefined;
+            const stack = [semanticAst];
+            while (stack.length) {
+                const node = stack.pop();
+                if (node.type === "var" && !node.bondVarId
+                    && this.certifiedLargeSystemTypes.has(node.name)) {
+                    return certifiedPath3ComputationResourceLimits.outputMaxNodes;
+                }
+                stack.push(...(node.nodes ?? []));
+            }
+            return undefined;
+        })();
+        const inputMaxNodes = options.resourceLimits?.inputMaxNodes
+            ?? Core.semanticNbEMaxNodes;
+        const synthesisMaxSteps = options.resourceLimits?.synthesisMaxSteps
+            ?? Core.semanticTypeSynthesisMaxSteps;
+        const outputMaxNodes = options.resourceLimits?.outputMaxNodes
+            ?? certifiedOutputMaxNodes
+            ?? Core.semanticTypeCheckMaxOutputNodes;
         // A bare reference to a polymorphic definition has no use-site
         // arguments that could solve its cached scheme metas. Returning the
         // safely generalized type is still a complete synthesis result. Keep
@@ -3520,12 +3740,12 @@ export class Core {
         const generalizeMetas = !!options.generalizeMetas
             || this.isBareGeneralizedDefinitionReference(semanticAst);
         const canTryWithoutElaboration = requestedElaboration
-            && fitsSemanticNbeBudget(semanticAst, Core.semanticNbEMaxNodes, false, context, false);
+            && fitsSemanticNbeBudget(semanticAst, inputMaxNodes, false, context, false);
         const maxNodes = canTryWithoutElaboration
-            ? Core.semanticNbEMaxNodes
+            ? inputMaxNodes
             : requestedElaboration
-                ? Core.semanticTypeElaborationMaxNodes
-                : Core.semanticNbEMaxNodes;
+                ? Math.max(Core.semanticTypeElaborationMaxNodes, inputMaxNodes)
+                : inputMaxNodes;
         if (!canTryWithoutElaboration
             && !fitsSemanticNbeBudget(semanticAst, maxNodes, false, context, allowHoles)) {
             if (exceedsSemanticNbeNodeBudget(semanticAst, maxNodes)) {
@@ -3540,7 +3760,7 @@ export class Core {
         let nextSemanticBondVarId = Math.max(this.state.bondVarId, ...context.map(([, , id]) => Number.isFinite(id) ? id + 1 : 0));
         const checkerOptions = {
             deadline: this.state.time ? this.state.time + Core.timeout : undefined,
-            maxSteps: Core.semanticTypeSynthesisMaxSteps,
+            maxSteps: synthesisMaxSteps,
             annotateTerm: options.annotateTerm ?? false,
             generalizeMetas,
             allowUnsolvedTermMetas: options.allowUnsolvedTermMetas ?? false,
@@ -3587,8 +3807,8 @@ export class Core {
                 // directed synthesis, so give this rare fallback a larger but
                 // still bounded budget under the same wall-clock deadline.
                 maxSteps: needsDefinitionElaboration
-                    ? Core.semanticTypeSynthesisMaxSteps * 4
-                    : Core.semanticTypeSynthesisMaxSteps
+                    ? synthesisMaxSteps * 4
+                    : synthesisMaxSteps
             });
             if (elaborated.status === "success")
                 semanticType = elaborated;
@@ -3622,8 +3842,8 @@ export class Core {
         // syntax intact while removing elaboration-only arguments.
         // Keep this pre-pass bounded: genuinely huge reifications must still
         // fail before cloning or traversing their complete output.
-        if (!fitsSemanticNbeBudget(semanticType.type, Math.max(Core.semanticNbEMaxNodes, Core.semanticTypeCheckMaxOutputNodes), false, context, false, generalizedMetaNames)) {
-            if (exceedsSemanticNbeNodeBudget(semanticType.type, Math.max(Core.semanticNbEMaxNodes, Core.semanticTypeCheckMaxOutputNodes))) {
+        if (!fitsSemanticNbeBudget(semanticType.type, Math.max(inputMaxNodes, outputMaxNodes), false, context, false, generalizedMetaNames)) {
+            if (exceedsSemanticNbeNodeBudget(semanticType.type, Math.max(inputMaxNodes, outputMaxNodes))) {
                 options.captureFailure?.({
                     status: "unsupported",
                     code: "budget-exhausted"
@@ -3632,8 +3852,8 @@ export class Core {
             return;
         }
         const compactType = this.compactSemanticOutputType(semanticType.type);
-        if (!fitsSemanticNbeBudget(compactType, Core.semanticTypeCheckMaxOutputNodes, false, context, false, generalizedMetaNames)) {
-            if (exceedsSemanticNbeNodeBudget(compactType, Core.semanticTypeCheckMaxOutputNodes)) {
+        if (!fitsSemanticNbeBudget(compactType, outputMaxNodes, false, context, false, generalizedMetaNames)) {
+            if (exceedsSemanticNbeNodeBudget(compactType, outputMaxNodes)) {
                 options.captureFailure?.({
                     status: "unsupported",
                     code: "budget-exhausted"

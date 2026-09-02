@@ -42,7 +42,7 @@ assert.equal(bundle.metadata.kind, "hit3");
 assert.equal(bundle.metadata.dimension, 3);
 assert.equal(bundle.metadata.ruleSchemaVersion, 1);
 assert.equal(bundle.metadata.threePathConstructors[0].name, "cell3");
-assert.equal(bundle.metadata.threePathConstructors[0].computationName, undefined);
+assert.equal(bundle.metadata.threePathConstructors[0].computationName, "apd3_cell3");
 assert.equal(bundle.metadata.threePathConstructors[0].actionComputationName, "ap3_cell3");
 assert.ok(bundle.auxiliaryTypes.some(([name]) => name === "cell3"));
 for (const name of ["apd_cell3", "@apd_cell3", "ap_cell3", "@ap_cell3"]) {
@@ -50,7 +50,26 @@ for (const name of ["apd_cell3", "@apd_cell3", "ap_cell3", "@ap_cell3"]) {
     assert.equal(bundle.computeRules[name], undefined);
 }
 assert.equal(bundle.computeRules.cell3, undefined);
+const countNodes = ast => {
+    let count = 0;
+    const stack = [ast];
+    while (stack.length) {
+        const current = stack.pop();
+        if (!current) continue;
+        count++;
+        stack.push(...(current.nodes ?? []));
+    }
+    return count;
+};
+assert.ok(
+    countNodes(bundle.auxiliaryTypes.find(([name]) => name === "apd3_cell3")[1]) > 256,
+    "the regression must exercise a path3 result beyond the legacy output-node cap"
+);
 for (const name of ["ap3_cell3", "@ap3_cell3"]) {
+    assert.ok(bundle.auxiliaryTypes.some(([entryName]) => entryName === name));
+    assert.equal(bundle.computeRules[name], undefined);
+}
+for (const name of ["apd3_cell3", "@apd3_cell3"]) {
     assert.ok(bundle.auxiliaryTypes.some(([entryName]) => entryName === name));
     assert.equal(bundle.computeRules[name], undefined);
 }
@@ -61,10 +80,13 @@ assert.equal(added.ok, true, added.error);
 assert.equal(added.declarations[0].status, "valid");
 assert.ok(added.declarations[0].generatedNames.includes("cell3"));
 assert.equal(added.declarations[0].generatedNames.includes("apd_cell3"), false);
+assert.ok(added.declarations[0].generatedNames.includes("apd3_cell3"));
 assert.ok(added.declarations[0].generatedNames.includes("ap3_cell3"));
 assert.equal(sandbox.check("cell3 : faceA3 = faceB3").ok, true);
 assert.equal(sandbox.check("ap3_cell3").ok, true);
 assert.equal(sandbox.check("@ap3_cell3").ok, true);
+assert.equal(sandbox.check("apd3_cell3").ok, true);
+assert.equal(sandbox.check("@apd3_cell3").ok, true);
 
 const useInd3 = sandbox.add(
     "useInd3 := λC:Cube3→U.λc:(C base3)."
@@ -77,6 +99,16 @@ const useInd3 = sandbox.add(
 );
 assert.equal(useInd3.ok, true, useInd3.error);
 assert.equal(sandbox.check("useInd3").ok, true);
+const useApd3 = sandbox.add(
+    "useApd3 := λC:Cube3→U.λc:(C base3)."
+        + "λp0:((trans C loopA3 c)=c)."
+        + "λp1:((trans C loopB3 c)=c)."
+        + "λp2a:(p0=((trans2 C faceA3 c)▪p1))."
+        + "λp2b:(p0=((trans2 C faceB3 c)▪p1))."
+        + "λp3:((trans (λr:(loopA3=loopB3).p0=((trans2 C r c)▪p1)) cell3 p2a)=p2b)."
+        + "apd3_cell3 C c p0 p1 p2a p2b p3"
+);
+assert.equal(useApd3.ok, true, useApd3.error);
 const useAp3 = sandbox.add(
     "useAp3 := λC:U.λr:C.λq0:(r=r).λq1:(r=r)."
         + "λq2a:(q0=q1).λq2b:(q0=q1).λq3:(q2a=q2b)."
@@ -97,16 +129,16 @@ assert.equal(restored.getDeclarations()[0].status, "valid");
 assert.equal(restored.bridge().inductives[0].metadata.kind, "hit3");
 assert.equal(restored.check("cell3 : faceA3 = faceB3").ok, true);
 assert.equal(restored.check("ap3_cell3").ok, true);
+assert.equal(restored.check("apd3_cell3").ok, true);
 
-const parameterized = parseSandboxHit(
-    "hit CubeP (A : U) : U "
-        + "| baseP : CubeP A "
-        + "| loopAP : Πz:A,baseP=baseP "
-        + "| loopBP : Πz:A,baseP=baseP "
-        + "| path2 faceAP : Πz:A,loopAP z=loopBP z "
-        + "| path2 faceBP : Πz:A,loopAP z=loopBP z "
-        + "| path3 cellP : Πz:A,faceAP A z=faceBP A z"
-);
+const parameterizedSource = "hit CubeP (A : U) : U "
+    + "| baseP : CubeP A "
+    + "| loopAP : Πz:A,baseP=baseP "
+    + "| loopBP : Πz:A,baseP=baseP "
+    + "| path2 faceAP : Πz:A,loopAP z=loopBP z "
+    + "| path2 faceBP : Πz:A,loopAP z=loopBP z "
+    + "| path3 cellP : Πz:A,faceAP A z=faceBP A z";
+const parameterized = parseSandboxHit(parameterizedSource);
 const parameterizedCell = parameterized.threePathConstructors[0];
 assert.deepEqual(parameterizedCell.arguments.map(argument => argument.name), ["z"]);
 assert.equal(headName(parameterizedCell.sourcePath), "loopAP");
@@ -174,6 +206,16 @@ const register = candidate => {
 assert.doesNotThrow(() => register(structuredClone(bundle)));
 assert.doesNotThrow(() => register(lowerSandboxHit(parameterized)));
 
+const parameterizedSandbox = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+});
+const parameterizedAdded = parameterizedSandbox.add(parameterizedSource);
+assert.equal(parameterizedAdded.ok, true, parameterizedAdded.error);
+assert.equal(parameterizedSandbox.check("apd3_cellP").ok, true);
+assert.equal(parameterizedSandbox.check("@apd3_cellP").ok, true);
+assert.equal(parameterizedSandbox.add("useApd3P := apd3_cellP").ok, true);
+assert.equal(parameterizedSandbox.add("useFullApd3P := @apd3_cellP").ok, true);
+
 const wrongKind = structuredClone(bundle);
 wrongKind.metadata.kind = "hit2";
 wrongKind.metadata.dimension = 2;
@@ -187,9 +229,12 @@ const wrongEndpoint = structuredClone(bundle);
 wrongEndpoint.metadata.threePathConstructors[0].left = parser.parse("faceB3");
 assert.throws(() => register(wrongEndpoint), /端点与 metadata 不一致/);
 
-const prematureComputation = structuredClone(bundle);
-prematureComputation.metadata.threePathConstructors[0].computationName = "apd_cell3";
-assert.throws(() => register(prematureComputation), /三维 HIT 计算定理尚未开放/);
+const wrongComputationName = structuredClone(bundle);
+wrongComputationName.metadata.threePathConstructors[0].computationName = "apd_cell3";
+assert.throws(
+    () => register(wrongComputationName),
+    /三维 HIT dependent 计算定理不存在/
+);
 
 const missingArgumentNames = structuredClone(bundle);
 delete missingArgumentNames.metadata.threePathConstructors[0].argumentNames;
@@ -214,6 +259,20 @@ for (const [target, source] of [
 assert.throws(
     () => register(forgedAction),
     /三维 HIT action 计算定理 ap3_cell3 与 metadata 不一致/
+);
+
+const forgedDependent = structuredClone(bundle);
+const dependentTypes = new Map(forgedDependent.auxiliaryTypes);
+for (const [target, source] of [
+    ["apd3_cell3", "apd_faceA3"],
+    ["@apd3_cell3", "@apd_faceA3"]
+]) {
+    const index = forgedDependent.auxiliaryTypes.findIndex(([name]) => name === target);
+    forgedDependent.auxiliaryTypes[index] = [target, structuredClone(dependentTypes.get(source))];
+}
+assert.throws(
+    () => register(forgedDependent),
+    /三维 HIT dependent 计算定理 apd3_cell3 与 metadata 不一致/
 );
 
 const forgedCoherence = structuredClone(bundle);

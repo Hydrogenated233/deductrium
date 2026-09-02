@@ -1768,10 +1768,8 @@ export function lowerSandboxHit(signature) {
         ]),
         ...signature.threePathConstructors.flatMap(path => [
             path.name,
-            `apd_${path.name}`,
-            `@apd_${path.name}`,
-            `ap_${path.name}`,
-            `@ap_${path.name}`,
+            `apd3_${path.name}`,
+            `@apd3_${path.name}`,
             `ap3_${path.name}`,
             `@ap3_${path.name}`
         ]),
@@ -1792,7 +1790,9 @@ export function lowerSandboxHit(signature) {
         "apd3",
         "ap3",
         "@hit_ap2",
-        "hit_ap2"
+        "hit_ap2",
+        "@hit_map_transport",
+        "hit_map_transport"
     ]);
     signature = sandboxRenameHitUniformParameters(signature, uniformParameterReserved);
     const ordinary = {
@@ -2131,13 +2131,60 @@ export function lowerSandboxHit(signature) {
         const path = signature.threePathConstructors[index];
         const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
         const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
+        const dependentHead = sandboxApply(sandboxVar(`ind_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)));
+        const fullDependentHead = sandboxApply(sandboxVar(`@ind_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)));
         const recursorHead = sandboxApply(sandboxVar(`rec_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)));
         const fullRecursorHead = sandboxApply(sandboxVar(`@rec_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)));
         const methodValue = sandboxApply(sandboxVar(recursorThreePathMethodNames[index]), ...pathArguments);
+        const dependentMethodValue = sandboxApply(sandboxVar(dependentThreePathMethodNames[index]), ...pathArguments);
         const leftTwoPath = sandboxHitTwoPathData(path.left, signature.parameters, signature.twoPathConstructors, path.name);
         const rightTwoPath = sandboxHitTwoPathData(path.right, signature.parameters, signature.twoPathConstructors, path.name);
         const sourcePath = sandboxHitPathData(path.sourcePath, signature.parameters, signature.pointConstructors, signature.pathConstructors, motiveName, branchNames, path.name);
         const targetPath = sandboxHitPathData(path.targetPath, signature.parameters, signature.pointConstructors, signature.pathConstructors, motiveName, branchNames, path.name);
+        const sourceDependentMethod = sandboxHitPathMethodValue(path.sourcePath, signature.parameters, signature.pathConstructors, pathMethodNames, path.name);
+        const targetDependentMethod = sandboxHitPathMethodValue(path.targetPath, signature.parameters, signature.pathConstructors, pathMethodNames, path.name);
+        const leftDependentTwoPathMethod = sandboxHitTwoPathMethodValue(path.left, signature.parameters, signature.twoPathConstructors, dependentTwoPathMethodNames, path.name);
+        const rightDependentTwoPathMethod = sandboxHitTwoPathMethodValue(path.right, signature.parameters, signature.twoPathConstructors, dependentTwoPathMethodNames, path.name);
+        const endpointValue = sandboxHitBranchValue(path.sourcePoint, signature.parameters, signature.pointConstructors, branchNames);
+        const makeDependentPathComputation = (data, full) => sandboxApply(sandboxVar(`${full ? "@" : ""}apd_${data.path.name}`), ...(full ? [sandboxVar(motiveUniverseName)] : []), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)), ...data.arguments_);
+        const makeDependentTwoPathComputation = (data, full) => sandboxApply(sandboxVar(`${full ? "@" : ""}apd_${data.path.name}`), ...(full ? [sandboxVar(motiveUniverseName)] : []), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)), ...data.arguments_);
+        const sourceDependentComputation = makeDependentPathComputation(sourcePath, false);
+        const targetDependentComputation = makeDependentPathComputation(targetPath, false);
+        const sourceDependentComputationFull = makeDependentPathComputation(sourcePath, true);
+        const targetDependentComputationFull = makeDependentPathComputation(targetPath, true);
+        const leftDependentTwoPathComputation = makeDependentTwoPathComputation(leftTwoPath, false);
+        const rightDependentTwoPathComputation = makeDependentTwoPathComputation(rightTwoPath, false);
+        const leftDependentTwoPathComputationFull = makeDependentTwoPathComputation(leftTwoPath, true);
+        const rightDependentTwoPathComputationFull = makeDependentTwoPathComputation(rightTwoPath, true);
+        const dependentCorrectionScope = new Set([
+            ...coherenceScope,
+            ...path.arguments.map(argument => argument.name)
+        ]);
+        const dependentTwoPathName = sandboxFreshName("dependentTwoPathValue", dependentCorrectionScope);
+        const dependentMethodName = sandboxFreshName("dependentTwoPathMethod", dependentCorrectionScope);
+        const dependentTargetPathName = sandboxFreshName("dependentTargetPathValue", dependentCorrectionScope);
+        const dependentTwoPathDomain = sandboxEquality(Core.clone(sourcePath.pathTerm), Core.clone(targetPath.pathTerm));
+        const rawDependentFamily = (twoPathValue) => sandboxEquality(Core.clone(sourceDependentMethod), sandboxCompose(sandboxApply(sandboxVar("trans2"), sandboxVar(motiveName), twoPathValue, Core.clone(endpointValue)), Core.clone(targetDependentMethod)));
+        const actualDependentFamily = (head, twoPathValue) => sandboxEquality(sandboxApply(sandboxVar("apd"), Core.clone(head), Core.clone(sourcePath.pathTerm)), sandboxCompose(sandboxApply(sandboxVar("trans2"), sandboxVar(motiveName), twoPathValue, Core.clone(endpointValue)), sandboxApply(sandboxVar("apd"), Core.clone(head), Core.clone(targetPath.pathTerm))));
+        const dependentCorrection = (sourceComputation, targetComputation) => {
+            const twoPathValue = sandboxVar(dependentTwoPathName);
+            const method = sandboxVar(dependentMethodName);
+            const targetWhisker = sandboxLambda(dependentTargetPathName, Core.clone(targetPath.type), sandboxCompose(sandboxApply(sandboxVar("trans2"), sandboxVar(motiveName), Core.clone(twoPathValue), Core.clone(endpointValue)), sandboxVar(dependentTargetPathName)));
+            return sandboxLambda(dependentTwoPathName, Core.clone(dependentTwoPathDomain), sandboxLambda(dependentMethodName, rawDependentFamily(Core.clone(twoPathValue)), sandboxCompose(sandboxCompose(Core.clone(sourceComputation), method), sandboxApply(sandboxVar("inveq"), sandboxApply(sandboxVar("ap"), targetWhisker, Core.clone(targetComputation))))));
+        };
+        const publicDependentCorrection = dependentCorrection(sourceDependentComputation, targetDependentComputation);
+        const fullDependentCorrection = dependentCorrection(sourceDependentComputationFull, targetDependentComputationFull);
+        const mappedDependentMethod = sandboxApply(sandboxVar("hit_map_transport"), publicDependentCorrection, Core.clone(leftTwoPath.pathTerm), Core.clone(rightTwoPath.pathTerm), Core.clone(pathTerm), Core.clone(leftDependentTwoPathMethod), Core.clone(rightDependentTwoPathMethod), Core.clone(dependentMethodValue));
+        const mappedDependentMethodFull = sandboxApply(sandboxVar("hit_map_transport"), fullDependentCorrection, Core.clone(leftTwoPath.pathTerm), Core.clone(rightTwoPath.pathTerm), Core.clone(pathTerm), Core.clone(leftDependentTwoPathMethod), Core.clone(rightDependentTwoPathMethod), Core.clone(dependentMethodValue));
+        const publicActualFamily = sandboxLambda(dependentTwoPathName, Core.clone(dependentTwoPathDomain), actualDependentFamily(dependentHead, sandboxVar(dependentTwoPathName)));
+        const fullActualFamily = sandboxLambda(dependentTwoPathName, Core.clone(dependentTwoPathDomain), actualDependentFamily(fullDependentHead, sandboxVar(dependentTwoPathName)));
+        const transportedComputation = (actualFamily, leftComputation) => {
+            const leftActualType = actualDependentFamily(actualFamily === publicActualFamily ? dependentHead : fullDependentHead, Core.clone(leftTwoPath.pathTerm));
+            const valueName = sandboxFreshName("dependentCorrectedValue", dependentCorrectionScope);
+            return sandboxApply(sandboxVar("ap"), sandboxLambda(valueName, leftActualType, sandboxApply(sandboxVar("trans"), Core.clone(actualFamily), Core.clone(pathTerm), sandboxVar(valueName))), leftComputation);
+        };
+        const correctedDependentThreeMethod = sandboxCompose(sandboxCompose(transportedComputation(publicActualFamily, leftDependentTwoPathComputation), mappedDependentMethod), sandboxApply(sandboxVar("inveq"), rightDependentTwoPathComputation));
+        const correctedDependentThreeMethodFull = sandboxCompose(sandboxCompose(transportedComputation(fullActualFamily, leftDependentTwoPathComputationFull), mappedDependentMethodFull), sandboxApply(sandboxVar("inveq"), rightDependentTwoPathComputationFull));
         const makeRecursorPathComputation = (data, full) => sandboxApply(sandboxVar(`${full ? "@" : ""}ap_${data.path.name}`), ...(full ? [sandboxVar(motiveUniverseName)] : []), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)), ...data.arguments_);
         const makeStrongTwoPathComputation = (data, full) => sandboxApply(sandboxVar(`${full ? "@" : ""}ap2_${data.path.name}`), ...(full ? [sandboxVar(motiveUniverseName)] : []), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)), ...data.arguments_);
         const leftPathComputation = makeRecursorPathComputation(sourcePath, false);
@@ -2158,6 +2205,17 @@ export function lowerSandboxHit(signature) {
         const correction = (leftComputation, rightComputation) => sandboxLambda(methodName, sandboxEquality(Core.clone(sourceMethod), Core.clone(targetMethod)), sandboxCompose(sandboxCompose(leftComputation, sandboxVar(methodName)), sandboxApply(sandboxVar("inveq"), rightComputation)));
         const correctedMethod = sandboxCompose(sandboxCompose(leftStrongComputation, sandboxApply(sandboxVar("ap"), correction(leftPathComputation, rightPathComputation), methodValue)), sandboxApply(sandboxVar("inveq"), rightStrongComputation));
         const correctedMethodFull = sandboxCompose(sandboxCompose(leftStrongComputationFull, sandboxApply(sandboxVar("ap"), correction(leftPathComputationFull, rightPathComputationFull), Core.clone(methodValue))), sandboxApply(sandboxVar("inveq"), rightStrongComputationFull));
+        let publicApd3Type = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("apd3"), dependentHead, pathTerm), correctedDependentThreeMethod));
+        publicApd3Type = sandboxWrapPis(allDependentPathBinders, publicApd3Type);
+        publicApd3Type = sandboxWrapPis(extractSandboxPiBinders(base.eliminator[1], signature.parameters.length + 1, signature.pointConstructors.length), publicApd3Type);
+        publicApd3Type = sandboxPi(motiveName, extractSandboxPiBinder(base.eliminator[1], signature.parameters.length).type, publicApd3Type);
+        publicApd3Type = sandboxWrapPis(signature.parameters, publicApd3Type);
+        let fullApd3Type = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("apd3"), fullDependentHead, Core.clone(pathTerm)), correctedDependentThreeMethodFull));
+        fullApd3Type = sandboxWrapPis(allDependentPathBinders, fullApd3Type);
+        fullApd3Type = sandboxWrapPis(extractSandboxPiBinders(fullEliminatorEntry[1], 1 + signature.parameters.length + 1, signature.pointConstructors.length), fullApd3Type);
+        fullApd3Type = sandboxPi(motiveName, extractSandboxPiBinder(fullEliminatorEntry[1], 1 + signature.parameters.length).type, fullApd3Type);
+        fullApd3Type = sandboxWrapPis(signature.parameters, fullApd3Type);
+        fullApd3Type = sandboxPi(motiveUniverseName, sandboxVar("U@"), fullApd3Type);
         let publicAp3Type = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("ap3"), recursorHead, pathTerm), correctedMethod));
         publicAp3Type = sandboxWrapPis(allRecursorPathBinders, publicAp3Type);
         publicAp3Type = sandboxWrapPis(extractSandboxPiBinders(base.recursor[1], signature.parameters.length + 1, signature.pointConstructors.length), publicAp3Type);
@@ -2169,7 +2227,7 @@ export function lowerSandboxHit(signature) {
         fullAp3Type = sandboxPi(motiveName, extractSandboxPiBinder(fullRecursorEntry[1], 1 + signature.parameters.length).type, fullAp3Type);
         fullAp3Type = sandboxWrapPis(signature.parameters, fullAp3Type);
         fullAp3Type = sandboxPi(motiveUniverseName, sandboxVar("U@"), fullAp3Type);
-        computationTypes.push([`ap3_${path.name}`, publicAp3Type], [`@ap3_${path.name}`, fullAp3Type]);
+        computationTypes.push([`apd3_${path.name}`, publicApd3Type], [`@apd3_${path.name}`, fullApd3Type], [`ap3_${path.name}`, publicAp3Type], [`@ap3_${path.name}`, fullAp3Type]);
     }
     const generatedNames = [
         signature.name,
@@ -2196,6 +2254,8 @@ export function lowerSandboxHit(signature) {
         ]),
         ...signature.threePathConstructors.flatMap(path => [
             path.name,
+            `apd3_${path.name}`,
+            `@apd3_${path.name}`,
             `ap3_${path.name}`,
             `@ap3_${path.name}`
         ])
@@ -2267,6 +2327,7 @@ export function lowerSandboxHit(signature) {
                 rightTwoPath: path.rightTwoPath,
                 sourcePath: Core.clone(path.sourcePath),
                 targetPath: Core.clone(path.targetPath),
+                computationName: `apd3_${path.name}`,
                 actionComputationName: `ap3_${path.name}`
             }))
         },
@@ -2509,6 +2570,8 @@ function sandboxHitGeneratedNames(signature) {
         ]),
         ...signature.threePathConstructors.flatMap(path => [
             path.name,
+            `apd3_${path.name}`,
+            `@apd3_${path.name}`,
             `ap3_${path.name}`,
             `@ap3_${path.name}`
         ])

@@ -591,6 +591,9 @@ export function initTypeSystem() {
     typeName = "eq.hit_ap2";
     addRule("@定义", "@hit_ap2:=(Lu:U@.Lv:U@.La:Uu.Lb:Uv.Lx:a.Ly:a.Lp:x=y.Lq:x=y.Lf:a->b.Lr:p=q.ap (ap f) r):(Pu:U@,Pv:U@,Pa:Uu,Pb:Uv,Px:a,Py:a,Pp:x=y,Pq:x=y,Pf:a->b,Pr:p=q,(ap f p)=(ap f q))");
     addRule("@定义", "hit_ap2:=@hit_ap2 _ _ _ _ _ _ _ _");
+    typeName = "eq.hit_map_transport";
+    addRule("@定义", "@hit_map_transport:=(Lu:U@.Lv:U@.Lw:U@.La:Uu.Lxf:a->Uv.Lyf:a->Uw.Lf:Pz:a,xf z->yf z.Lx:a.Ly:a.Lp:x=y.Lsx:xf x.Lsy:xf y.Lh:(trans xf p sx)=sy.ind_eq x (Ly0:a.Lp0:x=y0.Psx0:xf x,Psy0:xf y0,((trans xf p0 sx0)=sy0)->((trans yf p0 (f x sx0))=(f y0 sy0))) (Lsx0:xf x.Lsy0:xf x.Lh0:sx0=sy0.ap (f x) h0) y p sx sy h):(Pu:U@,Pv:U@,Pw:U@,Pa:Uu,Pxf:a->Uv,Pyf:a->Uw,Pf:Pz:a,xf z->yf z,Px:a,Py:a,Pp:x=y,Psx:xf x,Psy:xf y,((trans xf p sx)=sy)->((trans yf p (f x sx))=(f y sy)))");
+    addRule("@定义", "hit_map_transport:=@hit_map_transport _ _ _ _ _ _");
     typeName = "S2.ind";
     addRule("@解构", "@ind_S2: Pu:U@,PC:S2->Uu,Pcb:C base2,Pcs:refl cb=(trans2 C surf cb)*(refl cb),Px:S2,C x");
     addRule("@解构", "ind_S2:=@ind_S2 _");

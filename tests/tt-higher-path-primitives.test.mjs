@@ -7,7 +7,8 @@ import { initTypeSystem } from "../js/tt/initial.js";
 const parser = new ASTParser();
 const rules = initTypeSystem();
 const names = [
-    "@trans3", "trans3", "@apd3", "apd3", "@ap3", "ap3", "@hit_ap2", "hit_ap2"
+    "@trans3", "trans3", "@apd3", "apd3", "@ap3", "ap3",
+    "@hit_ap2", "hit_ap2", "@hit_map_transport", "hit_map_transport"
 ];
 const definitionNames = rules
     .filter(rule => rule.ast.type === ":=")
@@ -69,7 +70,8 @@ for (const source of [
         + "=== refl (ap (λp:true=true.ap (λx:True.x) p) (refl (refl true)))",
     "@hit_ap2 _ _ True True true true (refl true) (refl true) "
         + "(λx:True.x) (refl (refl true)) === refl (refl true)",
-    "hit_ap2 (λx:True.x) (refl (refl true)) === refl (refl true)"
+    "hit_ap2 (λx:True.x) (refl (refl true)) === refl (refl true)",
+    "hit_map_transport (λz:True.λh:True.h) true true rfl true true rfl === rfl"
 ]) {
     const result = engine.check(source);
     assert.equal(result.ok, true, result.error ?? source);
