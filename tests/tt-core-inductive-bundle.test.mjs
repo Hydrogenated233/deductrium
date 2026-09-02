@@ -132,6 +132,12 @@ assert.equal(cloned.metadata?.fullEliminatorName, "@ind_triClone",
     "the bridge must retain the universe-polymorphic eliminator metadata");
 assert.equal(cloned.metadata?.fullRecursorName, "@rec_triClone",
     "the bridge must retain the universe-polymorphic recursor metadata");
+assert.equal(cloned.metadata?.ruleSchemaVersion, 1,
+    "the bridge must retain the Core-validated compute-rule schema marker");
+assert.deepEqual(cloned.metadata?.constructors[0].argumentNames, [],
+    "the bridge must retain canonical constructor argument names");
+assert.deepEqual(cloned.metadata?.constructors[0].recursiveArguments, [],
+    "the bridge must retain canonical recursive-argument metadata");
 assert.equal(cloned.computeRules?.rec_triClone?.length, 3,
     "the bridge must retain all recursor iota rules");
 assert.notEqual(cloned.recursor?.[1], sandboxBundle.recursor?.[1],

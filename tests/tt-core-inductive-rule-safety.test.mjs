@@ -38,7 +38,8 @@ function assertRejected(bundle, expected, message) {
         ...bundle.constructors.map(([name]) => name),
         ...(bundle.eliminator ? [bundle.eliminator[0]] : []),
         ...(bundle.recursor ? [bundle.recursor[0]] : []),
-        ...(bundle.auxiliaryTypes ?? []).map(([name]) => name)
+        ...(bundle.auxiliaryTypes ?? []).map(([name]) => name),
+        ...(bundle.definitions ?? []).map(([name]) => name)
     ];
     assert.throws(() => core.registerSystemInductive(bundle), expected, message);
     for (const name of bundleNames) {
@@ -146,6 +147,10 @@ const acceptedBundles = [
         + "| nodeTreeSafe : (nat -> TreeSafe A) -> TreeSafe A"
     )),
     lowerSandboxInductive(parseSandboxInductive(
+        "inductive DepTreeSafe (A : U) : U "
+        + "| depNodeTreeSafe : (A -> DepTreeSafe A) -> DepTreeSafe A"
+    )),
+    lowerSandboxInductive(parseSandboxInductive(
         "inductive VecSafe (A : U) [n : nat] : U "
         + "| nilVecSafe : VecSafe A 0 "
         + "| consVecSafe : Pn:nat,A -> VecSafe A n -> VecSafe A (succ n)"
@@ -163,6 +168,173 @@ const acceptedBundles = [
         + "| path2 squareSurfaceSafe : leftSurfaceSafe = rightSurfaceSafe"
     ))
 ];
+const dependentTreeBundle = acceptedBundles.find(bundle => bundle.type[0] === "DepTreeSafe");
+assert.match(
+    parser.stringify(dependentTreeBundle.computeRules.ind_DepTreeSafe[0].result),
+    /λx:\?p0/,
+    "recursive telescope domains must be instantiated with the LHS uniform parameter capture"
+);
+
+const wrongBranch = lowerSandboxInductive(parseSandboxInductive(
+    "inductive WrongBranch : U | zeroWrongBranch : WrongBranch "
+    + "| succWrongBranch : WrongBranch -> WrongBranch"
+));
+wrongBranch.computeRules.ind_WrongBranch[1].result = parse("?c0");
+assertRejected(wrongBranch, /canonical 分支/,
+    "a recursive constructor cannot compute to another constructor's branch");
+
+const wrongMotive = lowerSandboxInductive(parseSandboxInductive(
+    "inductive WrongMotive : U | zeroWrongMotive : WrongMotive "
+    + "| succWrongMotive : WrongMotive -> WrongMotive"
+));
+wrongMotive.computeRules.ind_WrongMotive[1].result = parse(
+    "?c1 ?a1_0 (ind_WrongMotive ?c0 ?c0 ?c1 ?a1_0)"
+);
+assertRejected(wrongMotive, /canonical 分支/,
+    "a recursive call cannot replace its motive with a branch");
+
+const forgedEliminatorType = lowerSandboxInductive(parseSandboxInductive(
+    "inductive ForgedEliminatorType : U "
+    + "| zeroForgedEliminatorType : ForgedEliminatorType "
+    + "| succForgedEliminatorType : ForgedEliminatorType -> ForgedEliminatorType"
+));
+let forgedEliminatorResult = forgedEliminatorType.eliminator[1];
+while ((forgedEliminatorResult.type === "P" || forgedEliminatorResult.type === "->")
+    && forgedEliminatorResult.nodes?.[1]) {
+    forgedEliminatorResult = forgedEliminatorResult.nodes[1];
+}
+Object.assign(forgedEliminatorResult, parse("False"));
+assertRejected(forgedEliminatorType, /subject-reduction/,
+    "same-arity forged eliminator codomains must be rejected before rule publication");
+
+const wrongParameter = lowerSandboxInductive(parseSandboxInductive(
+    "inductive ListSubject (A : U) : U "
+    + "| nilListSubject : ListSubject A "
+    + "| consListSubject : A -> ListSubject A -> ListSubject A"
+));
+wrongParameter.computeRules.ind_ListSubject[1].result = parse(
+    "?c1 ?a1_0 ?a1_1 (ind_ListSubject ?a1_0 ?C ?c0 ?c1 ?a1_1)"
+);
+assertRejected(wrongParameter, /canonical 分支/,
+    "a recursive call cannot replace a uniform parameter with constructor data");
+
+const wrongChildIndex = lowerSandboxInductive(parseSandboxInductive(
+    "inductive VecSubject (A : U) [n : nat] : U "
+    + "| nilVecSubject : VecSubject A 0 "
+    + "| consVecSubject : Pn:nat,A -> VecSubject A n -> VecSubject A (succ n)"
+));
+wrongChildIndex.computeRules.ind_VecSubject[1].result = parse(
+    "?c1 ?a1_0 ?a1_1 ?a1_2 "
+    + "(ind_VecSubject ?p0 ?C ?c0 ?c1 (succ ?a1_0) ?a1_2)"
+);
+assertRejected(wrongChildIndex, /canonical 分支/,
+    "an indexed recursive call must use the recursive child's index");
+
+const wrongFunctionChild = lowerSandboxInductive(parseSandboxInductive(
+    "inductive TreeSubject (A : U) : U "
+    + "| leafTreeSubject : A -> TreeSubject A "
+    + "| nodeTreeSubject : (nat -> TreeSubject A) -> TreeSubject A"
+));
+wrongFunctionChild.computeRules.ind_TreeSubject[1].result = parse(
+    "?c1 ?a1_0 (λx:nat.ind_TreeSubject ?p0 ?C ?c0 ?c1 (?a1_0 0))"
+);
+assertRejected(wrongFunctionChild, /canonical 分支/,
+    "a function-valued recursive argument must recurse at the bound telescope variable");
+
+const wrongHitBranch = lowerSandboxHit(parseSandboxHit(
+    "hit HitBranchSubject : U "
+    + "| leftHitBranchSubject : HitBranchSubject "
+    + "| rightHitBranchSubject : HitBranchSubject "
+    + "| loopHitBranchSubject : leftHitBranchSubject = leftHitBranchSubject"
+));
+wrongHitBranch.computeRules.ind_HitBranchSubject[1].result = parse("?c0");
+assertRejected(wrongHitBranch, /canonical 分支/,
+    "a HIT point constructor cannot compute to another point branch");
+
+const aliasHead = lowerSandboxInductive(parseSandboxInductive(
+    "inductive AliasHeadSubject : U "
+    + "| zeroAliasHeadSubject : AliasHeadSubject "
+    + "| succAliasHeadSubject : AliasHeadSubject -> AliasHeadSubject"
+));
+aliasHead.definitions = [[
+    "aliasIndAliasHeadSubject",
+    parse("ind_AliasHeadSubject")
+]];
+aliasHead.computeRules.ind_AliasHeadSubject[1].result = parse(
+    "?c1 ?a1_0 (aliasIndAliasHeadSubject ?C ?c0 ?c1 ?a1_0)"
+);
+assertRejected(aliasHead, /canonical 分支|不允许附加未声明的系统定义/,
+    "a transparent alias cannot hide a recursive eliminator head");
+
+const downgradedSchema = lowerSandboxInductive(parseSandboxInductive(
+    "inductive DowngradedSchema : U "
+    + "| zeroDowngradedSchema : DowngradedSchema "
+    + "| succDowngradedSchema : DowngradedSchema -> DowngradedSchema"
+));
+delete downgradedSchema.metadata.ruleSchemaVersion;
+downgradedSchema.computeRules.ind_DowngradedSchema[1].result = parse("?c0");
+assertRejected(downgradedSchema, /必须使用计算规则 schema v1/,
+    "removing the schema marker must not downgrade a current sandbox bundle");
+
+for (const [label, mutate] of [
+    ["constructor", bundle => bundle.constructors.push(["escapeClosed", parse("False")])],
+    ["auxiliary type", bundle => bundle.auxiliaryTypes.push(["escapeAux", parse("False")])],
+    ["definition", bundle => { bundle.definitions = [["escapeDefinition", parse("true")]]; }]
+]) {
+    const injected = lowerSandboxInductive(parseSandboxInductive(
+        `inductive Closed${label.replace(/\s/g, "")} : U `
+        + `| baseClosed${label.replace(/\s/g, "")} : Closed${label.replace(/\s/g, "")}`
+    ));
+    mutate(injected);
+    assertRejected(
+        injected,
+        /列表与 bundle 不一致|不允许附加未声明的系统定义/,
+        `schema-v1 must reject an injected ${label}`
+    );
+}
+
+const incompleteRules = lowerSandboxInductive(parseSandboxInductive(
+    "inductive IncompleteRules : U "
+    + "| zeroIncompleteRules : IncompleteRules "
+    + "| succIncompleteRules : IncompleteRules -> IncompleteRules"
+));
+incompleteRules.computeRules.ind_IncompleteRules.pop();
+assertRejected(incompleteRules, /未完整覆盖全部点构造子/,
+    "a canonical rule table must cover every point constructor");
+
+const forgedRecursiveMetadata = lowerSandboxInductive(parseSandboxInductive(
+    "inductive MetadataVec (A : U) [n : nat] : U "
+    + "| nilMetadataVec : MetadataVec A 0 "
+    + "| consMetadataVec : Pn:nat,A -> MetadataVec A n -> MetadataVec A (succ n)"
+));
+forgedRecursiveMetadata.metadata.constructors[1]
+    .recursiveArguments[0].resultIndices[0] = parse("succ n");
+assertRejected(forgedRecursiveMetadata, /递归结果索引与 metadata 不一致/,
+    "recursive metadata must be derived from the actual constructor argument type");
+
+const publicationCore = createCore();
+const publicationBundle = lowerSandboxInductive(parseSandboxInductive(
+    "inductive PublicationOrder : U "
+    + "| zeroPublicationOrder : PublicationOrder "
+    + "| succPublicationOrder : PublicationOrder -> PublicationOrder"
+));
+const originalCheckTypeFormation = publicationCore.checkTypeFormation.bind(publicationCore);
+let observedTypeChecks = 0;
+publicationCore.checkTypeFormation = (ast, context) => {
+    observedTypeChecks++;
+    for (const head of Object.keys(publicationBundle.computeRules)) {
+        assert.equal(publicationCore.state.computeRules[head], undefined,
+            `${head} must stay unpublished while generated types are checked`);
+        assert.equal(publicationCore.semanticKernel.hasComputeRules(head), false);
+    }
+    return originalCheckTypeFormation(ast, context);
+};
+publicationCore.registerSystemInductive(publicationBundle);
+assert.ok(observedTypeChecks > 0);
+for (const head of Object.keys(publicationBundle.computeRules)) {
+    assert.equal(publicationCore.semanticKernel.hasComputeRules(head), true,
+        `${head} must be published after type validation succeeds`);
+}
 
 const unsafeIndexedBase = lowerSandboxInductive(parseSandboxInductive(
     "inductive VecUnsafe (A : U) [n : nat] : U "
@@ -179,7 +351,7 @@ for (const [label, unsafeData] of [
     );
     assertRejected(
         unsafeIndexed,
-        /递归数据不是当前构造项的直接子项/,
+        /递归数据不是当前构造项的直接子项|canonical 分支/,
         `${label} argument must not be accepted as recursive data`
     );
 }

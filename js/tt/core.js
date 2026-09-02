@@ -328,6 +328,85 @@ function sameGeneratedAst(left, right) {
     return leftNodes.length === rightNodes.length
         && leftNodes.every((node, index) => sameGeneratedAst(node, rightNodes[index]));
 }
+function generatedBinderPosition(ast, scope) {
+    for (let index = scope.length - 1; index >= 0; index--) {
+        const binder = scope[index];
+        if (ast.bondVarId && binder.id === ast.bondVarId)
+            return scope.length - 1 - index;
+        if (!ast.bondVarId && ast.name === binder.name)
+            return scope.length - 1 - index;
+    }
+    return -1;
+}
+function sameGeneratedAstAlpha(left, right, leftScope = [], rightScope = []) {
+    if (left === right)
+        return true;
+    if (!left || !right || left.type !== right.type)
+        return false;
+    if (left.type === "var") {
+        const leftPosition = generatedBinderPosition(left, leftScope);
+        const rightPosition = generatedBinderPosition(right, rightScope);
+        if (leftPosition >= 0 || rightPosition >= 0)
+            return leftPosition === rightPosition;
+        return left.name === right.name;
+    }
+    const leftNodes = left.nodes ?? [];
+    const rightNodes = right.nodes ?? [];
+    if (leftNodes.length !== rightNodes.length)
+        return false;
+    if (isBinderNode(left) && isBinderNode(right) && leftNodes.length >= 2) {
+        if (!sameGeneratedAstAlpha(leftNodes[0], rightNodes[0], leftScope, rightScope))
+            return false;
+        const nextLeft = [...leftScope, { name: left.name, id: left.bondVarId }];
+        const nextRight = [...rightScope, { name: right.name, id: right.bondVarId }];
+        if (!sameGeneratedAstAlpha(leftNodes[1], rightNodes[1], nextLeft, nextRight))
+            return false;
+        for (let index = 2; index < leftNodes.length; index++) {
+            if (!sameGeneratedAstAlpha(leftNodes[index], rightNodes[index], leftScope, rightScope))
+                return false;
+        }
+        return true;
+    }
+    return left.name === right.name
+        && leftNodes.every((node, index) => sameGeneratedAstAlpha(node, rightNodes[index], leftScope, rightScope));
+}
+function substituteGeneratedFreeNames(ast, replacements, bound = new Set()) {
+    if (ast.type === "var") {
+        const replacement = !bound.has(ast.name) ? replacements.get(ast.name) : undefined;
+        return replacement ? Core.clone(replacement) : Core.clone(ast);
+    }
+    if (isBinderNode(ast) && ast.nodes?.[0] && ast.nodes?.[1]) {
+        const nextBound = new Set(bound);
+        if (ast.name)
+            nextBound.add(ast.name);
+        return {
+            type: ast.type,
+            name: ast.name,
+            bondVarId: ast.bondVarId,
+            nodes: [
+                substituteGeneratedFreeNames(ast.nodes[0], replacements, bound),
+                substituteGeneratedFreeNames(ast.nodes[1], replacements, nextBound),
+                ...ast.nodes.slice(2).map(node => substituteGeneratedFreeNames(node, replacements, bound))
+            ]
+        };
+    }
+    return {
+        type: ast.type,
+        name: ast.name,
+        bondVarId: ast.bondVarId,
+        nodes: ast.nodes?.map(node => substituteGeneratedFreeNames(node, replacements, bound))
+    };
+}
+function generatedTelescopeArity(ast) {
+    let arity = 0;
+    let cursor = ast;
+    while ((cursor.type === "P" || cursor.type === "->")
+        && cursor.nodes?.[0] && cursor.nodes?.[1]) {
+        arity++;
+        cursor = cursor.nodes[1];
+    }
+    return arity;
+}
 function generatedApplicationParts(ast) {
     const arguments_ = [];
     let head = ast;
@@ -369,7 +448,8 @@ function generatedStrictRecursiveArgument(type, familyName) {
     }
     return generatedFreeConstantName(cursor) === familyName;
 }
-function validateSystemInductiveComputeRules(bundle, rulesByHead, parameterCount, constructorTypes) {
+function validateSystemInductiveComputeRules(bundle, rulesByHead, parameters, indexCount, constructorTypes, normalizeAst) {
+    const parameterCount = parameters.length;
     const auxiliaryNames = new Set((bundle.auxiliaryTypes ?? []).map(([name]) => name));
     const allowedHeads = new Set();
     const addEliminationHead = (entry) => {
@@ -382,8 +462,171 @@ function validateSystemInductiveComputeRules(bundle, rulesByHead, parameterCount
     };
     addEliminationHead(bundle.eliminator);
     addEliminationHead(bundle.recursor);
+    const strictSchema = bundle.metadata?.ruleSchemaVersion === 1;
+    const strictConstructors = new Map();
+    const strictHeadProfiles = new Map();
+    if (strictSchema) {
+        const metadata = bundle.metadata;
+        const constructorCount = metadata.constructors.length;
+        const coherenceCount = (metadata.pathConstructors?.length ?? 0)
+            + (metadata.twoPathConstructors?.length ?? 0);
+        for (const constructor of metadata.constructors) {
+            if (!Array.isArray(constructor.argumentNames)
+                || constructor.argumentNames.length !== constructor.argumentTypes.length
+                || !Array.isArray(constructor.recursiveArguments)
+                || !Array.isArray(constructor.resultIndices)
+                || constructor.resultIndices.length !== indexCount) {
+                throw new Error(`归纳计算规则 schema 构造子 metadata 不完整：${constructor.name}`);
+            }
+            const recursiveIndexes = new Set();
+            for (const recursive of constructor.recursiveArguments) {
+                if (!Number.isInteger(recursive.index)
+                    || recursive.index < 0
+                    || recursive.index >= constructor.argumentTypes.length
+                    || recursiveIndexes.has(recursive.index)
+                    || !Array.isArray(recursive.telescope)
+                    || !Array.isArray(recursive.resultIndices)
+                    || recursive.resultIndices.length !== indexCount) {
+                    throw new Error(`归纳计算规则 schema 递归参数 metadata 无效：${constructor.name}`);
+                }
+                recursiveIndexes.add(recursive.index);
+            }
+            strictConstructors.set(constructor.name, {
+                name: constructor.name,
+                argumentTypes: constructor.argumentTypes.map(normalizeAst),
+                argumentNames: [...constructor.argumentNames],
+                recursiveArguments: constructor.recursiveArguments.map(recursive => ({
+                    index: recursive.index,
+                    telescope: recursive.telescope.map(binder => ({
+                        name: binder.name,
+                        type: normalizeAst(binder.type)
+                    })),
+                    resultIndices: recursive.resultIndices.map(normalizeAst)
+                })),
+                resultIndices: constructor.resultIndices.map(normalizeAst)
+            });
+        }
+        const auxiliaryTypes = new Map((bundle.auxiliaryTypes ?? []).map(([name, type]) => [name, normalizeAst(type)]));
+        const profiles = [
+            { name: metadata.eliminatorName, type: bundle.eliminator?.[1], full: false },
+            { name: metadata.fullEliminatorName, type: metadata.fullEliminatorName
+                    ? auxiliaryTypes.get(metadata.fullEliminatorName) : undefined, full: true },
+            { name: metadata.recursorName, type: bundle.recursor?.[1], full: false },
+            { name: metadata.fullRecursorName, type: metadata.fullRecursorName
+                    ? auxiliaryTypes.get(metadata.fullRecursorName) : undefined, full: true }
+        ];
+        for (const profile of profiles) {
+            if (!profile.name || !profile.type || !allowedHeads.has(profile.name)) {
+                throw new Error(`归纳计算规则 schema 缺少消去器槽位：${profile.name ?? ""}`);
+            }
+            const staticCount = (profile.full ? 1 : 0)
+                + parameterCount + 1 + constructorCount + coherenceCount;
+            const totalArity = staticCount + indexCount + 1;
+            const normalizedType = normalizeAst(profile.type);
+            if (generatedTelescopeArity(normalizedType) !== totalArity) {
+                throw new Error(`归纳计算规则 ${profile.name} 参数数量与消去器类型不一致`);
+            }
+            strictHeadProfiles.set(profile.name, {
+                full: profile.full,
+                staticCount,
+                totalArity,
+                constructorBranchOffset: (profile.full ? 1 : 0) + parameterCount + 1
+            });
+        }
+    }
     const constructorNames = new Set(bundle.constructors.map(([name]) => name));
     const metadataConstructors = new Map((bundle.metadata?.constructors ?? []).map(constructor => [constructor.name, constructor]));
+    if (strictSchema) {
+        for (const schema of strictConstructors.values()) {
+            let cursor = constructorTypes.get(schema.name);
+            if (!cursor)
+                throw new Error(`归纳计算规则 schema 缺少点构造子：${schema.name}`);
+            const binders = [];
+            while ((cursor.type === "P" || cursor.type === "->")
+                && cursor.nodes?.[0] && cursor.nodes?.[1]) {
+                binders.push({ kind: cursor.type, name: cursor.name, type: cursor.nodes[0] });
+                cursor = cursor.nodes[1];
+            }
+            if (binders.length !== parameterCount + schema.argumentTypes.length) {
+                throw new Error(`点构造子 ${schema.name} 参数数量与计算规则 schema 不一致`);
+            }
+            for (let index = 0; index < parameterCount; index++) {
+                const actual = binders[index];
+                const expected = parameters[index];
+                if (actual.kind !== "P" || actual.name !== expected.name
+                    || !sameGeneratedAstAlpha(actual.type, expected.type)) {
+                    throw new Error(`点构造子 ${schema.name} 未保持统一参数：${expected.name}`);
+                }
+            }
+            for (let index = 0; index < schema.argumentTypes.length; index++) {
+                const actual = binders[parameterCount + index];
+                if (actual.kind !== "P" || actual.name !== schema.argumentNames[index]
+                    || !sameGeneratedAstAlpha(actual.type, schema.argumentTypes[index])) {
+                    throw new Error(`点构造子 ${schema.name} 第 ${index + 1} 个参数与计算规则 schema 不一致`);
+                }
+            }
+            const expectedResult = wrapApply(wrapVar(bundle.type[0]), ...parameters.map(parameter => wrapVar(parameter.name)), ...schema.resultIndices.map(index => Core.clone(index)));
+            if (!sameGeneratedAstAlpha(cursor, expectedResult)) {
+                throw new Error(`点构造子 ${schema.name} 结论与计算规则 schema 不一致`);
+            }
+            const recursiveByIndex = new Map(schema.recursiveArguments.map(recursive => [recursive.index, recursive]));
+            for (let index = 0; index < schema.argumentTypes.length; index++) {
+                const argumentType = schema.argumentTypes[index];
+                const recursive = recursiveByIndex.get(index);
+                const isRecursive = generatedStrictRecursiveArgument(argumentType, bundle.type[0]);
+                if (!!recursive !== isRecursive) {
+                    throw new Error(`点构造子 ${schema.name} 第 ${index + 1} 个递归参数 metadata 不一致`);
+                }
+                if (!recursive) {
+                    if (generatedContainsFreeConstant(argumentType, bundle.type[0])) {
+                        throw new Error(`点构造子 ${schema.name} 含有无法证明严格正的递归参数`);
+                    }
+                    continue;
+                }
+                const actualTelescope = [];
+                let recursiveResult = argumentType;
+                while ((recursiveResult.type === "P" || recursiveResult.type === "->")
+                    && recursiveResult.nodes?.[0] && recursiveResult.nodes?.[1]) {
+                    actualTelescope.push({
+                        name: recursiveResult.type === "P" ? recursiveResult.name : "",
+                        type: recursiveResult.nodes[0]
+                    });
+                    recursiveResult = recursiveResult.nodes[1];
+                }
+                if (actualTelescope.length !== recursive.telescope.length) {
+                    throw new Error(`点构造子 ${schema.name} 递归 telescope 与 metadata 不一致`);
+                }
+                const telescopeRenames = new Map();
+                for (let telescopeIndex = 0; telescopeIndex < actualTelescope.length; telescopeIndex++) {
+                    const actual = actualTelescope[telescopeIndex];
+                    const expected = recursive.telescope[telescopeIndex];
+                    const actualType = substituteGeneratedFreeNames(actual.type, telescopeRenames);
+                    if (!sameGeneratedAstAlpha(actualType, expected.type)) {
+                        throw new Error(`点构造子 ${schema.name} 递归 telescope 类型与 metadata 不一致`);
+                    }
+                    if (actual.name) {
+                        telescopeRenames.set(actual.name, wrapVar(expected.name));
+                    }
+                }
+                const recursiveApplication = generatedApplicationParts(recursiveResult);
+                if (generatedFreeConstantName(recursiveApplication.head) !== bundle.type[0]
+                    || recursiveApplication.arguments.length !== parameterCount + indexCount) {
+                    throw new Error(`点构造子 ${schema.name} 递归结果类型与 metadata 不一致`);
+                }
+                for (let parameterIndex = 0; parameterIndex < parameterCount; parameterIndex++) {
+                    if (!sameGeneratedAstAlpha(recursiveApplication.arguments[parameterIndex], wrapVar(parameters[parameterIndex].name))) {
+                        throw new Error(`点构造子 ${schema.name} 递归结果未保持统一参数`);
+                    }
+                }
+                const actualIndices = recursiveApplication.arguments.slice(parameterCount)
+                    .map(index => substituteGeneratedFreeNames(index, telescopeRenames));
+                if (actualIndices.length !== recursive.resultIndices.length
+                    || actualIndices.some((value, resultIndex) => !sameGeneratedAstAlpha(value, recursive.resultIndices[resultIndex]))) {
+                    throw new Error(`点构造子 ${schema.name} 递归结果索引与 metadata 不一致`);
+                }
+            }
+        }
+    }
     const recursiveArgumentIndexes = new Map();
     for (const constructorName of constructorNames) {
         let argumentTypes = metadataConstructors.get(constructorName)?.argumentTypes;
@@ -443,6 +686,84 @@ function validateSystemInductiveComputeRules(bundle, rulesByHead, parameterCount
                 throw new Error(`归纳计算规则 ${head} 的最后数据模式必须由当前点构造子形成`);
             }
             const dataArguments = generatedApplicationParts(dataPattern).arguments;
+            if (strictSchema) {
+                const profile = strictHeadProfiles.get(head);
+                const constructor = strictConstructors.get(constructorName);
+                const constructorIndex = bundle.metadata.constructors
+                    .findIndex(candidate => candidate.name === constructorName);
+                if (!profile || !constructor || constructorIndex < 0) {
+                    throw new Error(`归纳计算规则 ${head} 缺少 canonical schema`);
+                }
+                const patternArguments = rule.pattern.slice(1);
+                if (patternArguments.length !== profile.totalArity) {
+                    throw new Error(`归纳计算规则 ${head} 参数数量与消去器类型不一致`);
+                }
+                if (dataArguments.length !== parameterCount + constructor.argumentNames.length) {
+                    throw new Error(`归纳计算规则 ${head} 的点构造子参数数量不一致`);
+                }
+                const simpleCaptures = [
+                    ...patternArguments.slice(0, profile.staticCount),
+                    ...dataArguments.slice(parameterCount)
+                ];
+                if (simpleCaptures.some(capture => capture.type !== "var"
+                    || capture.bondVarId || !capture.name?.startsWith("?"))) {
+                    throw new Error(`归纳计算规则 ${head} 的静态参数和构造子参数必须是刚性捕获变量`);
+                }
+                if (new Set(simpleCaptures.map(capture => capture.name)).size !== simpleCaptures.length) {
+                    throw new Error(`归纳计算规则 ${head} 的刚性捕获变量不能重复`);
+                }
+                const parameterStart = profile.full ? 1 : 0;
+                for (let parameterIndex = 0; parameterIndex < parameterCount; parameterIndex++) {
+                    if (!sameGeneratedAstAlpha(dataArguments[parameterIndex], patternArguments[parameterStart + parameterIndex])) {
+                        throw new Error(`归纳计算规则 ${head} 未保持统一参数：${parameters[parameterIndex].name}`);
+                    }
+                }
+                const replacements = new Map();
+                for (let parameterIndex = 0; parameterIndex < parameterCount; parameterIndex++) {
+                    replacements.set(parameters[parameterIndex].name, dataArguments[parameterIndex]);
+                }
+                for (let argumentIndex = 0; argumentIndex < constructor.argumentNames.length; argumentIndex++) {
+                    replacements.set(constructor.argumentNames[argumentIndex], dataArguments[parameterCount + argumentIndex]);
+                }
+                const expectedOuterIndices = constructor.resultIndices.map(index => substituteGeneratedFreeNames(index, replacements));
+                const outerIndices = patternArguments.slice(profile.staticCount, profile.staticCount + indexCount);
+                if (outerIndices.length !== expectedOuterIndices.length
+                    || outerIndices.some((value, index) => !sameGeneratedAstAlpha(value, expectedOuterIndices[index]))) {
+                    throw new Error(`归纳计算规则 ${head} 的外层索引与点构造子结论不一致`);
+                }
+                const recursiveByIndex = new Map(constructor.recursiveArguments.map(recursive => [recursive.index, recursive]));
+                const methodArguments = [];
+                for (let argumentIndex = 0; argumentIndex < constructor.argumentNames.length; argumentIndex++) {
+                    const argument = dataArguments[parameterCount + argumentIndex];
+                    methodArguments.push(Core.clone(argument));
+                    const recursive = recursiveByIndex.get(argumentIndex);
+                    if (!recursive)
+                        continue;
+                    const boundTelescopeNames = new Set();
+                    const telescope = recursive.telescope.map(binder => {
+                        const type = substituteGeneratedFreeNames(binder.type, replacements, boundTelescopeNames);
+                        boundTelescopeNames.add(binder.name);
+                        return { name: binder.name, type };
+                    });
+                    const childIndices = recursive.resultIndices.map(index => substituteGeneratedFreeNames(index, replacements, boundTelescopeNames));
+                    const recursiveData = wrapApply(Core.clone(argument), ...telescope.map(binder => wrapVar(binder.name)));
+                    let recursiveCall = wrapApply(wrapVar(head), ...patternArguments.slice(0, profile.staticCount).map(value => Core.clone(value)), ...childIndices, recursiveData);
+                    for (let telescopeIndex = telescope.length - 1; telescopeIndex >= 0; telescopeIndex--) {
+                        const binder = telescope[telescopeIndex];
+                        recursiveCall = {
+                            type: "L",
+                            name: binder.name,
+                            nodes: [Core.clone(binder.type), recursiveCall]
+                        };
+                    }
+                    methodArguments.push(recursiveCall);
+                }
+                const branch = patternArguments[profile.constructorBranchOffset + constructorIndex];
+                const expectedResult = wrapApply(Core.clone(branch), ...methodArguments);
+                if (!sameGeneratedAstAlpha(rule.result, expectedResult)) {
+                    throw new Error(`归纳计算规则 ${head} 的右侧不符合构造子 ${constructorName} 的 canonical 分支`);
+                }
+            }
             const recursiveIndexes = recursiveArgumentIndexes.get(constructorName) ?? new Set();
             const recursiveDataRoots = new Set(dataArguments.slice(parameterCount)
                 .filter((argument, index) => recursiveIndexes.has(index)
@@ -466,6 +787,19 @@ function validateSystemInductiveComputeRules(bundle, rulesByHead, parameterCount
                 throw new Error(`归纳计算规则 ${head} 的右侧不能包含未绑定占位符 _`);
             }
             rulePolicies.push({ head, rule, recursiveDataRoots });
+        }
+    }
+    if (strictSchema) {
+        for (const head of strictHeadProfiles.keys()) {
+            const rules = rulesByHead[head];
+            if (!rules || rules.length !== strictConstructors.size) {
+                throw new Error(`归纳计算规则 ${head} 未完整覆盖全部点构造子`);
+            }
+            for (const constructorName of strictConstructors.keys()) {
+                if (!constructorRuleOwners.has(`${head}\u0000${constructorName}`)) {
+                    throw new Error(`归纳计算规则 ${head} 缺少点构造子 ${constructorName}`);
+                }
+            }
         }
     }
     for (const [head, arities] of aritiesByHead) {
@@ -814,6 +1148,123 @@ export class Core {
     syncSemanticComputeRules() {
         return this.semanticKernel.replaceComputeRules(this.state.computeRules);
     }
+    validateCanonicalInductiveRuleTypes(bundle, normalizedEntries, normalizedRules, parameters, indexCount) {
+        if (bundle.metadata?.ruleSchemaVersion !== 1)
+            return;
+        const metadata = bundle.metadata;
+        const types = new Map(normalizedEntries);
+        const constructorIndex = new Map(metadata.constructors.map((constructor, index) => [constructor.name, index]));
+        const constructorSchemas = new Map(metadata.constructors.map(constructor => [constructor.name, constructor]));
+        const coherenceCount = (metadata.pathConstructors?.length ?? 0)
+            + (metadata.twoPathConstructors?.length ?? 0);
+        let captureSequence = 0;
+        const instantiateBinder = (cursor, argument) => {
+            if ((cursor.type !== "P" && cursor.type !== "->")
+                || !cursor.nodes?.[0] || !cursor.nodes?.[1]) {
+                throw new Error("消去器 telescope 提前结束");
+            }
+            return cursor.type === "P" && cursor.name
+                ? substituteGeneratedFreeNames(cursor.nodes[1], new Map([[cursor.name, argument]]))
+                : Core.clone(cursor.nodes[1]);
+        };
+        const checkAgainst = (term, expected, context, label) => {
+            try {
+                this.withSilentErrors(() => this.checkType({
+                    type: ":",
+                    name: "",
+                    nodes: [Core.clone(term), Core.clone(expected)]
+                }, Core.cloneContext(context), false, undefined, false, true, false));
+            }
+            catch {
+                throw new Error(`${label} 未通过 subject-reduction 类型检查`);
+            }
+        };
+        for (const [head, rules] of Object.entries(normalizedRules)) {
+            const headType = types.get(head);
+            if (!headType)
+                throw new Error(`计算规则 schema 缺少消去器类型：${head}`);
+            const full = head.startsWith("@");
+            const staticCount = (full ? 1 : 0)
+                + parameters.length + 1 + metadata.constructors.length + coherenceCount;
+            const totalArity = staticCount + indexCount + 1;
+            const branchOffset = (full ? 1 : 0) + parameters.length + 1;
+            for (const rule of rules) {
+                const patternArguments = rule.pattern.slice(1);
+                if (patternArguments.length !== totalArity) {
+                    throw new Error(`归纳计算规则 ${head} 参数数量与消去器类型不一致`);
+                }
+                const dataApplication = generatedApplicationParts(patternArguments.at(-1));
+                const dataHead = generatedFreeConstantName(dataApplication.head);
+                const schema = dataHead ? constructorSchemas.get(dataHead) : undefined;
+                const branchIndex = dataHead ? constructorIndex.get(dataHead) : undefined;
+                if (!schema || branchIndex === undefined
+                    || !schema.argumentNames || !schema.recursiveArguments) {
+                    throw new Error(`归纳计算规则 ${head} 缺少构造子类型 schema`);
+                }
+                const context = [];
+                const captureReplacements = new Map();
+                const schemaReplacements = new Map();
+                let nextBondVarId = 1;
+                let cursor = Core.clone(headType);
+                const bindCapture = (capture, type) => {
+                    if (capture.type !== "var" || !capture.name?.startsWith("?")) {
+                        throw new Error(`归纳计算规则 ${head} 包含非变量捕获参数`);
+                    }
+                    let name = `_ruleCapture${captureSequence++}`;
+                    while (context.some(([candidate]) => candidate === name))
+                        name += "_";
+                    const id = nextBondVarId++;
+                    const variable = { type: "var", name, nodes: [], bondVarId: id };
+                    captureReplacements.set(capture.name, variable);
+                    context.unshift([name, Core.clone(type), id]);
+                    return variable;
+                };
+                for (let index = 0; index < staticCount; index++) {
+                    if ((cursor.type !== "P" && cursor.type !== "->")
+                        || !cursor.nodes?.[0] || !cursor.nodes?.[1]) {
+                        throw new Error(`归纳计算规则 ${head} 的消去器 telescope 提前结束`);
+                    }
+                    const variable = bindCapture(patternArguments[index], cursor.nodes[0]);
+                    cursor = instantiateBinder(cursor, variable);
+                }
+                const parameterStart = full ? 1 : 0;
+                for (let index = 0; index < parameters.length; index++) {
+                    const capture = patternArguments[parameterStart + index];
+                    const replacement = captureReplacements.get(capture.name);
+                    if (!replacement)
+                        throw new Error(`归纳计算规则 ${head} 缺少统一参数捕获`);
+                    schemaReplacements.set(parameters[index].name, replacement);
+                }
+                for (let index = 0; index < schema.argumentNames.length; index++) {
+                    const capture = dataApplication.arguments[parameters.length + index];
+                    const argumentType = substituteGeneratedFreeNames(schema.argumentTypes[index], schemaReplacements);
+                    const variable = bindCapture(capture, argumentType);
+                    schemaReplacements.set(schema.argumentNames[index], variable);
+                }
+                for (let index = staticCount; index < totalArity; index++) {
+                    if ((cursor.type !== "P" && cursor.type !== "->")
+                        || !cursor.nodes?.[0] || !cursor.nodes?.[1]) {
+                        throw new Error(`归纳计算规则 ${head} 的消去器 telescope 提前结束`);
+                    }
+                    const argument = substituteGeneratedFreeNames(patternArguments[index], captureReplacements);
+                    if (collectInferenceMetaNames(argument).size) {
+                        throw new Error(`归纳计算规则 ${head} 存在未绑定的 pattern 元变量`);
+                    }
+                    checkAgainst(argument, cursor.nodes[0], context, `归纳计算规则 ${head} 第 ${index + 1} 个参数`);
+                    cursor = instantiateBinder(cursor, argument);
+                }
+                const rhs = substituteGeneratedFreeNames(rule.result, captureReplacements);
+                if (collectInferenceMetaNames(rhs).size) {
+                    throw new Error(`归纳计算规则 ${head} 右侧存在未绑定元变量`);
+                }
+                const expectedBranch = patternArguments[branchOffset + branchIndex];
+                if (!captureReplacements.has(expectedBranch.name)) {
+                    throw new Error(`归纳计算规则 ${head} 缺少对应点分支捕获`);
+                }
+                checkAgainst(rhs, cursor, context, `归纳计算规则 ${head} 在构造子 ${schema.name} 上的右侧`);
+            }
+        }
+    }
     /**
      * Install a trusted ordinary-inductive signature as one transaction.
      *
@@ -851,6 +1302,58 @@ export class Core {
         }
         if (bundle.metadata?.typeName && bundle.metadata.typeName !== bundle.type[0]) {
             throw new Error(`归纳类型 metadata 名称与 bundle 不一致：${bundle.metadata.typeName} != ${bundle.type[0]}`);
+        }
+        const metadataVersion = Number(bundle.metadata?.version);
+        if ([2, 3, 4].includes(metadataVersion)
+            && bundle.metadata?.ruleSchemaVersion !== 1) {
+            throw new Error(`沙盒归纳 metadata v${metadataVersion} 必须使用计算规则 schema v1`);
+        }
+        if (bundle.metadata?.ruleSchemaVersion !== undefined
+            && bundle.metadata.ruleSchemaVersion !== 1) {
+            throw new Error(`不支持的归纳计算规则 schema：${bundle.metadata.ruleSchemaVersion}`);
+        }
+        if (bundle.metadata?.ruleSchemaVersion === 1) {
+            const metadata = bundle.metadata;
+            const actualConstructorNames = bundle.constructors.map(([name]) => name);
+            const expectedConstructorNames = metadata.constructors.map(constructor => constructor.name);
+            if (actualConstructorNames.length !== expectedConstructorNames.length
+                || actualConstructorNames.some((name, index) => expectedConstructorNames[index] !== name)) {
+                throw new Error("计算规则 schema 的点构造子列表与 bundle 不一致");
+            }
+            if (definitions.length) {
+                throw new Error("计算规则 schema v1 不允许附加未声明的系统定义");
+            }
+            if (bundle.eliminator?.[0] !== metadata.eliminatorName
+                || bundle.recursor?.[0] !== metadata.recursorName) {
+                throw new Error("计算规则 schema 的消去器槽位与 bundle 不一致");
+            }
+            const expectedAuxiliaryNames = [
+                ...(metadata.pathConstructors ?? []).map(path => path.name),
+                ...(metadata.twoPathConstructors ?? []).map(path => path.name),
+                metadata.fullEliminatorName,
+                metadata.fullRecursorName,
+                ...(metadata.pathConstructors ?? []).flatMap(path => [
+                    `apd_${path.name}`,
+                    `@apd_${path.name}`,
+                    `ap_${path.name}`,
+                    `@ap_${path.name}`
+                ]),
+                ...(metadata.twoPathConstructors ?? []).flatMap(path => [
+                    `apd_${path.name}`,
+                    `@apd_${path.name}`,
+                    `ap_${path.name}`,
+                    `@ap_${path.name}`
+                ])
+            ];
+            if (expectedAuxiliaryNames.some(name => !name)
+                || new Set(expectedAuxiliaryNames).size !== expectedAuxiliaryNames.length) {
+                throw new Error("计算规则 schema 的辅助常量名称无效或重复");
+            }
+            const actualAuxiliaryNames = (bundle.auxiliaryTypes ?? []).map(([name]) => name);
+            if (actualAuxiliaryNames.length !== expectedAuxiliaryNames.length
+                || actualAuxiliaryNames.some((name, index) => expectedAuxiliaryNames[index] !== name)) {
+                throw new Error("计算规则 schema 的辅助常量列表与 bundle 不一致");
+            }
         }
         const bundlePointConstructorNames = bundle.constructors.map(([name]) => name);
         const metadataPointConstructorNames = (bundle.metadata?.constructors ?? [])
@@ -964,7 +1467,7 @@ export class Core {
         const indices = familyBinders.slice(parameterCount);
         const constructorTypes = new Map(normalizedEntries
             .filter(([name]) => bundlePointConstructorNames.includes(name)));
-        validateSystemInductiveComputeRules(bundle, normalizedRules, parameterCount, constructorTypes);
+        validateSystemInductiveComputeRules(bundle, normalizedRules, parameters, indexCount, constructorTypes, ast => this.desugar(Core.clone(ast), true));
         if (bundle.metadata?.kind === "hit1" || bundle.metadata?.kind === "hit2") {
             const metadata = bundle.metadata;
             if (indexCount !== 0)
@@ -1150,29 +1653,59 @@ export class Core {
         for (const head of Object.keys(normalizedRules)) {
             previousRules.set(head, this.state.computeRules[head]);
         }
-        try {
-            for (const [name, type] of normalizedEntries)
-                this.state.sysTypes[name] = type;
-            for (const [name, definition] of normalizedDefinitions)
-                this.state.sysDefs[name] = definition;
+        const strictRuleSchema = bundle.metadata?.ruleSchemaVersion === 1;
+        const deferredComputationTypes = new Set();
+        if (strictRuleSchema) {
+            for (const path of [
+                ...(bundle.metadata?.pathConstructors ?? []),
+                ...(bundle.metadata?.twoPathConstructors ?? [])
+            ]) {
+                for (const name of [
+                    path.computationName,
+                    `apd_${path.name}`,
+                    `@apd_${path.name}`,
+                    `ap_${path.name}`,
+                    `@ap_${path.name}`
+                ]) {
+                    if (name)
+                        deferredComputationTypes.add(name);
+                }
+            }
+        }
+        const publishComputeRules = () => {
             for (const [head, rules] of Object.entries(normalizedRules)) {
-                // Preserve any pre-existing equations for a shared head. A
-                // fresh ordinary inductive normally has a unique eliminator,
-                // while append semantics make registration composable for
-                // generated aliases.
                 this.state.computeRules[head] = [
                     ...(this.state.computeRules[head] ?? []),
                     ...rules
                 ];
             }
-            this.syncSemanticDefinitions();
             this.syncSemanticComputeRules();
-            // `setConstantType` accepts a raw system type so dependencies can
-            // be installed as a mutually-referencing batch.  Validate every
-            // generated type only after the whole batch is visible, but keep
-            // the checks inside this transaction so an invalid constructor or
-            // eliminator cannot leak partially-registered sandbox constants.
-            for (const [, type] of normalizedEntries) {
+        };
+        try {
+            for (const [name, type] of normalizedEntries)
+                this.state.sysTypes[name] = type;
+            for (const [name, definition] of normalizedDefinitions)
+                this.state.sysDefs[name] = definition;
+            this.syncSemanticDefinitions();
+            // Schema-v1 rules have already been reconstructed canonically.
+            // Check the family, constructors, eliminators, and path constants
+            // before publishing them. Path computation propositions are the
+            // only deferred entries: their types intentionally reduce a point
+            // eliminator application and therefore need the certified rules.
+            if (!strictRuleSchema)
+                publishComputeRules();
+            for (const [name, type] of normalizedEntries) {
+                if (deferredComputationTypes.has(name))
+                    continue;
+                this.checkTypeFormation(type, []);
+            }
+            if (strictRuleSchema) {
+                this.validateCanonicalInductiveRuleTypes(bundle, normalizedEntries, normalizedRules, parameters, indexCount);
+                publishComputeRules();
+            }
+            for (const [name, type] of normalizedEntries) {
+                if (!deferredComputationTypes.has(name))
+                    continue;
                 this.checkTypeFormation(type, []);
             }
         }
@@ -1205,6 +1738,7 @@ export class Core {
                 version: bundle.metadata.version,
                 kind: bundle.metadata.kind,
                 dimension: bundle.metadata.dimension,
+                ruleSchemaVersion: bundle.metadata.ruleSchemaVersion,
                 typeName: bundle.metadata.typeName,
                 parameterCount,
                 indexCount,
@@ -1217,6 +1751,15 @@ export class Core {
                 constructors: bundle.metadata.constructors.map(ctor => ({
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
+                    recursiveArguments: ctor.recursiveArguments?.map(argument => ({
+                        index: argument.index,
+                        telescope: argument.telescope.map(binder => ({
+                            name: binder.name,
+                            type: Core.clone(binder.type)
+                        })),
+                        resultIndices: argument.resultIndices.map(index => Core.clone(index))
+                    })),
                     resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
                 })),
                 pathConstructors: bundle.metadata.pathConstructors?.map(ctor => ({
@@ -1289,6 +1832,7 @@ export class Core {
             version: metadata.version,
             kind: metadata.kind,
             dimension: metadata.dimension,
+            ruleSchemaVersion: metadata.ruleSchemaVersion,
             typeName: metadata.typeName,
             parameterCount: metadata.parameterCount,
             indexCount: metadata.indexCount,
@@ -1307,6 +1851,15 @@ export class Core {
             constructors: metadata.constructors.map(ctor => ({
                 name: ctor.name,
                 argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
+                recursiveArguments: ctor.recursiveArguments?.map(argument => ({
+                    index: argument.index,
+                    telescope: argument.telescope.map(binder => ({
+                        name: binder.name,
+                        type: Core.clone(binder.type)
+                    })),
+                    resultIndices: argument.resultIndices.map(index => Core.clone(index))
+                })),
                 resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
             })),
             pathConstructors: metadata.pathConstructors?.map(ctor => ({

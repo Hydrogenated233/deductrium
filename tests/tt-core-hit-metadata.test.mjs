@@ -46,7 +46,9 @@ const bundle = {
         }]
     },
     metadata: {
-        version: 3,
+        // Legacy hand-written trusted bundle. Sandbox-generated v2/v3/v4
+        // metadata is required to carry canonical rule schema v1.
+        version: 1,
         kind: "hit1",
         dimension: 1,
         typeName: "CircleCore",

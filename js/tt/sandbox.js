@@ -12,7 +12,7 @@ export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
  * Bump whenever parsing, lowering, Core registration, or NbE cache semantics
  * change. Persisted validation data is an optimization hint, never authority.
  */
-export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit2-2026-09-02";
+export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit2-rule-schema1-2026-09-02";
 const SANDBOX_VALIDATION_CACHE_MAX_ENTRIES = 4_096;
 const SANDBOX_VALIDATION_CACHE_MAX_OBJECTS = 500_000;
 const SANDBOX_VALIDATION_CACHE_MAX_DEPTH = 256;
@@ -1058,6 +1058,18 @@ export function lowerSandboxInductive(signature) {
         metadataConstructors.push({
             name: ctor.name,
             argumentTypes: ctor.argumentAsts.map(argument => Core.clone(argument.type)),
+            argumentNames: ctor.argumentAsts.map(argument => argument.name),
+            recursiveArguments: ctor.argumentAsts.flatMap((argument, index) => argument.recursiveTelescope
+                ? [{
+                        index,
+                        telescope: argument.recursiveTelescope.map(binder => ({
+                            name: binder.name,
+                            type: Core.clone(binder.type)
+                        })),
+                        resultIndices: (argument.recursiveResultIndices ?? [])
+                            .map(resultIndex => Core.clone(resultIndex))
+                    }]
+                : []),
             resultIndices: ctor.resultIndices.map(index => Core.clone(index))
         });
         const ctorType = sandboxWrapPis([...signature.parameters, ...ctor.argumentAsts], Core.clone(ctor.result));
@@ -1133,6 +1145,10 @@ export function lowerSandboxInductive(signature) {
         const patternReplacements = new Map();
         signature.parameters.forEach((parameter, index) => patternReplacements.set(parameter.name, parameterPatterns[index].name));
         ctor.argumentAsts.forEach((argument, index) => patternReplacements.set(argument.name, argumentVars[index].name));
+        const recursivePatternTelescope = (telescope) => telescope.map(binder => ({
+            ...binder,
+            type: renameFreeInductiveNames(binder.type, patternReplacements)
+        }));
         const resultIndexPatterns = ctor.resultIndices.map(index => renameFreeInductiveNames(index, patternReplacements));
         const method = sandboxVar(`?${branchNames[ctorIndex]}`);
         let result = method;
@@ -1143,7 +1159,7 @@ export function lowerSandboxInductive(signature) {
             methodArgs.push(Core.clone(argumentVars[index]));
             const recursive = ctor.argumentAsts[index].recursiveTelescope;
             if (recursive) {
-                methodArgs.push(sandboxRecursiveCall(publicInductionHead, argumentVars[index], recursive, (ctor.argumentAsts[index].recursiveResultIndices ?? []).map(resultIndex => renameFreeInductiveNames(resultIndex, patternReplacements))));
+                methodArgs.push(sandboxRecursiveCall(publicInductionHead, argumentVars[index], recursivePatternTelescope(recursive), (ctor.argumentAsts[index].recursiveResultIndices ?? []).map(resultIndex => renameFreeInductiveNames(resultIndex, patternReplacements))));
             }
         }
         if (methodArgs.length)
@@ -1163,7 +1179,7 @@ export function lowerSandboxInductive(signature) {
             fullMethodArgs.push(Core.clone(argumentVars[index]));
             const recursive = ctor.argumentAsts[index].recursiveTelescope;
             if (recursive) {
-                fullMethodArgs.push(sandboxRecursiveCall(fullInductionHead, argumentVars[index], recursive, (ctor.argumentAsts[index].recursiveResultIndices ?? []).map(resultIndex => renameFreeInductiveNames(resultIndex, patternReplacements))));
+                fullMethodArgs.push(sandboxRecursiveCall(fullInductionHead, argumentVars[index], recursivePatternTelescope(recursive), (ctor.argumentAsts[index].recursiveResultIndices ?? []).map(resultIndex => renameFreeInductiveNames(resultIndex, patternReplacements))));
             }
         }
         const fullResult = fullMethodArgs.length
@@ -1187,8 +1203,8 @@ export function lowerSandboxInductive(signature) {
             fullRecursorArgs.push(Core.clone(argumentVars[index]));
             const recursive = ctor.argumentAsts[index].recursiveTelescope;
             if (recursive) {
-                publicRecursorArgs.push(sandboxRecursiveCall(publicRecursorHead, argumentVars[index], recursive, (ctor.argumentAsts[index].recursiveResultIndices ?? []).map(resultIndex => renameFreeInductiveNames(resultIndex, patternReplacements))));
-                fullRecursorArgs.push(sandboxRecursiveCall(fullRecursorHead, argumentVars[index], recursive, (ctor.argumentAsts[index].recursiveResultIndices ?? []).map(resultIndex => renameFreeInductiveNames(resultIndex, patternReplacements))));
+                publicRecursorArgs.push(sandboxRecursiveCall(publicRecursorHead, argumentVars[index], recursivePatternTelescope(recursive), (ctor.argumentAsts[index].recursiveResultIndices ?? []).map(resultIndex => renameFreeInductiveNames(resultIndex, patternReplacements))));
+                fullRecursorArgs.push(sandboxRecursiveCall(fullRecursorHead, argumentVars[index], recursivePatternTelescope(recursive), (ctor.argumentAsts[index].recursiveResultIndices ?? []).map(resultIndex => renameFreeInductiveNames(resultIndex, patternReplacements))));
             }
         }
         const publicRecursorResult = publicRecursorArgs.length
@@ -1240,6 +1256,7 @@ export function lowerSandboxInductive(signature) {
         computeRules,
         metadata: {
             version: 2,
+            ruleSchemaVersion: 1,
             typeName,
             parameterCount: signature.parameters.length,
             indexCount: signature.indices.length,
@@ -1836,6 +1853,7 @@ export function lowerSandboxHit(signature) {
             version: signature.twoPathConstructors.length ? 4 : 3,
             kind: signature.twoPathConstructors.length ? "hit2" : "hit1",
             dimension: signature.twoPathConstructors.length ? 2 : 1,
+            ruleSchemaVersion: 1,
             typeName: signature.name,
             parameterCount: signature.parameters.length,
             indexCount: 0,
@@ -1847,6 +1865,8 @@ export function lowerSandboxHit(signature) {
             constructors: signature.pointConstructors.map(constructor => ({
                 name: constructor.name,
                 argumentTypes: constructor.argumentAsts.map(argument => Core.clone(argument.type)),
+                argumentNames: constructor.argumentAsts.map(argument => argument.name),
+                recursiveArguments: [],
                 resultIndices: []
             })),
             pathConstructors: signature.pathConstructors.map(path => ({

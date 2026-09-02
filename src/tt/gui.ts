@@ -95,6 +95,7 @@ export function cloneInductiveBundle(bundle: CoreSystemInductiveBundle): CoreSys
                 version: bundle.metadata.version,
                 kind: bundle.metadata.kind,
                 dimension: bundle.metadata.dimension,
+                ruleSchemaVersion: bundle.metadata.ruleSchemaVersion,
                 typeName: bundle.metadata.typeName,
                 parameterCount: bundle.metadata.parameterCount,
                 indexCount: bundle.metadata.indexCount,
@@ -109,6 +110,15 @@ export function cloneInductiveBundle(bundle: CoreSystemInductiveBundle): CoreSys
                 constructors: bundle.metadata.constructors.map(ctor => ({
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
+                    recursiveArguments: ctor.recursiveArguments?.map(argument => ({
+                        index: argument.index,
+                        telescope: argument.telescope.map(binder => ({
+                            name: binder.name,
+                            type: Core.clone(binder.type)
+                        })),
+                        resultIndices: argument.resultIndices.map(index => Core.clone(index))
+                    })),
                     resultIndices: ctor.resultIndices?.map(index => Core.clone(index))
                 })),
                 pathConstructors: bundle.metadata.pathConstructors?.map(ctor => ({
