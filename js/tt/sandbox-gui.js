@@ -172,6 +172,7 @@ export class TTSandboxGui {
     declarations = [];
     folders = [];
     order = [];
+    validationCache;
     /** Use the same ordered folder semantics as the type-layer theorem list. */
     workspace = new TheoremWorkspace();
     pendingFolderId = null;
@@ -424,6 +425,7 @@ export class TTSandboxGui {
             return;
         }
         this.declarations = result.declarations;
+        this.validationCache = result.validationCache;
         this.syncWorkspaceFromState();
         try {
             this.onAxiomsChange?.(result.bridge ?? emptyBridge(), { revalidate: true });
@@ -853,6 +855,7 @@ export class TTSandboxGui {
                 : null;
             return restored;
         });
+        this.validationCache = migrated.validationCache;
         const knownIds = new Set([
             ...this.folders.map(folder => folder.id),
             ...this.declarations.map(declaration => declaration.id)
@@ -876,7 +879,8 @@ export class TTSandboxGui {
             version: SANDBOX_SAVE_VERSION,
             declarations: this.declarations.map(declaration => ({ ...declaration, dependencies: [...declaration.dependencies] })),
             folders: this.folders.map(folder => ({ ...folder })),
-            order: [...this.order]
+            order: [...this.order],
+            ...(this.validationCache ? { validationCache: this.validationCache } : {})
         };
     }
     persist() {

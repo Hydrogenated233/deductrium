@@ -238,7 +238,7 @@ export class TTCoreEngine {
             ]
         };
         const { definitionCache } = this.core.checkDefinition(declaration, []);
-        this.core.restoreDefinitionCache(name, definitionCache);
+        this.core.restoreCheckedDefinitionCache(name, definitionCache);
         return definitionCache;
     }
     check(input, context = []) {
@@ -283,7 +283,7 @@ export class TTCoreEngine {
             }
             markExplicitAtSyntax(ast);
             const { filledDefinition, definitionCache } = this.core.checkDefinition(ast, context);
-            this.core.restoreDefinitionCache(ast.nodes[0].name, definitionCache);
+            this.core.restoreCheckedDefinitionCache(ast.nodes[0].name, definitionCache);
             const inferenceComplete = theoremInferenceComplete(filledDefinition);
             return {
                 ok: true,

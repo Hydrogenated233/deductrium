@@ -7,11 +7,22 @@ import { hasLegacySurfaceSyntax, migrateLegacyDeclarationSource, migrateLegacySu
 import { expandTypeTheoryAliasesInSurface } from "./symbol-aliases.js";
 const parser = new ASTParser();
 export const SANDBOX_SAVE_VERSION = 1;
+export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
+/**
+ * Bump whenever parsing, lowering, Core registration, or NbE cache semantics
+ * change. Persisted validation data is an optimization hint, never authority.
+ */
+export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit2-2026-09-02";
+const SANDBOX_VALIDATION_CACHE_MAX_ENTRIES = 4_096;
+const SANDBOX_VALIDATION_CACHE_MAX_OBJECTS = 500_000;
+const SANDBOX_VALIDATION_CACHE_MAX_DEPTH = 256;
+const SANDBOX_VALIDATION_CACHE_MAX_STRING_UNITS = 8 * 1024 * 1024;
 /** The sandbox is an authoring tool and is intentionally unavailable in survival. */
 export function sandboxEnabledInMode(mode) {
     return mode === "creative";
 }
-const defaultSandboxSystemRuleIds = Object.freeze([...new Set(initTypeSystem().map(rule => rule.id))]);
+const sandboxTypeSystemRules = Object.freeze(initTypeSystem());
+const defaultSandboxSystemRuleIds = Object.freeze([...new Set(sandboxTypeSystemRules.map(rule => rule.id))]);
 /**
  * The complete system prelude used by a creative-mode type layer.  The UI
  * normally passes its current unlocked set explicitly; this export is useful
@@ -21,6 +32,98 @@ export const creativeSandboxSystemRuleIds = defaultSandboxSystemRuleIds;
 const isolatedSandboxSystemRuleIds = Object.freeze([
     "True", "False", "eq", "eq.="
 ]);
+function sandboxStringFingerprint(value) {
+    let left = 2166136261 >>> 0;
+    let right = 0x9e3779b9 >>> 0;
+    for (let index = 0; index < value.length; index++) {
+        const unit = value.charCodeAt(index);
+        left ^= unit;
+        left = Math.imul(left, 16777619) >>> 0;
+        right ^= unit + 0x9e3779b9 + ((right << 6) >>> 0) + (right >>> 2);
+        right >>>= 0;
+    }
+    return `${value.length}:${left.toString(16).padStart(8, "0")}:${right.toString(16).padStart(8, "0")}`;
+}
+function sandboxValidationPrefixKey(previous, signature) {
+    return sandboxStringFingerprint(`${previous}\u0000${signature}`);
+}
+function sandboxValidationPreludeKey(systemRuleIds, semanticResourceScale) {
+    const visible = new Set(systemRuleIds);
+    const rules = sandboxTypeSystemRules
+        .filter(rule => visible.has(rule.id))
+        .map(rule => ({
+        id: rule.id,
+        prefix: rule.prefix,
+        inferMode: rule.inferMode,
+        postfix: rule.postfix,
+        ast: parser.stringify(rule.ast)
+    }));
+    return sandboxStringFingerprint(JSON.stringify({
+        saveVersion: SANDBOX_SAVE_VERSION,
+        cacheVersion: SANDBOX_VALIDATION_CACHE_VERSION,
+        semanticEpoch: SANDBOX_VALIDATION_SEMANTIC_EPOCH,
+        systemRuleIds,
+        rules,
+        inferDisplayMode: "_",
+        semanticResourceScale: semanticResourceScale ?? 1
+    }));
+}
+/** Iterative guard before any recursive clone/compiler sees untrusted cache data. */
+function sandboxValidationCacheWithinLimits(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const seen = new WeakSet();
+    const stack = [{ value, depth: 0 }];
+    let objects = 0;
+    let stringUnits = 0;
+    while (stack.length) {
+        const current = stack.pop();
+        if (current.depth > SANDBOX_VALIDATION_CACHE_MAX_DEPTH)
+            return false;
+        if (typeof current.value === "string") {
+            stringUnits += current.value.length;
+            if (stringUnits > SANDBOX_VALIDATION_CACHE_MAX_STRING_UNITS)
+                return false;
+            continue;
+        }
+        if (!current.value || typeof current.value !== "object")
+            continue;
+        if (seen.has(current.value))
+            return false;
+        seen.add(current.value);
+        if (++objects > SANDBOX_VALIDATION_CACHE_MAX_OBJECTS)
+            return false;
+        if (Array.isArray(current.value)) {
+            for (const item of current.value) {
+                stack.push({ value: item, depth: current.depth + 1 });
+            }
+            continue;
+        }
+        for (const [key, item] of Object.entries(current.value)) {
+            if (key === "origin")
+                return false;
+            stringUnits += key.length;
+            if (stringUnits > SANDBOX_VALIDATION_CACHE_MAX_STRING_UNITS)
+                return false;
+            stack.push({ value: item, depth: current.depth + 1 });
+        }
+    }
+    return true;
+}
+function sandboxAstHasInferenceHole(ast) {
+    if (!ast)
+        return false;
+    const stack = [ast];
+    while (stack.length) {
+        const current = stack.pop();
+        if (current.type === "var"
+            && (current.name === "_" || current.name?.startsWith("?")))
+            return true;
+        for (const child of current.nodes ?? [])
+            stack.push(child);
+    }
+    return false;
+}
 const sandboxNamePattern = String.raw `(?:[A-Za-z_][A-Za-z0-9_']*|[0-9]+[A-Za-z_][A-Za-z0-9_']*)`;
 const sandboxNameRegex = new RegExp(`^${sandboxNamePattern}$`);
 /**
@@ -2104,6 +2207,7 @@ export class SandboxEnvironment {
     systemRuleIds;
     semanticResourceScale;
     validationBudget;
+    validationCachePreludeKey;
     engine;
     /** Fully elaborated body-less declaration types used by the bridge. */
     axiomTypes = new Map();
@@ -2113,6 +2217,7 @@ export class SandboxEnvironment {
     nextFolderId = 1;
     dirtyFrom = 0;
     validatedThrough = 0;
+    pendingValidationCache = null;
     /** The shared type-layer ordering/folder engine. */
     workspace = new TheoremWorkspace();
     declarations = [];
@@ -2133,6 +2238,7 @@ export class SandboxEnvironment {
             ...new Set(options.systemRuleIds ?? isolatedSandboxSystemRuleIds)
         ]);
         this.semanticResourceScale = options.semanticResourceScale;
+        this.validationCachePreludeKey = sandboxValidationPreludeKey(this.systemRuleIds, this.semanticResourceScale);
         this.validationBudget = Object.freeze({
             maxDeclarations: normalizeSandboxLimit(options.validationMaxDeclarations),
             maxNodes: normalizeSandboxLimit(options.validationMaxNodes),
@@ -2351,6 +2457,21 @@ export class SandboxEnvironment {
             return this.validationInterrupted("cancelled", started, 0, 0);
         }
         let replayedDeclarations = 0;
+        if (this.pendingValidationCache && this.dirtyFrom === 0) {
+            const cacheReplay = this.restorePersistedValidationCache(this.pendingValidationCache, orderedDeclarations, layout, options, budget, started);
+            this.pendingValidationCache = null;
+            if (cacheReplay.status === "cancelled" || cacheReplay.status === "budget-exhausted") {
+                return this.validationInterrupted(cacheReplay.status, started, 0, cacheReplay.count);
+            }
+            if (cacheReplay.status === "restored") {
+                this.validatedThrough = cacheReplay.count;
+                this.dirtyFrom = cacheReplay.count;
+                replayedDeclarations += cacheReplay.count;
+            }
+        }
+        else {
+            this.pendingValidationCache = null;
+        }
         if (this.dirtyFrom < this.validatedThrough || this.validatedThrough > orderedDeclarations.length) {
             if (options.shouldCancel?.()) {
                 return this.validationInterrupted("cancelled", started, 0, 0);
@@ -2608,13 +2729,15 @@ export class SandboxEnvironment {
             replayedDeclarations,
             validatedThrough: this.validatedThrough
         };
+        const validationCache = this.buildValidationCache();
         return {
             ok: !this.declarations.some(declaration => declaration.status === "invalid"),
             declarations: this.getDeclarations(),
             error: firstError,
             status: firstError ? "invalid" : "ok",
             bridge: this.bridge(),
-            validationStats: { ...this.lastValidationStats }
+            validationStats: { ...this.lastValidationStats },
+            validationCache
         };
     }
     /** Return the enabled, validated, read-only creative-mode projection. */
@@ -2745,13 +2868,15 @@ export class SandboxEnvironment {
     toJSON() {
         this.syncWorkspaceFromState();
         const snapshot = this.workspace.snapshot();
+        const validationCache = this.buildValidationCache();
         return {
             version: SANDBOX_SAVE_VERSION,
             declarations: this.getDeclarations(),
             folders: snapshot
                 .filter((item) => item.kind === "folder")
                 .map(folder => ({ ...folder })),
-            order: snapshot.map(item => item.id)
+            order: snapshot.map(item => item.id),
+            ...(validationCache.entries.length ? { validationCache } : {})
         };
     }
     serialize() {
@@ -2827,6 +2952,7 @@ export class SandboxEnvironment {
             const match = folder.id.match(/^sandbox-folder-(\d+)$/);
             return match ? Math.max(max, Number(match[1])) : max;
         }, 0) + 1;
+        this.pendingValidationCache = save.validationCache ?? null;
         this.markDirty(commonPrefix);
         return this.validate(validationOptions);
     }
@@ -2933,6 +3059,286 @@ export class SandboxEnvironment {
         this.folders = nextFolders;
         this.declarations = nextDeclarations;
         this.order = snapshot.map(item => item.id);
+    }
+    buildValidationCache() {
+        this.syncWorkspaceFromState();
+        const snapshot = this.workspace.snapshot();
+        const layout = new Map(this.workspace.layout().map(item => [item.id, item]));
+        const ordered = snapshot
+            .filter((item) => item.kind === "theorem")
+            .map(item => this.declarations.find(declaration => declaration.id === item.id))
+            .filter((declaration) => !!declaration);
+        const signatures = this.validationSignatures();
+        const entries = [];
+        let prefixKey = this.validationCachePreludeKey;
+        for (let index = 0; index < ordered.length; index++) {
+            const declaration = ordered[index];
+            const disabled = !declaration.enabled || !!layout.get(declaration.id)?.disabled;
+            const expectedStatus = disabled ? "disabled" : "valid";
+            if (declaration.status !== expectedStatus)
+                break;
+            prefixKey = sandboxValidationPrefixKey(prefixKey, signatures[index]);
+            const entry = {
+                id: declaration.id,
+                prefixKey,
+                kind: declaration.kind,
+                status: expectedStatus
+            };
+            if (disabled) {
+                entries.push(entry);
+                continue;
+            }
+            if (declaration.hit) {
+                entry.artifact = { kind: "hit" };
+            }
+            else if (declaration.inductive) {
+                entry.artifact = { kind: "inductive" };
+            }
+            else if (declaration.kind === "definition") {
+                let parsed;
+                try {
+                    parsed = parseSandboxStoredDeclaration(declaration.source);
+                }
+                catch {
+                    break;
+                }
+                const body = this.engine.core.state.sysDefs[declaration.name]
+                    ?? this.definitionBodies.get(declaration.name);
+                const rawCache = this.engine.core.serializeDefinitionCache(declaration.name);
+                if (!body
+                    || !rawCache
+                    || rawCache.kind !== "nbe"
+                    || rawCache.metas.length
+                    || sandboxAstHasInferenceHole(rawCache.type)
+                    || sandboxAstHasInferenceHole(parsed.definitionAst)
+                    || sandboxAstHasInferenceHole(parsed.typeAst))
+                    break;
+                entry.artifact = {
+                    kind: "definition",
+                    body: Core.clone(body),
+                    cache: structuredClone(rawCache)
+                };
+            }
+            else {
+                const type = this.axiomTypes.get(declaration.name);
+                if (!type)
+                    break;
+                entry.artifact = { kind: "axiom", type: Core.clone(type) };
+            }
+            entries.push(entry);
+        }
+        return {
+            version: SANDBOX_VALIDATION_CACHE_VERSION,
+            semanticEpoch: SANDBOX_VALIDATION_SEMANTIC_EPOCH,
+            preludeKey: this.validationCachePreludeKey,
+            entries
+        };
+    }
+    restorePersistedValidationCache(rawCache, orderedDeclarations, layout, options, budget, started) {
+        if (!sandboxValidationCacheWithinLimits(rawCache))
+            return { status: "discarded", count: 0 };
+        const cache = rawCache;
+        if (cache.version !== SANDBOX_VALIDATION_CACHE_VERSION
+            || cache.semanticEpoch !== SANDBOX_VALIDATION_SEMANTIC_EPOCH
+            || cache.preludeKey !== this.validationCachePreludeKey
+            || !Array.isArray(cache.entries)
+            || cache.entries.length > orderedDeclarations.length
+            || cache.entries.length > SANDBOX_VALIDATION_CACHE_MAX_ENTRIES) {
+            return { status: "discarded", count: 0 };
+        }
+        if (!cache.entries.length)
+            return { status: "discarded", count: 0 };
+        const signatures = this.validationSignatures();
+        let prefixKey = this.validationCachePreludeKey;
+        for (let index = 0; index < cache.entries.length; index++) {
+            const entry = cache.entries[index];
+            const declaration = orderedDeclarations[index];
+            prefixKey = sandboxValidationPrefixKey(prefixKey, signatures[index]);
+            const disabled = !declaration.enabled || !!layout.get(declaration.id)?.disabled;
+            if (!entry
+                || entry.id !== declaration.id
+                || entry.prefixKey !== prefixKey
+                || entry.status !== (disabled ? "disabled" : "valid")
+                || typeof entry.kind !== "string"
+                || (!disabled && (!entry.artifact || typeof entry.artifact !== "object"))) {
+                return { status: "discarded", count: 0 };
+            }
+        }
+        const nextEngine = this.createEngine();
+        const nextAxiomTypes = new Map();
+        const nextBodies = new Map();
+        const patches = [];
+        const statusByName = new Map();
+        try {
+            return nextEngine.core.withSilentErrors(() => {
+                for (let index = 0; index < cache.entries.length; index++) {
+                    if (options.shouldCancel?.())
+                        return { status: "cancelled", count: index };
+                    if (budget.timeoutMs !== undefined && performance.now() - started >= budget.timeoutMs) {
+                        return { status: "budget-exhausted", count: index };
+                    }
+                    const target = orderedDeclarations[index];
+                    const entry = cache.entries[index];
+                    const rowDisabled = !target.enabled || !!layout.get(target.id)?.disabled;
+                    if (rowDisabled) {
+                        patches.push({ target, value: { ...target, status: "disabled", error: undefined } });
+                        for (const name of target.generatedNames ?? (target.name ? [target.name] : [])) {
+                            statusByName.set(name, "disabled");
+                        }
+                        continue;
+                    }
+                    const parsed = parseSandboxStoredDeclaration(target.source);
+                    const restored = {
+                        ...target,
+                        name: parsed.name,
+                        typeSource: parsed.typeSource,
+                        kind: parsed.hit
+                            ? "hit"
+                            : parsed.inductive
+                                ? "inductive"
+                                : parsed.definitionAst
+                                    ? "definition"
+                                    : declarationKind(parsed.typeAst),
+                        status: "unchecked",
+                        error: undefined,
+                        dependencies: [],
+                        inductive: undefined,
+                        hit: undefined,
+                        generatedNames: undefined
+                    };
+                    if (restored.kind !== entry.kind)
+                        throw new Error("沙盒验证缓存声明种类不匹配");
+                    if (parsed.hit) {
+                        restored.hit = parsed.hit;
+                        restored.generatedNames = sandboxHitGeneratedNames(parsed.hit);
+                        restored.dependencies = collectHitDependencies(parsed.hit);
+                    }
+                    else if (parsed.inductive) {
+                        restored.inductive = parsed.inductive;
+                        restored.generatedNames = sandboxInductiveGeneratedNames(parsed.inductive);
+                        restored.dependencies = collectInductiveDependencies(parsed.inductive);
+                    }
+                    else if (parsed.definitionAst) {
+                        restored.dependencies = [
+                            ...collectFreeNames(parsed.definitionAst),
+                            ...(parsed.typeAst ? collectFreeNames(parsed.typeAst) : [])
+                        ].filter((name, position, names) => names.indexOf(name) === position);
+                    }
+                    else {
+                        restored.dependencies = collectFreeNames(parsed.typeAst);
+                    }
+                    const ownedNames = restored.generatedNames ?? [restored.name];
+                    const conflict = ownedNames.find(name => this.builtinNames.has(name)
+                        || nextEngine.core.hasConst(name)
+                        || statusByName.has(name));
+                    if (conflict)
+                        throw new Error(`沙盒声明名称冲突：${conflict}`);
+                    for (const dependency of restored.dependencies) {
+                        if (dependency === restored.name) {
+                            throw new Error(`不支持递归沙盒定义：${restored.name}`);
+                        }
+                        if (this.builtinNames.has(dependency))
+                            continue;
+                        if (statusByName.get(dependency) !== "valid") {
+                            throw new Error(`依赖声明无效：${dependency}`);
+                        }
+                    }
+                    const artifact = entry.artifact;
+                    if (parsed.hit) {
+                        if (artifact.kind !== "hit")
+                            throw new Error("沙盒 HIT 缓存格式不匹配");
+                        const bundle = lowerSandboxHit(parsed.hit);
+                        nextEngine.core.registerSystemInductive(bundle);
+                        restored.generatedNames = [...bundle.generatedNames];
+                    }
+                    else if (parsed.inductive) {
+                        if (artifact.kind !== "inductive")
+                            throw new Error("沙盒归纳缓存格式不匹配");
+                        const bundle = lowerSandboxInductive(parsed.inductive);
+                        nextEngine.core.registerSystemInductive(bundle);
+                        restored.generatedNames = [...bundle.generatedNames];
+                    }
+                    else if (parsed.definitionAst) {
+                        if (artifact.kind !== "definition")
+                            throw new Error("沙盒定义缓存格式不匹配");
+                        const body = this.restoreCachedDefinition(nextEngine, restored.name, parsed.definitionAst, parsed.typeAst, artifact.body, artifact.cache);
+                        nextBodies.set(restored.name, Core.clone(body));
+                    }
+                    else {
+                        if (artifact.kind !== "axiom")
+                            throw new Error("沙盒公理缓存格式不匹配");
+                        const sourceType = nextEngine.core.checkTypeFormation(parsed.typeAst, []);
+                        const cachedType = nextEngine.core.checkTypeFormation(artifact.type, []);
+                        const equality = nextEngine.checkAst({
+                            type: "===",
+                            name: "",
+                            nodes: [Core.clone(sourceType), Core.clone(cachedType)]
+                        });
+                        if (!equality.ok)
+                            throw new Error("沙盒公理缓存与声明源不匹配");
+                        nextEngine.core.setSystemType(restored.name, Core.clone(sourceType));
+                        nextEngine.core.syncSemanticTypes();
+                        nextAxiomTypes.set(restored.name, Core.clone(sourceType));
+                    }
+                    restored.status = "valid";
+                    patches.push({ target, value: restored });
+                    for (const name of ownedNames)
+                        statusByName.set(name, "valid");
+                }
+                for (const patch of patches)
+                    Object.assign(patch.target, patch.value);
+                this.engine = nextEngine;
+                this.axiomTypes = nextAxiomTypes;
+                this.definitionBodies = nextBodies;
+                return { status: "restored", count: cache.entries.length };
+            });
+        }
+        catch {
+            return { status: "discarded", count: 0 };
+        }
+    }
+    restoreCachedDefinition(engine, name, sourceBody, expectedType, cachedBody, rawCache) {
+        if (!rawCache
+            || rawCache.kind !== "nbe"
+            || rawCache.metas.length
+            || sandboxAstHasInferenceHole(rawCache.type)
+            || sandboxAstHasInferenceHole(sourceBody)
+            || sandboxAstHasInferenceHole(expectedType)) {
+            throw new Error("沙盒透明定义缓存不可安全恢复");
+        }
+        const cache = rawCache;
+        let verifiedBody;
+        let verifiedType;
+        if (expectedType) {
+            const assertion = {
+                type: ":",
+                name: "",
+                nodes: [Core.clone(sourceBody), Core.clone(expectedType)]
+            };
+            verifiedType = engine.core.checkType(assertion, [], false, undefined, false, true, false);
+            verifiedBody = assertion.nodes[0];
+        }
+        else {
+            const equality = {
+                type: "===",
+                name: "",
+                nodes: [Core.clone(sourceBody), Core.clone(cachedBody)]
+            };
+            verifiedType = engine.core.checkType(equality, [], false, undefined, false, true, false);
+            verifiedBody = equality.nodes[0];
+        }
+        engine.core.checkType({
+            type: "===",
+            name: "",
+            nodes: [Core.clone(verifiedType), Core.clone(cache.type)]
+        }, [], false, undefined, false, true, false);
+        engine.core.setSystemDefinition(name, Core.clone(verifiedBody));
+        engine.core.restoreCheckedDefinitionCache(name, cache);
+        if (!engine.core.hasDefinitionCache(name)) {
+            engine.core.setSystemDefinition(name);
+            throw new Error("沙盒透明定义缓存未通过 NbE 编译");
+        }
+        return Core.clone(verifiedBody);
     }
     replayValidatedPrefix(orderedDeclarations, prefixLength, layout) {
         const previousBodies = this.definitionBodies;

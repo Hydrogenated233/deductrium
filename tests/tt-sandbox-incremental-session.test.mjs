@@ -63,6 +63,9 @@ for (const newName of ["bit", "ff", "tt", "ind_bit"]) {
 }
 
 const save = sandbox.toJSON();
+assert.ok(save.validationCache, "a validated sandbox save must include its versioned validation cache");
+assert.equal(typeof save.validationCache.version, "number");
+assert.ok(save.validationCache.version > 0);
 const firstWorker = new SandboxWorkerSession();
 assert.throws(
     () => firstWorker.handle({ id: 1, kind: "check", source: "A" }),
@@ -71,8 +74,12 @@ assert.throws(
 );
 const loaded = firstWorker.handle({ id: 2, kind: "load", save });
 assert.equal(loaded.ok, true);
-assert.equal(checked(loaded), save.declarations.length,
-    "a fresh worker restores the persisted declaration environment once");
+assert.equal(checked(loaded), 0,
+    "a fresh worker must not recheck an unmodified persisted validation cache");
+assert.equal(replayed(loaded), save.declarations.length,
+    "a fresh worker replays every cached declaration into its new Core");
+assert.ok(loaded.validationCache,
+    "a cache hit must return the cache that can be persisted with the next save");
 assert.equal(firstWorker.handle({ id: 3, kind: "check", source: "A" }).ok, true);
 
 const appendedSave = structuredClone(save);
@@ -121,7 +128,8 @@ globalThis.Worker = FakeSandboxWorker;
 try {
     const client = new SandboxWorkerClient();
     const clientValidation = await client.validate(save);
-    assert.equal(checked(clientValidation), save.declarations.length);
+    assert.equal(checked(clientValidation), 0);
+    assert.equal(replayed(clientValidation), save.declarations.length);
     assert.equal((await client.check(save, "A")).ok, true);
     client.terminate();
     assert.equal((await client.check(save, "A")).ok, true,

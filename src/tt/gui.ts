@@ -3447,7 +3447,7 @@ export class TTGui {
                                 try {
                                     const recovered = this.core.checkDefinition(Core.clone(ast, true), []);
                                     storedCache = recovered.definitionCache;
-                                    this.core.restoreDefinitionCache(defname, storedCache);
+                                    this.core.restoreCheckedDefinitionCache(defname, storedCache);
                                 } catch { }
                             }
                             const storedSlot: Exclude<TTDefinitionSlot, null> = [
@@ -3540,7 +3540,7 @@ export class TTGui {
                         if (reservedConsts.has(defname)) throw defname + TR("由系统保留");
                         const checkedDefinition = this.core.checkDefinition(ast, []);
                         filledDefinition = checkedDefinition.filledDefinition;
-                        this.core.restoreDefinitionCache(defname, checkedDefinition.definitionCache);
+                        this.core.restoreCheckedDefinitionCache(defname, checkedDefinition.definitionCache);
                     } else {
                         this.core.checkType(ast, [], false);
                     }

@@ -6,6 +6,7 @@ import {
     SandboxEnvironment,
     SandboxFolder,
     SandboxSave,
+    SandboxValidationCache,
     SandboxBridge,
     SandboxEnvironmentOptions,
     SandboxHitDeclaration,
@@ -233,6 +234,7 @@ export class TTSandboxGui {
     private declarations: SandboxDeclaration[] = [];
     private folders: SandboxFolder[] = [];
     private order: string[] = [];
+    private validationCache: SandboxValidationCache | undefined;
     /** Use the same ordered folder semantics as the type-layer theorem list. */
     private workspace = new TheoremWorkspace();
     private pendingFolderId: string | null = null;
@@ -490,6 +492,7 @@ export class TTSandboxGui {
             return;
         }
         this.declarations = result.declarations;
+        this.validationCache = result.validationCache;
         this.syncWorkspaceFromState();
         try {
             this.onAxiomsChange?.(result.bridge ?? emptyBridge(), { revalidate: true });
@@ -906,6 +909,7 @@ export class TTSandboxGui {
                 : null;
             return restored;
         });
+        this.validationCache = migrated.validationCache;
         const knownIds = new Set([
             ...this.folders.map(folder => folder.id),
             ...this.declarations.map(declaration => declaration.id)
@@ -927,7 +931,8 @@ export class TTSandboxGui {
             version: SANDBOX_SAVE_VERSION,
             declarations: this.declarations.map(declaration => ({ ...declaration, dependencies: [...declaration.dependencies] })),
             folders: this.folders.map(folder => ({ ...folder })),
-            order: [...this.order]
+            order: [...this.order],
+            ...(this.validationCache ? { validationCache: this.validationCache } : {})
         };
     }
 

@@ -1413,7 +1413,7 @@ export class Core {
                     this.setSystemDefinition(name, portableDefinition);
                 }
             }
-            this.restoreDefinitionCache(name, this.createSemanticDefinitionCacheSnapshot(cachedType, this.state.bondVarId, generalizedMetas));
+            this.restoreCheckedDefinitionCache(name, this.createSemanticDefinitionCacheSnapshot(cachedType, this.state.bondVarId, generalizedMetas));
             return Core.clone(filled);
         }
         catch (error) {
@@ -1519,27 +1519,31 @@ export class Core {
     restoreDefinitionCache(name, cache) {
         if (!cache)
             return;
-        if (isSemanticDefinitionCacheSnapshot(cache)) {
-            this.state.defTypes[name] = cloneSemanticDefinitionCache(cache);
-            this.syncSemanticConstantType(name);
-            this.syncSemanticDefinition(name);
-            return;
-        }
-        const migrated = migrateLegacyDefinitionCache(cache);
-        if (!migrated) {
+        const restored = isSemanticDefinitionCacheSnapshot(cache)
+            ? cloneSemanticDefinitionCache(cache)
+            : migrateLegacyDefinitionCache(cache);
+        if (!restored || !this.semanticTypeChecker.setConstantSchemeSnapshot(name, restored)) {
             this.clearDefinitionCache(name);
             return;
         }
-        // Validate the portable scheme with the same compiler used at every
-        // semantic use site. A malformed/stale cache must be treated as
-        // absent so the owning Engine can recover it from the definition
-        // source; retaining an unusable `kind: "nbe"` entry would make the
-        // constant appear defined while remaining unavailable to NbE.
-        if (!this.semanticTypeChecker.setConstantSchemeSnapshot(name, migrated)) {
+        this.state.defTypes[name] = restored;
+        this.syncSemanticConstantType(name);
+        this.syncSemanticDefinition(name);
+    }
+    /** Install a cache produced by the immediately preceding Core check. */
+    restoreCheckedDefinitionCache(name, cache) {
+        if (!cache)
+            return;
+        const restored = isSemanticDefinitionCacheSnapshot(cache)
+            ? cloneSemanticDefinitionCache(cache)
+            : migrateLegacyDefinitionCache(cache);
+        if (!restored || !this.semanticTypeChecker.setConstantSchemeSnapshot(name, restored)) {
             this.clearDefinitionCache(name);
             return;
         }
-        this.state.defTypes[name] = migrated;
+        this.state.defTypes[name] = restored;
+        // Preserve explicit system types as the authoritative public type;
+        // the compiled scheme is used only when no system type exists.
         this.syncSemanticConstantType(name);
         this.syncSemanticDefinition(name);
     }

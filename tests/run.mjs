@@ -165,6 +165,7 @@ const tests = [
     "./tt-sandbox.test.mjs",
     "./tt-sandbox-ordering.test.mjs",
     "./tt-sandbox-incremental-session.test.mjs",
+    "./tt-sandbox-validation-cache.test.mjs",
     "./tt-assist-sandbox-inductive.test.mjs",
     "./tt-sandbox-indexed-inductive.test.mjs",
     "./tt-core-hit-metadata.test.mjs",

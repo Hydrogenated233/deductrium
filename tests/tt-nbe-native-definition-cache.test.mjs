@@ -43,4 +43,15 @@ assert.equal(use.status, "success",
     "a restored native scheme must instantiate its generalized metas");
 assert.equal(restored.core.serializeDefinitionCache("nativeScheme")?.kind, "nbe");
 
+restored.core.setUserDefinition("brokenCache", parser.parse("true"));
+restored.core.restoreDefinitionCache("brokenCache", {
+    kind: "nbe",
+    type: { type: "var", name: "?ghost", nodes: [] },
+    metas: [],
+    bondVarId: 1
+});
+assert.equal(restored.core.hasDefinitionCache("brokenCache"), false,
+    "a native snapshot rejected by the scheme compiler must not remain marked as cached");
+assert.equal(restored.core.semanticTypeChecker.hasConstantType("brokenCache"), false);
+
 console.log("native semantic definition-cache regression passed");
