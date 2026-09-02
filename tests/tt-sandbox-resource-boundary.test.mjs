@@ -154,4 +154,32 @@ function uncheckedSave(source, id = "sandbox-resource-boundary") {
         "a forged path4 cache must never publish an inductive bundle");
 }
 
+{
+    const inverseDepth = 130;
+    const nestedEndpoint = "inveq (".repeat(inverseDepth)
+        + "resourceFaceA3"
+        + ")".repeat(inverseDepth);
+    const result = new SandboxWorkerSession().handle({
+        id: 3,
+        kind: "load",
+        save: uncheckedSave(
+            `${cube3Source} | path3 resourceDeepCell3 : ${nestedEndpoint}=resourceFaceA3`,
+            "sandbox-deep-path3-expression"
+        ),
+        options: {
+            systemRuleIds: creativeSandboxSystemRuleIds,
+            validationMaxSourceChars: 100_000,
+            validationMaxNodes: 100_000,
+            validationMaxSteps: 100_000
+        }
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "invalid");
+    assert.match(result.error ?? "", /二阶路径表达式嵌套过深/,
+        "source lowering must reject deep path3 expressions before recursive cloning exhausts memory");
+    assert.equal(result.bridge?.inductives.length ?? 0, 0,
+        "a path3 expression rejected by the source budget must not publish a partial HIT");
+}
+
 console.log("sandbox source and dimension resource-boundary regressions passed");

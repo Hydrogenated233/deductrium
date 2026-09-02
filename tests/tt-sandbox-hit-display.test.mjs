@@ -44,7 +44,7 @@ const bundle = {
 const cloned = cloneInductiveBundle(bundle);
 assert.equal(cloned.metadata.kind, "hit1");
 assert.equal(cloned.metadata.dimension, 1);
-assert.equal(cloned.metadata.version, 6);
+assert.equal(cloned.metadata.version, 7);
 const clonedPath = cloned.metadata.pathLevels[0].constructors[0];
 assert.notEqual(clonedPath.left,
     bundle.metadata.pathConstructors[0].left);
@@ -90,7 +90,7 @@ const hit2Bundle = {
         ],
         twoPathConstructors: [{
             name: "squarePath",
-            argumentTypes: [parse("True")],
+            argumentTypes: [],
             left: parse("loopSquareA"),
             right: parse("loopSquareB"),
             leftPath: "loopSquareA",
@@ -104,18 +104,19 @@ const hit2Bundle = {
 const clonedHit2 = cloneInductiveBundle(hit2Bundle);
 assert.equal(clonedHit2.metadata.kind, "hit2");
 assert.equal(clonedHit2.metadata.dimension, 2);
-assert.equal(clonedHit2.metadata.version, 6);
+assert.equal(clonedHit2.metadata.version, 7);
 const clonedTwoPath = clonedHit2.metadata.pathLevels[1].constructors[0];
 assert.equal(clonedTwoPath.leftPath, "loopSquareA");
 assert.equal(clonedTwoPath.rightPath, "loopSquareB");
 assert.notEqual(clonedTwoPath.left,
     hit2Bundle.metadata.twoPathConstructors[0].left);
-assert.notEqual(clonedTwoPath.argumentTypes[0],
-    hit2Bundle.metadata.twoPathConstructors[0].argumentTypes[0]);
+assert.notEqual(clonedTwoPath.left,
+    hit2Bundle.metadata.twoPathConstructors[0].left);
 hit2Bundle.metadata.twoPathConstructors[0].left.name = "mutatedLoop";
 clonedTwoPath.right.name = "mutatedLoop";
 assert.equal(clonedTwoPath.left.name, "loopSquareA");
 assert.equal(hit2Bundle.metadata.twoPathConstructors[0].right.name, "loopSquareB");
+hit2Bundle.metadata.twoPathConstructors[0].left.name = "loopSquareA";
 
 const hit3Bundle = structuredClone(hit2Bundle);
 hit3Bundle.metadata.version = 5;
@@ -134,14 +135,12 @@ hit3Bundle.metadata.threePathConstructors = [{
 }];
 const clonedHit3 = cloneInductiveBundle(hit3Bundle);
 assert.equal(clonedHit3.metadata.kind, "hit3");
-assert.equal(clonedHit3.metadata.version, 6);
+assert.equal(clonedHit3.metadata.version, 7);
 const clonedThreePath = clonedHit3.metadata.pathLevels[2].constructors[0];
-assert.equal(clonedThreePath.leftTwoPath, "squarePath");
+assert.equal(clonedThreePath.leftExpression.name, "squarePath");
 assert.equal(clonedThreePath.actionComputationName, "ap3_cubePath");
-assert.notEqual(clonedThreePath.left,
-    hit3Bundle.metadata.threePathConstructors[0].left);
-assert.notEqual(clonedThreePath.sourcePath,
-    hit3Bundle.metadata.threePathConstructors[0].sourcePath);
+assert.notEqual(clonedThreePath.leftExpression.arguments,
+    hit3Bundle.metadata.threePathConstructors[0].left.nodes);
 
 for (const name of ["squarePath", "@squarePath"]) {
     assert.deepEqual(
@@ -345,7 +344,8 @@ assert.match(indexHtml, /hit Circle2 : U \| base2 : Circle2 \| loop2 : base2 = b
 assert.match(indexHtml, /apd_loop2[\s\S]*ap_loop2/);
 assert.match(indexHtml, /path2[\s\S]*apd_squareS[\s\S]*ap_squareS/);
 assert.match(indexHtml, /ap2_squareS/);
-assert.match(indexHtml, /可注册三维 HIT[\s\S]*path3[\s\S]*ap3_名称[\s\S]*apd3_名称[\s\S]*path4[\s\S]*边界 fixture/);
+assert.match(indexHtml, /三维 HIT 是当前面向用户的最高维度[\s\S]*path3[\s\S]*▪[\s\S]*inveq[\s\S]*ap3_名称[\s\S]*apd3_名称/);
+assert.match(indexHtml, /path4[\s\S]*实验性 fixture[\s\S]*资源限制[\s\S]*明确拒绝四维及更高维/);
 assert.match(indexHtml, /路径构造子的 <code>apd_<\/code>\/<code>ap_<\/code> 规则是需要显式使用的命题/);
 
 console.log("sandbox HIT bridge and display regression passed");

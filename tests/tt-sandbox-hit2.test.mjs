@@ -63,7 +63,7 @@ assert.throws(
 );
 
 const bundle = lowerSandboxHit(parsed);
-assert.equal(bundle.metadata.version, 6);
+assert.equal(bundle.metadata.version, 7);
 assert.equal(bundle.metadata.kind, "hit2");
 assert.equal(bundle.metadata.dimension, 2);
 assert.equal(bundle.metadata.typeName, "SurfaceX");
@@ -184,7 +184,7 @@ assert.equal(restoredDeclaration.folderId, folder.id);
 assert.ok(restored.check("squareX : loopAX = loopBX").ok);
 assert.equal(restored.bridge().inductives[0].metadata.kind, "hit2");
 assert.equal(restored.bridge().inductives[0].metadata.dimension, 2);
-assert.equal(restored.bridge().inductives[0].metadata.version, 6);
+assert.equal(restored.bridge().inductives[0].metadata.version, 7);
 assert.equal(restored.bridge().inductives[0].metadata.pathLevels[1].constructors[0].name, "squareX");
 
 // Uniform parameters must be threaded through generated path-computation

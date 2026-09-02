@@ -175,6 +175,7 @@ const tests = [
     "./tt-sandbox-hit1.test.mjs",
     "./tt-sandbox-hit2.test.mjs",
     "./tt-sandbox-hit3.test.mjs",
+    "./tt-sandbox-hit3-composite.test.mjs",
     "./tt-sandbox-hit4-boundary.test.mjs",
     "./tt-sandbox-resource-boundary.test.mjs",
     "./tt-sandbox-hit-display.test.mjs",

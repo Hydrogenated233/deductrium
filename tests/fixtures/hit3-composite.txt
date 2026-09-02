@@ -1,0 +1,12 @@
+hit Composite3 : U
+| baseComposite3 : Composite3
+| loop0Composite3 : baseComposite3 = baseComposite3
+| loop1Composite3 : baseComposite3 = baseComposite3
+| loop2Composite3 : baseComposite3 = baseComposite3
+| path2 face01Composite3 : loop0Composite3 = loop1Composite3
+| path2 face12Composite3 : loop1Composite3 = loop2Composite3
+| path2 face02Composite3 : loop0Composite3 = loop2Composite3
+| path2 face10Composite3 : loop1Composite3 = loop0Composite3
+| path3 atomComposite3 : face02Composite3 = face02Composite3
+| path3 composeComposite3 : (face01Composite3 ▪ face12Composite3) = face02Composite3
+| path3 inverseComposite3 : inveq face01Composite3 = face10Composite3

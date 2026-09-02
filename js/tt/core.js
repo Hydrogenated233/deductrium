@@ -16,9 +16,9 @@ const semanticResourceBaseLimits = Object.freeze({
     outputMaxNodes: 256
 });
 const certifiedPath3ComputationResourceLimits = Object.freeze({
-    inputMaxNodes: 1_024,
-    synthesisMaxSteps: 12_288,
-    outputMaxNodes: 1_024
+    inputMaxNodes: 4_096,
+    synthesisMaxSteps: 131_072,
+    outputMaxNodes: 4_096
 });
 function fitsSemanticNbeBudget(ast, maxNodes, allowRigidMetas = false, context = [], allowHoles = false, allowedMetaNames) {
     if (!ast)
@@ -324,6 +324,131 @@ function collectAstBondVarIds(ast, result) {
             stack.push(node);
     }
 }
+const CORE_HIT_TWO_PATH_EXPRESSION_MAX_DEPTH = 128;
+const CORE_HIT_TWO_PATH_EXPRESSION_MAX_NODES = 4_096;
+const CORE_HIT_THREE_PATH_LEGACY_FIELDS = [
+    "left",
+    "right",
+    "leftTwoPath",
+    "rightTwoPath",
+    "sourcePath",
+    "targetPath"
+];
+function cloneCoreHitTwoPathExpression(value, label, state = { nodes: 0, ancestors: new WeakSet() }, depth = 0) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`${label} 二阶路径表达式结构无效`);
+    }
+    if (depth > CORE_HIT_TWO_PATH_EXPRESSION_MAX_DEPTH) {
+        throw new Error(`${label} 二阶路径表达式嵌套过深`);
+    }
+    if (++state.nodes > CORE_HIT_TWO_PATH_EXPRESSION_MAX_NODES) {
+        throw new Error(`${label} 二阶路径表达式节点过多`);
+    }
+    const object = value;
+    if (state.ancestors.has(object)) {
+        throw new Error(`${label} 二阶路径表达式不能循环引用自身`);
+    }
+    state.ancestors.add(object);
+    try {
+        if (object.kind === "atom") {
+            const keys = Object.keys(object);
+            if (keys.some(key => !["kind", "name", "arguments"].includes(key))
+                || typeof object.name !== "string" || !object.name
+                || !Array.isArray(object.arguments)
+                || object.arguments.some(argument => !argument || typeof argument !== "object")) {
+                throw new Error(`${label} 二阶路径 atom 结构无效`);
+            }
+            return {
+                kind: "atom",
+                name: object.name,
+                arguments: object.arguments.map(argument => Core.clone(argument))
+            };
+        }
+        if (object.kind === "compose") {
+            const keys = Object.keys(object);
+            if (keys.some(key => !["kind", "left", "right"].includes(key))) {
+                throw new Error(`${label} 二阶路径 compose 结构无效`);
+            }
+            return {
+                kind: "compose",
+                left: cloneCoreHitTwoPathExpression(object.left, label, state, depth + 1),
+                right: cloneCoreHitTwoPathExpression(object.right, label, state, depth + 1)
+            };
+        }
+        if (object.kind === "inverse") {
+            const keys = Object.keys(object);
+            if (keys.some(key => !["kind", "value"].includes(key))) {
+                throw new Error(`${label} 二阶路径 inverse 结构无效`);
+            }
+            return {
+                kind: "inverse",
+                value: cloneCoreHitTwoPathExpression(object.value, label, state, depth + 1)
+            };
+        }
+        throw new Error(`${label} 二阶路径表达式 kind 无效：${String(object.kind ?? "<空>")}`);
+    }
+    finally {
+        state.ancestors.delete(object);
+    }
+}
+function legacyCoreHitTwoPathExpression(endpoint, expectedName, parameterCount, label) {
+    if (!endpoint || !expectedName) {
+        throw new Error(`${label} legacy 三阶路径端点 metadata 不完整`);
+    }
+    const application = generatedApplicationParts(endpoint);
+    const name = generatedFreeConstantName(application.head);
+    if (!name || name !== expectedName) {
+        throw new Error(`${label} legacy 三阶路径端点头与 metadata 不一致：`
+            + `${name ?? "<非常量>"} != ${expectedName}`);
+    }
+    if (application.arguments.length < parameterCount) {
+        throw new Error(`${label} legacy 三阶路径端点缺少统一参数`);
+    }
+    return {
+        kind: "atom",
+        name,
+        arguments: application.arguments.slice(parameterCount).map(argument => Core.clone(argument))
+    };
+}
+function migrateLegacyCoreHitThreePathMetadata(path, twoPathByName, parameterCount) {
+    const label = `三维 HIT 三阶路径构造子 ${path.name}`;
+    const leftExpression = legacyCoreHitTwoPathExpression(path.left, path.leftTwoPath, parameterCount, `${label} 左端点`);
+    const rightExpression = legacyCoreHitTwoPathExpression(path.right, path.rightTwoPath, parameterCount, `${label} 右端点`);
+    if (!path.sourcePath || !path.targetPath) {
+        throw new Error(`${label} legacy 边界 metadata 不完整`);
+    }
+    const boundaryFor = (expression, side) => {
+        if (expression.kind !== "atom")
+            throw new Error(`${label} ${side}端点不是 direct atom`);
+        const referenced = twoPathByName.get(expression.name);
+        if (!referenced) {
+            throw new Error(`${label} ${side}端点引用不存在：${expression.name}`);
+        }
+        const argumentNames = referenced.argumentNames ?? [];
+        if (argumentNames.length !== referenced.argumentTypes.length
+            || expression.arguments.length !== argumentNames.length) {
+            throw new Error(`${label} ${side}端点参数数量与二阶路径 metadata 不一致`);
+        }
+        const replacements = new Map();
+        argumentNames.forEach((name, index) => replacements.set(name, expression.arguments[index]));
+        return {
+            sourcePath: substituteGeneratedFreeNames(referenced.left, replacements),
+            targetPath: substituteGeneratedFreeNames(referenced.right, replacements)
+        };
+    };
+    const leftBoundary = boundaryFor(leftExpression, "左");
+    const rightBoundary = boundaryFor(rightExpression, "右");
+    if (!sameGeneratedAstAlpha(leftBoundary.sourcePath, rightBoundary.sourcePath)
+        || !sameGeneratedAstAlpha(leftBoundary.targetPath, rightBoundary.targetPath)) {
+        throw new Error(`${label} 的 legacy 二阶路径边界不一致`);
+    }
+    if (!sameGeneratedAstAlpha(leftBoundary.sourcePath, path.sourcePath)
+        || !sameGeneratedAstAlpha(leftBoundary.targetPath, path.targetPath)) {
+        throw new Error(`${label} 的 legacy 边界 metadata 不一致`);
+    }
+    const { left: _left, right: _right, leftTwoPath: _leftTwoPath, rightTwoPath: _rightTwoPath, sourcePath: _sourcePath, targetPath: _targetPath, ...common } = path;
+    return { ...common, leftExpression, rightExpression };
+}
 function normalizeCoreSystemInductiveMetadata(metadata) {
     const isHit = metadata.kind === "hit1"
         || metadata.kind === "hit2"
@@ -333,18 +458,18 @@ function normalizeCoreSystemInductiveMetadata(metadata) {
     const version = Number(metadata.version ?? 0);
     if (version <= 1)
         return metadata;
-    if (![3, 4, 5, 6].includes(version)) {
+    if (![3, 4, 5, 6, 7].includes(version)) {
         throw new Error(`不支持的 HIT metadata 版本：${version || "<空>"}`);
     }
     let sourceLevels;
-    if (version === 6) {
+    if (version >= 6) {
         if (!metadata.pathLevels) {
             throw new Error(`HIT metadata v${version} 缺少 canonical pathLevels`);
         }
         if (metadata.pathConstructors !== undefined
             || metadata.twoPathConstructors !== undefined
             || metadata.threePathConstructors !== undefined) {
-            throw new Error("HIT metadata v6 不能同时携带 legacy 路径字段");
+            throw new Error(`HIT metadata v${version} 不能同时携带 legacy 路径字段`);
         }
         assertCanonicalHitPathLevels(metadata.pathLevels);
         sourceLevels = metadata.pathLevels;
@@ -356,7 +481,25 @@ function normalizeCoreSystemInductiveMetadata(metadata) {
         sourceLevels = hitPathLevelsFromLegacy(metadata);
         assertCanonicalHitPathLevels(sourceLevels);
     }
-    const pathLevels = createHitPathLevels(hitPathConstructorsAt(sourceLevels, 1), hitPathConstructorsAt(sourceLevels, 2), hitPathConstructorsAt(sourceLevels, 3));
+    const sourceThreePathConstructors = hitPathConstructorsAt(sourceLevels, 3);
+    const twoPathByName = new Map(hitPathConstructorsAt(sourceLevels, 2).map(path => [path.name, path]));
+    const threePathConstructors = sourceThreePathConstructors.map(path => {
+        if (version <= 6) {
+            return migrateLegacyCoreHitThreePathMetadata(path, twoPathByName, Number(metadata.parameterCount ?? 0));
+        }
+        if (CORE_HIT_THREE_PATH_LEGACY_FIELDS.some(field => Object.prototype.hasOwnProperty.call(path, field))) {
+            throw new Error(`HIT metadata v7 三阶路径构造子 ${path.name} 不能携带 legacy 冗余字段`);
+        }
+        if (!path.leftExpression || !path.rightExpression) {
+            throw new Error(`HIT metadata v7 三阶路径构造子 ${path.name} 缺少表达式端点`);
+        }
+        return {
+            ...path,
+            leftExpression: cloneCoreHitTwoPathExpression(path.leftExpression, `三阶路径构造子 ${path.name} 左端点`),
+            rightExpression: cloneCoreHitTwoPathExpression(path.rightExpression, `三阶路径构造子 ${path.name} 右端点`)
+        };
+    });
+    const pathLevels = createHitPathLevels(hitPathConstructorsAt(sourceLevels, 1), hitPathConstructorsAt(sourceLevels, 2), threePathConstructors);
     const dimension = highestHitPathLevel(pathLevels);
     const expectedKind = dimension === 3 ? "hit3" : dimension === 2 ? "hit2" : "hit1";
     if (metadata.dimension !== dimension || metadata.kind !== expectedKind) {
@@ -369,7 +512,7 @@ function normalizeCoreSystemInductiveMetadata(metadata) {
     const { pathLevels: _pathLevels, pathConstructors: _pathConstructors, twoPathConstructors: _twoPathConstructors, threePathConstructors: _threePathConstructors, ...common } = metadata;
     return {
         ...common,
-        version: 6,
+        version: 7,
         kind: expectedKind,
         dimension,
         pathLevels,
@@ -399,12 +542,8 @@ export function cloneCoreHitPathMetadata(metadata) {
         name: ctor.name,
         argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
         argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
-        left: Core.clone(ctor.left),
-        right: Core.clone(ctor.right),
-        leftTwoPath: ctor.leftTwoPath,
-        rightTwoPath: ctor.rightTwoPath,
-        sourcePath: Core.clone(ctor.sourcePath),
-        targetPath: Core.clone(ctor.targetPath),
+        leftExpression: cloneCoreHitTwoPathExpression(ctor.leftExpression, `三阶路径构造子 ${ctor.name} 左端点`),
+        rightExpression: cloneCoreHitTwoPathExpression(ctor.rightExpression, `三阶路径构造子 ${ctor.name} 右端点`),
         computationName: ctor.computationName,
         actionComputationName: ctor.actionComputationName
     })));
@@ -1421,7 +1560,7 @@ export class Core {
         }
         const metadataVersion = Number(bundle.metadata?.version);
         if (Number.isFinite(metadataVersion) && metadataVersion > 0
-            && ![1, 2, 3, 4, 5, 6].includes(metadataVersion)) {
+            && ![1, 2, 3, 4, 5, 6, 7].includes(metadataVersion)) {
             throw new Error(`不支持的归纳 metadata 版本：${metadataVersion}`);
         }
         const metadataPathLevels = bundle.metadata
@@ -1430,7 +1569,7 @@ export class Core {
         const metadataPathEntries = hitPathConstructorsAt(metadataPathLevels, 1);
         const metadataTwoPathEntries = hitPathConstructorsAt(metadataPathLevels, 2);
         const metadataThreePathEntries = hitPathConstructorsAt(metadataPathLevels, 3);
-        if ([2, 3, 4, 5, 6].includes(metadataVersion)
+        if ([2, 3, 4, 5, 6, 7].includes(metadataVersion)
             && bundle.metadata?.ruleSchemaVersion !== 1) {
             throw new Error(`沙盒归纳 metadata v${metadataVersion} 必须使用计算规则 schema v1`);
         }
@@ -1842,51 +1981,86 @@ export class Core {
                     }
                 }
             }
-            const validateThreePathEndpoint = (owner, side, endpoint, referencedName) => {
-                const referencedPath = twoPathMetadataByName.get(referencedName);
-                if (!referencedPath) {
-                    throw new Error(`三维 HIT 三阶路径构造子 ${owner} 的二阶路径引用不存在：${referencedName}`);
+            const evaluateTwoPathExpression = (expression, owner, side, state = { nodes: 0, ancestors: new WeakSet() }, depth = 0) => {
+                const label = `三维 HIT 三阶路径构造子 ${owner} ${side}端点`;
+                if (!expression || typeof expression !== "object") {
+                    throw new Error(`${label}缺少二阶路径表达式`);
                 }
-                const application = generatedApplicationParts(endpoint);
-                const endpointHead = application.head.type === "var"
-                    ? application.head.name
-                    : "";
-                if (endpointHead !== referencedName) {
-                    throw new Error(`三维 HIT 三阶路径构造子 ${owner} ${side}端点头常量与 ${side}TwoPath metadata 不一致：`
-                        + `${endpointHead || "<非常量>"} != ${referencedName}`);
+                if (depth > CORE_HIT_TWO_PATH_EXPRESSION_MAX_DEPTH) {
+                    throw new Error(`${label}表达式嵌套过深`);
                 }
-                const expectedArgumentCount = parameters.length
-                    + referencedPath.argumentTypes.length;
-                if (application.arguments.length !== expectedArgumentCount) {
-                    throw new Error(`三维 HIT 三阶路径构造子 ${owner} ${side}端点参数数量与二阶路径 `
-                        + `${referencedName} telescope 不一致：需要 ${expectedArgumentCount} 个，`
-                        + `实际 ${application.arguments.length} 个`);
+                if (++state.nodes > CORE_HIT_TWO_PATH_EXPRESSION_MAX_NODES) {
+                    throw new Error(`${label}表达式节点过多`);
                 }
-                for (let index = 0; index < parameters.length; index++) {
-                    const parameter = parameters[index];
-                    if (!sameGeneratedAst(application.arguments[index], wrapVar(parameter.name))) {
-                        throw new Error(`三维 HIT 三阶路径构造子 ${owner} ${side}端点未保持统一参数：`
-                            + parameter.name);
+                if (state.ancestors.has(expression)) {
+                    throw new Error(`${label}表达式不能循环引用自身`);
+                }
+                state.ancestors.add(expression);
+                try {
+                    if (expression.kind === "atom") {
+                        const referencedPath = twoPathMetadataByName.get(expression.name);
+                        if (!referencedPath) {
+                            throw new Error(`${label}引用不存在：${expression.name}`);
+                        }
+                        const argumentNames = referencedPath.argumentNames ?? [];
+                        if (argumentNames.length !== referencedPath.argumentTypes.length
+                            || new Set(argumentNames).size !== argumentNames.length) {
+                            throw new Error(`三维 HIT 二阶路径 ${expression.name} argumentNames 与 telescope 不一致`);
+                        }
+                        if (expression.arguments.length !== argumentNames.length) {
+                            throw new Error(`${label}参数数量与二阶路径 ${expression.name} telescope 不一致：`
+                                + `需要 ${argumentNames.length} 个，实际 ${expression.arguments.length} 个`);
+                        }
+                        const arguments_ = expression.arguments.map(normalizedMetadataAst);
+                        const replacements = new Map();
+                        argumentNames.forEach((name, index) => {
+                            replacements.set(name, arguments_[index]);
+                        });
+                        const sourcePath = substituteGeneratedFreeNames(normalizedMetadataAst(referencedPath.left), replacements);
+                        const targetPath = substituteGeneratedFreeNames(normalizedMetadataAst(referencedPath.right), replacements);
+                        validateTwoPathEndpoint(owner, `${side}端点的来源`, sourcePath, referencedPath.leftPath);
+                        validateTwoPathEndpoint(owner, `${side}端点的目标`, targetPath, referencedPath.rightPath);
+                        return {
+                            kind: "atom",
+                            path: referencedPath,
+                            arguments: arguments_,
+                            term: wrapApply(wrapVar(expression.name), ...parameters.map(parameter => wrapVar(parameter.name)), ...arguments_.map(argument => Core.clone(argument))),
+                            sourcePath,
+                            targetPath
+                        };
                     }
+                    if (expression.kind === "compose") {
+                        const left = evaluateTwoPathExpression(expression.left, owner, side, state, depth + 1);
+                        const right = evaluateTwoPathExpression(expression.right, owner, side, state, depth + 1);
+                        if (!sameGeneratedAstAlpha(left.targetPath, right.sourcePath)) {
+                            throw new Error(`${label}组合项的中间一阶路径边界不一致`);
+                        }
+                        return {
+                            kind: "compose",
+                            left,
+                            right,
+                            term: wrapApply(wrapVar("compeq"), Core.clone(left.term), Core.clone(right.term)),
+                            sourcePath: Core.clone(left.sourcePath),
+                            targetPath: Core.clone(right.targetPath)
+                        };
+                    }
+                    if (expression.kind === "inverse") {
+                        const value = evaluateTwoPathExpression(expression.value, owner, side, state, depth + 1);
+                        return {
+                            kind: "inverse",
+                            value,
+                            term: wrapApply(wrapVar("inveq"), Core.clone(value.term)),
+                            sourcePath: Core.clone(value.targetPath),
+                            targetPath: Core.clone(value.sourcePath)
+                        };
+                    }
+                    throw new Error(`${label}表达式 kind 无效`);
                 }
-                const argumentNames = referencedPath.argumentNames ?? [];
-                if (argumentNames.length !== referencedPath.argumentTypes.length
-                    || new Set(argumentNames).size !== argumentNames.length) {
-                    throw new Error(`三维 HIT 二阶路径 ${referencedName} argumentNames 与 telescope 不一致`);
+                finally {
+                    state.ancestors.delete(expression);
                 }
-                const replacements = new Map();
-                parameters.forEach((parameter, index) => {
-                    replacements.set(parameter.name, application.arguments[index]);
-                });
-                argumentNames.forEach((name, index) => {
-                    replacements.set(name, application.arguments[parameters.length + index]);
-                });
-                const sourcePath = substituteGeneratedFreeNames(normalizedMetadataAst(referencedPath.left), replacements);
-                const targetPath = substituteGeneratedFreeNames(normalizedMetadataAst(referencedPath.right), replacements);
-                validateTwoPathEndpoint(owner, `${side}端点的来源`, sourcePath, referencedPath.leftPath);
-                validateTwoPathEndpoint(owner, `${side}端点的目标`, targetPath, referencedPath.rightPath);
-                return { sourcePath, targetPath };
             };
+            const evaluatedThreePathEndpoints = new Map();
             for (const path of metadataThreePathEntries) {
                 if (!Array.isArray(path.argumentNames)
                     || path.argumentNames.length !== path.argumentTypes.length
@@ -1907,22 +2081,22 @@ export class Core {
                     ...parameters.map(parameter => parameter.type),
                     ...path.argumentTypes.map(normalizedMetadataAst)
                 ], `三维 HIT 三阶路径构造子 ${path.name}`);
+                const leftEndpoint = evaluateTwoPathExpression(path.leftExpression, path.name, "左");
+                const rightEndpoint = evaluateTwoPathExpression(path.rightExpression, path.name, "右");
                 const endpoints = generatedEqualityEndpoints(conclusion);
                 if (!endpoints
-                    || !sameGeneratedAst(endpoints[0], normalizedMetadataAst(path.left))
-                    || !sameGeneratedAst(endpoints[1], normalizedMetadataAst(path.right))) {
+                    || !sameGeneratedAst(endpoints[0], leftEndpoint.term)
+                    || !sameGeneratedAst(endpoints[1], rightEndpoint.term)) {
                     throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 端点与 metadata 不一致`);
                 }
-                const leftEndpoint = validateThreePathEndpoint(path.name, "左", normalizedMetadataAst(path.left), path.leftTwoPath);
-                const rightEndpoint = validateThreePathEndpoint(path.name, "右", normalizedMetadataAst(path.right), path.rightTwoPath);
                 if (!sameGeneratedAstAlpha(leftEndpoint.sourcePath, rightEndpoint.sourcePath)
                     || !sameGeneratedAstAlpha(leftEndpoint.targetPath, rightEndpoint.targetPath)) {
                     throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 的二阶路径边界不一致`);
                 }
-                if (!sameGeneratedAstAlpha(leftEndpoint.sourcePath, normalizedMetadataAst(path.sourcePath))
-                    || !sameGeneratedAstAlpha(leftEndpoint.targetPath, normalizedMetadataAst(path.targetPath))) {
-                    throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 的边界 metadata 不一致`);
-                }
+                evaluatedThreePathEndpoints.set(path.name, {
+                    left: leftEndpoint,
+                    right: rightEndpoint
+                });
                 for (const computationName of [
                     `apd3_${path.name}`,
                     `@apd3_${path.name}`,
@@ -2078,6 +2252,9 @@ export class Core {
                         .slice(offset, offset + pathEntries.length)
                         .map(binder => binder.name);
                     offset += pathEntries.length;
+                    const twoPathMethodNames = recursorBinders
+                        .slice(offset, offset + twoPathEntries.length)
+                        .map(binder => binder.name);
                     offset += twoPathEntries.length;
                     const threePathMethodNames = recursorBinders
                         .slice(offset, offset + threePathEntries.length)
@@ -2088,6 +2265,24 @@ export class Core {
                     }
                     const prefixBinders = recursorBinders.slice(0, offset);
                     const prefixValues = prefixBinders.map(binder => wrapVar(binder.name));
+                    let familyUniverse = normalizedMetadataAst(bundle.type[1]);
+                    for (let index = 0; index < parameters.length; index++) {
+                        if (familyUniverse.type !== "P" || !familyUniverse.nodes?.[1]) {
+                            throw new Error(`三维 HIT ${metadata.typeName} 的 Universe telescope 不完整`);
+                        }
+                        familyUniverse = familyUniverse.nodes[1];
+                    }
+                    if (familyUniverse.type !== "apply"
+                        || familyUniverse.nodes?.[0]?.type !== "var"
+                        || familyUniverse.nodes[0].name !== "U"
+                        || !familyUniverse.nodes[1]) {
+                        throw new Error(`三维 HIT ${metadata.typeName} 的 Universe 缺少显式层级`);
+                    }
+                    const hitUniverseLevel = Core.clone(familyUniverse.nodes[1]);
+                    const motiveUniverseLevel = full
+                        ? Core.clone(prefixValues[0])
+                        : wrapVar("@0");
+                    const hitType = wrapApply(wrapVar(metadata.typeName), ...parameters.map(parameter => wrapVar(parameter.name)));
                     const endpointMethod = (endpoint, entries, methodNames, label) => {
                         const application = generatedApplicationParts(endpoint);
                         const endpointName = generatedFreeConstantName(application.head) ?? "";
@@ -2105,18 +2300,14 @@ export class Core {
                         }
                         return wrapApply(wrapVar(`${full ? "@" : ""}ap_${endpointName}`), ...prefixValues.map(value => Core.clone(value)), ...application.arguments.slice(parameters.length).map(argument => Core.clone(argument)));
                     };
-                    const strongTwoPathComputation = (endpoint) => {
-                        const application = generatedApplicationParts(endpoint);
-                        const endpointName = generatedFreeConstantName(application.head) ?? "";
-                        if (!twoPathMetadataByName.has(endpointName)) {
-                            throw new Error(`${computationName} 引用了未知二阶路径：${endpointName}`);
-                        }
-                        return wrapApply(wrapVar(`${full ? "@" : ""}ap2_${endpointName}`), ...prefixValues.map(value => Core.clone(value)), ...application.arguments.slice(parameters.length).map(argument => Core.clone(argument)));
-                    };
-                    const sourcePath = normalizedMetadataAst(path.sourcePath);
-                    const targetPath = normalizedMetadataAst(path.targetPath);
-                    const leftTwoPath = normalizedMetadataAst(path.left);
-                    const rightTwoPath = normalizedMetadataAst(path.right);
+                    const endpointData = evaluatedThreePathEndpoints.get(path.name);
+                    if (!endpointData) {
+                        throw new Error(`${computationName} 缺少已认证的表达式端点`);
+                    }
+                    const sourcePath = Core.clone(endpointData.left.sourcePath);
+                    const targetPath = Core.clone(endpointData.left.targetPath);
+                    const sourcePathName = generatedFreeConstantName(generatedApplicationParts(sourcePath).head) ?? "";
+                    const pointBoundary = validateTwoPathEndpoint(path.name, "三阶 action 来源", sourcePath, sourcePathName);
                     const sourceMethod = endpointMethod(sourcePath, pathEntries, pathMethodNames, computationName);
                     const targetMethod = endpointMethod(targetPath, pathEntries, pathMethodNames, computationName);
                     const argumentNames = path.argumentNames ?? [];
@@ -2127,12 +2318,63 @@ export class Core {
                         ...prefixBinders.map(binder => binder.name),
                         ...argumentNames
                     ]);
+                    const recursorHead = wrapApply(wrapVar(recursorName), ...prefixValues.map(value => Core.clone(value)));
+                    const actionType = (expression) => strongEquality(wrapApply(wrapVar("ap"), Core.clone(recursorHead), Core.clone(expression.sourcePath)), wrapApply(wrapVar("ap"), Core.clone(recursorHead), Core.clone(expression.targetPath)));
+                    const recursorExpressionMethod = (expression) => {
+                        if (expression.kind === "atom") {
+                            const endpointIndex = twoPathEntries.findIndex(entry => entry.name === expression.path.name);
+                            if (endpointIndex < 0) {
+                                throw new Error(`${computationName} 引用了未知二阶路径：${expression.path.name}`);
+                            }
+                            return wrapApply(wrapVar(twoPathMethodNames[endpointIndex]), ...expression.arguments.map(argument => Core.clone(argument)));
+                        }
+                        if (expression.kind === "compose") {
+                            return strongCompose(recursorExpressionMethod(expression.left), recursorExpressionMethod(expression.right));
+                        }
+                        return wrapApply(wrapVar("inveq"), recursorExpressionMethod(expression.value));
+                    };
+                    const strongExpressionComputation = (expression) => {
+                        if (expression.kind === "atom") {
+                            const sourceMethod = endpointMethod(expression.sourcePath, pathEntries, pathMethodNames, computationName);
+                            const targetMethod = endpointMethod(expression.targetPath, pathEntries, pathMethodNames, computationName);
+                            return {
+                                sourceMethod,
+                                targetMethod,
+                                method: recursorExpressionMethod(expression),
+                                sourceComputation: pathComputation(expression.sourcePath),
+                                targetComputation: pathComputation(expression.targetPath),
+                                proof: wrapApply(wrapVar(`${full ? "@" : ""}ap2_${expression.path.name}`), ...prefixValues.map(value => Core.clone(value)), ...expression.arguments.map(argument => Core.clone(argument)))
+                            };
+                        }
+                        if (expression.kind === "compose") {
+                            const left = strongExpressionComputation(expression.left);
+                            const right = strongExpressionComputation(expression.right);
+                            return {
+                                sourceMethod: left.sourceMethod,
+                                targetMethod: right.targetMethod,
+                                method: strongCompose(left.method, right.method),
+                                sourceComputation: left.sourceComputation,
+                                targetComputation: right.targetComputation,
+                                proof: wrapApply(wrapVar("@hit_ap2_corrected_comp"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), wrapVar(motiveName), Core.clone(pointBoundary.sourcePoint), Core.clone(pointBoundary.targetPoint), Core.clone(expression.left.sourcePath), Core.clone(expression.left.targetPath), Core.clone(expression.right.targetPath), Core.clone(recursorHead), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.sourceComputation), Core.clone(left.targetComputation), Core.clone(right.targetComputation), Core.clone(left.method), Core.clone(right.method), Core.clone(left.proof), Core.clone(right.proof))
+                            };
+                        }
+                        const value = strongExpressionComputation(expression.value);
+                        return {
+                            sourceMethod: value.targetMethod,
+                            targetMethod: value.sourceMethod,
+                            method: wrapApply(wrapVar("inveq"), Core.clone(value.method)),
+                            sourceComputation: value.targetComputation,
+                            targetComputation: value.sourceComputation,
+                            proof: wrapApply(wrapVar("@hit_ap2_corrected_inv"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), wrapVar(motiveName), Core.clone(pointBoundary.sourcePoint), Core.clone(pointBoundary.targetPoint), Core.clone(expression.value.sourcePath), Core.clone(expression.value.targetPath), Core.clone(recursorHead), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.sourceComputation), Core.clone(value.targetComputation), Core.clone(value.method), Core.clone(value.proof))
+                        };
+                    };
+                    const leftExpression = strongExpressionComputation(endpointData.left);
+                    const rightExpression = strongExpressionComputation(endpointData.right);
                     let methodName = "twoPathMethod";
                     while (occupied.has(methodName))
                         methodName += "_";
                     const correction = strongLambda(methodName, strongEquality(Core.clone(sourceMethod), Core.clone(targetMethod)), strongCompose(strongCompose(pathComputation(sourcePath), wrapVar(methodName)), wrapApply(wrapVar("inveq"), pathComputation(targetPath))));
-                    const correctedMethod = strongCompose(strongCompose(strongTwoPathComputation(leftTwoPath), wrapApply(wrapVar("ap"), correction, methodValue)), wrapApply(wrapVar("inveq"), strongTwoPathComputation(rightTwoPath)));
-                    const recursorHead = wrapApply(wrapVar(recursorName), ...prefixValues.map(value => Core.clone(value)));
+                    const correctedMethod = strongCompose(strongCompose(leftExpression.proof, wrapApply(wrapVar("ap"), correction, methodValue)), wrapApply(wrapVar("inveq"), rightExpression.proof));
                     const pathTerm = wrapApply(wrapVar(path.name), ...parameters.map(parameter => wrapVar(parameter.name)), ...argumentValues.map(argument => Core.clone(argument)));
                     const action = wrapApply(wrapVar("ap3"), recursorHead, pathTerm);
                     const localBinders = argumentNames.map((name, index) => ({
@@ -2143,6 +2385,7 @@ export class Core {
                     if (!sameGeneratedAstAlpha(actualComputationType, expected)) {
                         throw new Error(`三维 HIT action 计算定理 ${computationName} 与 metadata 不一致`);
                     }
+                    canonicallyCertifiedTypeFormations.add(computationName);
                 };
                 const validateThreePathDependentComputation = (path, full) => {
                     const eliminatorName = full
@@ -2186,6 +2429,24 @@ export class Core {
                     }
                     const prefixBinders = eliminatorBinders.slice(0, offset);
                     const prefixValues = prefixBinders.map(binder => wrapVar(binder.name));
+                    let familyUniverse = normalizedMetadataAst(bundle.type[1]);
+                    for (let index = 0; index < parameters.length; index++) {
+                        if (familyUniverse.type !== "P" || !familyUniverse.nodes?.[1]) {
+                            throw new Error(`三维 HIT ${metadata.typeName} 的 Universe telescope 不完整`);
+                        }
+                        familyUniverse = familyUniverse.nodes[1];
+                    }
+                    if (familyUniverse.type !== "apply"
+                        || familyUniverse.nodes?.[0]?.type !== "var"
+                        || familyUniverse.nodes[0].name !== "U"
+                        || !familyUniverse.nodes[1]) {
+                        throw new Error(`三维 HIT ${metadata.typeName} 的 Universe 缺少显式层级`);
+                    }
+                    const hitUniverseLevel = Core.clone(familyUniverse.nodes[1]);
+                    const motiveUniverseLevel = full
+                        ? Core.clone(prefixValues[0])
+                        : wrapVar("@0");
+                    const hitType = wrapApply(wrapVar(metadata.typeName), ...parameters.map(parameter => wrapVar(parameter.name)));
                     const argumentNames = path.argumentNames ?? [];
                     const argumentValues = argumentNames.map(wrapVar);
                     const localBinders = argumentNames.map((name, index) => ({
@@ -2218,18 +2479,6 @@ export class Core {
                             .slice(parameters.length)
                             .map(argument => Core.clone(argument)));
                     };
-                    const twoPathMethodValue = (endpoint) => {
-                        const application = generatedApplicationParts(endpoint);
-                        const endpointName = generatedFreeConstantName(application.head) ?? "";
-                        const endpointIndex = twoPathEntries
-                            .findIndex(entry => entry.name === endpointName);
-                        if (endpointIndex < 0) {
-                            throw new Error(`${computationName} 引用了未知二阶路径：${endpointName}`);
-                        }
-                        return wrapApply(wrapVar(twoPathMethodNames[endpointIndex]), ...application.arguments
-                            .slice(parameters.length)
-                            .map(argument => Core.clone(argument)));
-                    };
                     const pathData = (endpoint) => {
                         const application = generatedApplicationParts(endpoint);
                         const endpointName = generatedFreeConstantName(application.head) ?? "";
@@ -2240,7 +2489,8 @@ export class Core {
                         return {
                             pathTerm: pathTermValue,
                             type: strongEquality(wrapApply(wrapVar("trans"), wrapVar(motiveName), Core.clone(pathTermValue), leftBranch), rightBranch),
-                            sourcePoint: pointBoundary.sourcePoint
+                            sourcePoint: pointBoundary.sourcePoint,
+                            targetPoint: pointBoundary.targetPoint
                         };
                     };
                     const pathComputation = (endpoint) => {
@@ -2253,33 +2503,101 @@ export class Core {
                             .slice(parameters.length)
                             .map(argument => Core.clone(argument)));
                     };
-                    const twoPathComputation = (endpoint) => {
-                        const application = generatedApplicationParts(endpoint);
-                        const endpointName = generatedFreeConstantName(application.head) ?? "";
-                        if (!twoPathMetadataByName.has(endpointName)) {
-                            throw new Error(`${computationName} 引用了未知二阶路径：${endpointName}`);
-                        }
-                        return wrapApply(wrapVar(`${full ? "@" : ""}apd_${endpointName}`), ...prefixValues.map(value => Core.clone(value)), ...application.arguments
-                            .slice(parameters.length)
-                            .map(argument => Core.clone(argument)));
-                    };
-                    const sourcePath = normalizedMetadataAst(path.sourcePath);
-                    const targetPath = normalizedMetadataAst(path.targetPath);
-                    const leftTwoPath = normalizedMetadataAst(path.left);
-                    const rightTwoPath = normalizedMetadataAst(path.right);
+                    const endpointData = evaluatedThreePathEndpoints.get(path.name);
+                    if (!endpointData) {
+                        throw new Error(`${computationName} 缺少已认证的表达式端点`);
+                    }
+                    const sourcePath = Core.clone(endpointData.left.sourcePath);
+                    const targetPath = Core.clone(endpointData.left.targetPath);
                     const sourcePathData = pathData(sourcePath);
                     const targetPathData = pathData(targetPath);
                     const sourceMethod = pathMethodValue(sourcePath);
                     const targetMethod = pathMethodValue(targetPath);
                     const sourceComputation = pathComputation(sourcePath);
                     const targetComputation = pathComputation(targetPath);
-                    const leftComputation = twoPathComputation(leftTwoPath);
-                    const rightComputation = twoPathComputation(rightTwoPath);
-                    const leftMethod = twoPathMethodValue(leftTwoPath);
-                    const rightMethod = twoPathMethodValue(rightTwoPath);
+                    const sourceValue = pointBranchValue(sourcePathData.sourcePoint);
+                    const targetValue = pointBranchValue(sourcePathData.targetPoint);
+                    const dependentExpressionMethod = (expression) => {
+                        if (expression.kind === "atom") {
+                            const endpointIndex = twoPathEntries.findIndex(entry => entry.name === expression.path.name);
+                            if (endpointIndex < 0) {
+                                throw new Error(`${computationName} 引用了未知二阶路径：${expression.path.name}`);
+                            }
+                            return {
+                                sourceMethod: pathMethodValue(expression.sourcePath),
+                                targetMethod: pathMethodValue(expression.targetPath),
+                                proof: wrapApply(wrapVar(twoPathMethodNames[endpointIndex]), ...expression.arguments.map(argument => Core.clone(argument)))
+                            };
+                        }
+                        if (expression.kind === "compose") {
+                            const left = dependentExpressionMethod(expression.left);
+                            const right = dependentExpressionMethod(expression.right);
+                            return {
+                                sourceMethod: left.sourceMethod,
+                                targetMethod: right.targetMethod,
+                                proof: wrapApply(wrapVar("hit_dep2_comp"), wrapVar(motiveName), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.proof), Core.clone(right.proof))
+                            };
+                        }
+                        const value = dependentExpressionMethod(expression.value);
+                        return {
+                            sourceMethod: value.targetMethod,
+                            targetMethod: value.sourceMethod,
+                            proof: wrapApply(wrapVar("hit_dep2_inv"), wrapVar(motiveName), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.proof))
+                        };
+                    };
+                    const dependentExpressionComputation = (expression) => {
+                        if (expression.kind === "atom") {
+                            const method = dependentExpressionMethod(expression);
+                            return {
+                                sourcePath: Core.clone(expression.sourcePath),
+                                targetPath: Core.clone(expression.targetPath),
+                                sourceMethod: method.sourceMethod,
+                                targetMethod: method.targetMethod,
+                                method: method.proof,
+                                sourceComputation: pathComputation(expression.sourcePath),
+                                targetComputation: pathComputation(expression.targetPath),
+                                proof: wrapApply(wrapVar(`${full ? "@" : ""}apd_${expression.path.name}`), ...prefixValues.map(value => Core.clone(value)), ...expression.arguments.map(argument => Core.clone(argument)))
+                            };
+                        }
+                        if (expression.kind === "compose") {
+                            const left = dependentExpressionComputation(expression.left);
+                            const right = dependentExpressionComputation(expression.right);
+                            const method = wrapApply(wrapVar("hit_dep2_comp"), wrapVar(motiveName), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.method), Core.clone(right.method));
+                            return {
+                                sourcePath: left.sourcePath,
+                                targetPath: right.targetPath,
+                                sourceMethod: left.sourceMethod,
+                                targetMethod: right.targetMethod,
+                                method,
+                                sourceComputation: left.sourceComputation,
+                                targetComputation: right.targetComputation,
+                                proof: wrapApply(wrapVar("@hit_apd2_corrected_comp"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(sourcePathData.sourcePoint), Core.clone(sourcePathData.targetPoint), Core.clone(left.sourcePath), Core.clone(left.targetPath), Core.clone(right.targetPath), wrapVar(motiveName), Core.clone(dependentHead), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.sourceComputation), Core.clone(left.targetComputation), Core.clone(right.targetComputation), Core.clone(left.method), Core.clone(right.method), Core.clone(left.proof), Core.clone(right.proof))
+                            };
+                        }
+                        const value = dependentExpressionComputation(expression.value);
+                        const method = wrapApply(wrapVar("hit_dep2_inv"), wrapVar(motiveName), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.method));
+                        return {
+                            sourcePath: value.targetPath,
+                            targetPath: value.sourcePath,
+                            sourceMethod: value.targetMethod,
+                            targetMethod: value.sourceMethod,
+                            method,
+                            sourceComputation: value.targetComputation,
+                            targetComputation: value.sourceComputation,
+                            proof: wrapApply(wrapVar("@hit_apd2_corrected_inv"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(sourcePathData.sourcePoint), Core.clone(sourcePathData.targetPoint), Core.clone(value.sourcePath), Core.clone(value.targetPath), wrapVar(motiveName), Core.clone(dependentHead), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.sourceComputation), Core.clone(value.targetComputation), Core.clone(value.method), Core.clone(value.proof))
+                        };
+                    };
+                    const leftExpressionMethod = dependentExpressionMethod(endpointData.left);
+                    const rightExpressionMethod = dependentExpressionMethod(endpointData.right);
+                    const leftComputation = dependentExpressionComputation(endpointData.left).proof;
+                    const rightComputation = dependentExpressionComputation(endpointData.right).proof;
+                    const leftMethod = leftExpressionMethod.proof;
+                    const rightMethod = rightExpressionMethod.proof;
+                    const leftTwoPath = Core.clone(endpointData.left.term);
+                    const rightTwoPath = Core.clone(endpointData.right.term);
                     const pathIndex = threePathEntries.findIndex(entry => entry.name === path.name);
                     const methodValue = wrapApply(wrapVar(threePathMethodNames[pathIndex]), ...argumentValues.map(argument => Core.clone(argument)));
-                    const endpointValue = pointBranchValue(sourcePathData.sourcePoint);
+                    const endpointValue = Core.clone(sourceValue);
                     const twoPathDomain = strongEquality(Core.clone(sourcePath), Core.clone(targetPath));
                     const occupied = new Set([
                         ...prefixBinders.map(binder => binder.name),
@@ -2410,17 +2728,64 @@ export class Core {
                         const path = threePathEntries[index];
                         const argumentNames = path.argumentNames ?? [];
                         const argumentTypes = path.argumentTypes.map(normalizedMetadataAst);
-                        const leftMethod = methodValue(normalizedMetadataAst(path.left), twoPathEntries, twoPathMethodNames, `${label} ${path.name}`);
-                        const rightMethod = methodValue(normalizedMetadataAst(path.right), twoPathEntries, twoPathMethodNames, `${label} ${path.name}`);
+                        const endpointData = evaluatedThreePathEndpoints.get(path.name);
+                        if (!endpointData) {
+                            throw new Error(`${label} ${path.name} 缺少已认证的表达式端点`);
+                        }
+                        const recursorExpressionMethod = (expression) => {
+                            if (expression.kind === "atom") {
+                                const endpointIndex = twoPathEntries.findIndex(entry => entry.name === expression.path.name);
+                                if (endpointIndex < 0) {
+                                    throw new Error(`${label} ${path.name} 引用了未知二阶路径：${expression.path.name}`);
+                                }
+                                return wrapApply(wrapVar(twoPathMethodNames[endpointIndex]), ...expression.arguments.map(argument => Core.clone(argument)));
+                            }
+                            if (expression.kind === "compose") {
+                                return surfaceCompose(recursorExpressionMethod(expression.left), recursorExpressionMethod(expression.right));
+                            }
+                            return wrapApply(wrapVar("inveq"), recursorExpressionMethod(expression.value));
+                        };
                         let expectedBody;
                         if (dependent) {
-                            const sourcePath = normalizedMetadataAst(path.sourcePath);
-                            const targetPath = normalizedMetadataAst(path.targetPath);
+                            const sourcePath = Core.clone(endpointData.left.sourcePath);
+                            const targetPath = Core.clone(endpointData.left.targetPath);
                             const sourceMethod = methodValue(sourcePath, pathEntries, pathMethodNames, `${label} ${path.name}`);
                             const targetMethod = methodValue(targetPath, pathEntries, pathMethodNames, `${label} ${path.name}`);
                             const sourcePathName = generatedFreeConstantName(generatedApplicationParts(sourcePath).head) ?? "";
                             const pointBoundary = validateTwoPathEndpoint(path.name, "三阶 coherence 来源", sourcePath, sourcePathName);
                             const pointValue = branchValue(pointBoundary.sourcePoint, branchNames, `${label} ${path.name}`);
+                            const targetPointValue = branchValue(pointBoundary.targetPoint, branchNames, `${label} ${path.name}`);
+                            const dependentExpressionMethod = (expression) => {
+                                if (expression.kind === "atom") {
+                                    const endpointIndex = twoPathEntries.findIndex(entry => entry.name === expression.path.name);
+                                    if (endpointIndex < 0) {
+                                        throw new Error(`${label} ${path.name} 引用了未知二阶路径：`
+                                            + expression.path.name);
+                                    }
+                                    return {
+                                        sourceMethod: methodValue(expression.sourcePath, pathEntries, pathMethodNames, `${label} ${path.name}`),
+                                        targetMethod: methodValue(expression.targetPath, pathEntries, pathMethodNames, `${label} ${path.name}`),
+                                        proof: wrapApply(wrapVar(twoPathMethodNames[endpointIndex]), ...expression.arguments.map(argument => Core.clone(argument)))
+                                    };
+                                }
+                                if (expression.kind === "compose") {
+                                    const left = dependentExpressionMethod(expression.left);
+                                    const right = dependentExpressionMethod(expression.right);
+                                    return {
+                                        sourceMethod: left.sourceMethod,
+                                        targetMethod: right.targetMethod,
+                                        proof: wrapApply(wrapVar("hit_dep2_comp"), wrapVar(motiveName), Core.clone(pointValue), Core.clone(targetPointValue), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.proof), Core.clone(right.proof))
+                                    };
+                                }
+                                const value = dependentExpressionMethod(expression.value);
+                                return {
+                                    sourceMethod: value.targetMethod,
+                                    targetMethod: value.sourceMethod,
+                                    proof: wrapApply(wrapVar("hit_dep2_inv"), wrapVar(motiveName), Core.clone(pointValue), Core.clone(targetPointValue), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.proof))
+                                };
+                            };
+                            const leftMethod = dependentExpressionMethod(endpointData.left).proof;
+                            const rightMethod = dependentExpressionMethod(endpointData.right).proof;
                             const occupied = new Set([
                                 ...binders.slice(0, offset).map(binder => binder.name),
                                 ...argumentNames
@@ -2434,6 +2799,8 @@ export class Core {
                             expectedBody = surfaceEquality(wrapApply(wrapVar("trans"), family, pathTerm, leftMethod), rightMethod);
                         }
                         else {
+                            const leftMethod = recursorExpressionMethod(endpointData.left);
+                            const rightMethod = recursorExpressionMethod(endpointData.right);
                             expectedBody = surfaceEquality(leftMethod, rightMethod);
                         }
                         const expected = normalizedMetadataAst(surfaceWrapPis(argumentNames, argumentTypes, expectedBody));

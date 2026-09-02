@@ -191,7 +191,7 @@ hit Circle2 : U
 - **第一里程碑：二维**。支持二维路径声明、二维端点和二维 coherence，并生成相应的依赖消去器、`apd`、transport 和路径作用规则。
 - 对二维规则做完整的维度、依赖、终止性、线性和重叠分析。
 - **第二里程碑：三维**。在二维验收和资源边界稳定后，完成三阶端点、dependent coherence、`apd3`/`ap3` 命题计算规则和 Core 独立认证。
-- 内部路径集合使用连续的 `pathLevels` 表示；`SandboxHitDeclaration` 只保存 0 维 `pointConstructors` 和 1–3 维 `pathLevels`，不再同时保存三组路径投影。1/2/3 维保持判别类型和各自的边界字段，不能用大量可选字段弱化 Core 认证。
+- 内部路径集合使用连续的 `pathLevels` 表示；`SandboxHitDeclaration` 只保存 0 维 `pointConstructors` 和 1–3 维 `pathLevels`，不再同时保存三组路径投影。该结构为以后逐维扩展保留接口，但不代表任意维已实现。1/2/3 维保持判别类型和各自的边界字段，不能用大量可选字段弱化 Core 认证。
 - **四维实验边界**。允许 fixture 和预检器识别四维输入并报告声明位置、大小或预算错误，但 parser/lowerer/Core 必须明确拒绝，不能生成消去器或进入可信 bundle。
 - 在具备通用 dependent transport 和逐维计算规则认证前，不宣称或暗示任意维完整支持。
 - 对归纳签名进行维度和依赖关系分析，并把维度能力写入版本化元数据。
@@ -204,11 +204,11 @@ hit Circle2 : U
 - 提供沙盒包导入、导出、复制、禁用和清空功能。
 - 对不同版本生成的沙盒包执行兼容性迁移或明确拒绝加载。
 
-### 当前实现状态（2026-09-03）
+### 当前实现状态（2026-09-02）
 
 - 二维 HIT 已完成结构解析、消去器 lowering、命题计算规则和 Core schema 认证。
-- 三维扩展第一批已支持 `path3` 的结构化解析：端点必须是直接的二阶路径构造子应用，统一参数、局部参数、共享一阶路径边界和点边界都会被检查；`path4` 及更高维仍明确拒绝。
-- 三维声明已生成真正的 dependent/recursor coherence binder 和点 iota 参数。HIT writer 使用 metadata v6：只传输连续的 `pathLevels`；Core 会把旧 v3-v5 metadata 一次性迁移为 v6，并重建验证三阶端点、统一参数及共享低维边界。
+- 三维 `path3` 已支持原子二阶路径端点、使用 `▪` 的组合端点和 `inveq` 逆端点；统一参数、局部参数、递归组合边界和点边界都会被检查。三维是面向用户的最高维度，`path4` 及更高维仍明确拒绝。
+- 三维声明已生成真正的 dependent/recursor coherence binder 和点 iota 参数。HIT writer 使用 metadata v7：只传输连续的 `pathLevels` 和结构化三阶表达式端点；Core 会把旧 v3-v5 分栏 metadata 及 v6 canonical/原子端点 metadata 一次性迁移为 v7，并重建验证三阶端点、统一参数及共享低维边界。
 - 二维非依赖 action 现已额外生成兼容的新强计算槽 `ap2_<path2>`：它把二阶 action 与经两端 `ap_<path1>` 校正后的用户 `q2` 关联；旧 `ap_<path2>` 类型保持不变。
 - 非依赖三阶 action 已生成 `ap3_<path3>`：它使用两端已认证的 `ap2_<path2>`、低维 `ap_<path1>` 和用户 `q3` 构造校正公式，并由 Core 独立重建类型。
 - 依赖三阶 `apd3_<path3>` 命题计算规则已开放：生成式通过 `hit_map_transport` 构造随二阶路径变化的 dependent correction naturality，Core 会从 metadata 和消去器 telescope 独立重建公开/完整类型后再使用局部资源额度检查。
@@ -218,7 +218,7 @@ hit Circle2 : U
 - GUI 的新增、编辑和存档恢复只建立 source-only draft，不在主线程运行 AST parser；普通声明的 `presentationAst` 与 HIT/归纳结构只由 Worker 回传并且不写入存档。
 - 存档携带的 validation cache 仅进入下一次 Worker 请求，Worker 重认证前不会进入 autosave；声明、cache 与 DOM 只在新 bridge 成功发布后一起提交。
 - GUI 与 Worker client 共用 ordered declaration validation key；只有源码、声明顺序、启停或递归停用变化才撤回 bridge 和 cache，空文件夹、折叠与重命名不会触发重复校验或使表达式检查误报存档变化。
-- 复合三阶端点所需的 `hit_ap2_comp`、`hit_ap2_inv`、`hit_apd2_comp`、`hit_apd2_inv` 已作为普通等式归纳证明的透明定义加入系统；在 metadata v7、lowerer 和 Core 递归重建完成前，作者语法仍只接受原子二阶路径端点。
+- 三维 `path3` 组合/逆端点复用透明的路径复合/逆引理，并通过维度限定的 corrected coherence primitive 连接到 `ap3`/`apd3` 计算命题。Core 会逐参数重建和检查这些 primitive 的实例化类型；它们只属于三维可信基座，不构成四维或任意维计算规则。
 
 ### 验收标准
 

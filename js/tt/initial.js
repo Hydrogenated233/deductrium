@@ -600,12 +600,30 @@ export function initTypeSystem() {
     typeName = "eq.hit_ap2_inv";
     addRule("@定义", "@hit_ap2_inv:=(λu:U@.λv:U@.λa:Uu.λb:Uv.λx:a.λy:a.λp:x=y.λq:x=y.λf:a→b.λα:p=q.ind_eq p (λq0:x=y.λα0:p=q0,(hit_ap2 f (inveq α0))=(inveq (hit_ap2 f α0))) rfl q α):(Πu:U@,Πv:U@,Πa:Uu,Πb:Uv,Πx:a,Πy:a,Πp:x=y,Πq:x=y,Πf:a→b,Πα:p=q,(hit_ap2 f (inveq α))=(inveq (hit_ap2 f α)))");
     addRule("@定义", "hit_ap2_inv:=@hit_ap2_inv _ _ _ _ _ _ _ _");
+    // Dimension-three endpoint lowering uses these checked coherence laws as
+    // trusted primitives; they are deliberately not an arbitrary-dimension API.
+    typeName = "eq.hit_ap2_corrected_comp";
+    addRule("@定义", "@hit_ap2_corrected_comp:Pu:U@,Pv:U@,Pa:Uu,Pb:Uv,Px:a,Py:a,Pm:x=y,Pn:x=y,Po:x=y,Pf:a→b,Ppm:(f x=f y),Ppn:(f x=f y),Ppo:(f x=f y),Pr:m=n,Ps:n=o,Pcm:(ap f m)=pm,Pcn:(ap f n)=pn,Pco:(ap f o)=po,Ppr:pm=pn,Pps:pn=po,Phr:(hit_ap2 f r)=((cm▪pr)▪(inveq cn)),Phs:(hit_ap2 f s)=((cn▪ps)▪(inveq co)),(hit_ap2 f (r▪s))=((cm▪(pr▪ps))▪(inveq co))");
+    typeName = "eq.hit_ap2_corrected_inv";
+    addRule("@定义", "@hit_ap2_corrected_inv:Pu:U@,Pv:U@,Pa:Uu,Pb:Uv,Px:a,Py:a,Pm:x=y,Pn:x=y,Pf:a→b,Ppm:(f x=f y),Ppn:(f x=f y),Pr:m=n,Pcm:(ap f m)=pm,Pcn:(ap f n)=pn,Ppr:pm=pn,Phr:(hit_ap2 f r)=((cm▪pr)▪(inveq cn)),(hit_ap2 f (inveq r))=((cn▪(inveq pr))▪(inveq cm))");
     typeName = "eq.hit_apd2_comp";
     addRule("@定义", "@hit_apd2_comp:=(λu:U@.λv:U@.λa:Uu.λx:a.λy:a.λm:x=y.λn:x=y.λo:x=y.λb:a→Uv.λf:(Πz:a,b z).λr:m=n.λs:n=o.λhr:(apd f m)=((trans2 b r (f x))▪(apd f n)).λhs:(apd f n)=((trans2 b s (f x))▪(apd f o)).ind_eq m (λn0:x=y.λr0:m=n0.Πo0:x=y,Πs0:n0=o0,Πhr0:(apd f m)=((trans2 b r0 (f x))▪(apd f n0)),Πhs0:(apd f n0)=((trans2 b s0 (f x))▪(apd f o0)),(apd f m)=((trans2 b (r0▪s0) (f x))▪(apd f o0))) (λo0:x=y.λs0:m=o0.λhr0:(apd f m)=((trans2 b rfl (f x))▪(apd f m)).λhs0:(apd f m)=((trans2 b s0 (f x))▪(apd f o0)).hr0▪hs0) n r o s hr hs):(Πu:U@,Πv:U@,Πa:Uu,Πx:a,Πy:a,Πm:x=y,Πn:x=y,Πo:x=y,Πb:a→Uv,Πf:(Πz:a,b z),Πr:m=n,Πs:n=o,Πhr:(apd f m)=((trans2 b r (f x))▪(apd f n)),Πhs:(apd f n)=((trans2 b s (f x))▪(apd f o)),(apd f m)=((trans2 b (r▪s) (f x))▪(apd f o)))");
     addRule("@定义", "hit_apd2_comp:=@hit_apd2_comp _ _ _ _ _ _ _ _ _");
     typeName = "eq.hit_apd2_inv";
     addRule("@定义", "@hit_apd2_inv:=(λu:U@.λv:U@.λa:Uu.λx:a.λy:a.λm:x=y.λn:x=y.λb:a→Uv.λf:(Πz:a,b z).λr:m=n.λhr:(apd f m)=((trans2 b r (f x))▪(apd f n)).ind_eq m (λn0:x=y.λr0:m=n0.Πhr0:(apd f m)=((trans2 b r0 (f x))▪(apd f n0)),(apd f n0)=((trans2 b (inveq r0) (f x))▪(apd f m))) (λhr0:(apd f m)=((trans2 b rfl (f x))▪(apd f m)).inveq hr0) n r hr):(Πu:U@,Πv:U@,Πa:Uu,Πx:a,Πy:a,Πm:x=y,Πn:x=y,Πb:a→Uv,Πf:(Πz:a,b z),Πr:m=n,Πhr:(apd f m)=((trans2 b r (f x))▪(apd f n)),(apd f n)=((trans2 b (inveq r) (f x))▪(apd f m)))");
     addRule("@定义", "hit_apd2_inv:=@hit_apd2_inv _ _ _ _ _ _ _ _");
+    typeName = "eq.hit_dep2_comp";
+    addRule("@定义", "@hit_dep2_comp:=(λu:U@.λv:U@.λa:Uu.λx:a.λy:a.λm:(x=y).λn:(x=y).λo:(x=y).λb:(a→Uv).λsx:(b x).λsy:(b y).λpm:((trans b m sx)=sy).λpn:((trans b n sx)=sy).λpo:((trans b o sx)=sy).λr:(m=n).λs:(n=o).λhr:(pm=((trans2 b r sx)▪pn)).λhs:(pn=((trans2 b s sx)▪po)).ind_eq m (λn0:(x=y).λr0:(m=n0).Πpn0:((trans b n0 sx)=sy),Πo0:(x=y),Πpo0:((trans b o0 sx)=sy),Πs0:(n0=o0),Πhr0:(pm=((trans2 b r0 sx)▪pn0)),Πhs0:(pn0=((trans2 b s0 sx)▪po0)),pm=((trans2 b (r0▪s0) sx)▪po0)) (λpn0:((trans b m sx)=sy).λo0:(x=y).λpo0:((trans b o0 sx)=sy).λs0:(m=o0).λhr0:(pm=((trans2 b rfl sx)▪pn0)).λhs0:(pn0=((trans2 b s0 sx)▪po0)).hr0▪hs0) n r pn o po s hr hs):(Πu:U@,Πv:U@,Πa:Uu,Πx:a,Πy:a,Πm:(x=y),Πn:(x=y),Πo:(x=y),Πb:(a→Uv),Πsx:(b x),Πsy:(b y),Πpm:((trans b m sx)=sy),Πpn:((trans b n sx)=sy),Πpo:((trans b o sx)=sy),Πr:(m=n),Πs:(n=o),Πhr:(pm=((trans2 b r sx)▪pn)),Πhs:(pn=((trans2 b s sx)▪po)),pm=((trans2 b (r▪s) sx)▪po))");
+    addRule("@定义", "hit_dep2_comp:=@hit_dep2_comp _ _ _ _ _ _ _ _");
+    typeName = "eq.hit_dep2_inv";
+    addRule("@定义", "@hit_dep2_inv:=(λu:U@.λv:U@.λa:Uu.λx:a.λy:a.λm:(x=y).λn:(x=y).λb:(a→Uv).λsx:(b x).λsy:(b y).λpm:((trans b m sx)=sy).λpn:((trans b n sx)=sy).λr:(m=n).λhr:(pm=((trans2 b r sx)▪pn)).ind_eq m (λn0:(x=y).λr0:(m=n0).Πpn0:((trans b n0 sx)=sy),Πhr0:(pm=((trans2 b r0 sx)▪pn0)),pn0=((trans2 b (inveq r0) sx)▪pm)) (λpn0:((trans b m sx)=sy).λhr0:(pm=((trans2 b rfl sx)▪pn0)).inveq hr0) n r pn hr):(Πu:U@,Πv:U@,Πa:Uu,Πx:a,Πy:a,Πm:(x=y),Πn:(x=y),Πb:(a→Uv),Πsx:(b x),Πsy:(b y),Πpm:((trans b m sx)=sy),Πpn:((trans b n sx)=sy),Πr:(m=n),Πhr:(pm=((trans2 b r sx)▪pn)),pn=((trans2 b (inveq r) sx)▪pm))");
+    addRule("@定义", "hit_dep2_inv:=@hit_dep2_inv _ _ _ _ _ _ _");
+    typeName = "eq.hit_apd2_corrected_comp";
+    addRule("@定义", "@hit_apd2_corrected_comp:Pu:U@,Pv:U@,Pa:Uu,Px:a,Py:a,Pm:x=y,Pn:x=y,Po:x=y,Pb:a→Uv,Pf:Πz:a,b z,Ppm:(trans b m (f x))=(f y),Ppn:(trans b n (f x))=(f y),Ppo:(trans b o (f x))=(f y),Pr:m=n,Ps:n=o,Pcm:(apd f m)=pm,Pcn:(apd f n)=pn,Pco:(apd f o)=po,Ppr:pm=((trans2 b r (f x))▪pn),Pps:pn=((trans2 b s (f x))▪po),Phr:(apd2 f r)=((cm▪pr)▪(inveq (ap (λt:(trans b n (f x))=(f y).((trans2 b r (f x))▪t)) cn))),Phs:(apd2 f s)=((cn▪ps)▪(inveq (ap (λt:(trans b o (f x))=(f y).((trans2 b s (f x))▪t)) co))),(apd2 f (r▪s))=((cm▪(hit_dep2_comp b (f x) (f y) pm pn po r s pr ps))▪(inveq (ap (λt:(trans b o (f x))=(f y).((trans2 b (r▪s) (f x))▪t)) co)))");
+    addRule("@定义", "hit_apd2_corrected_comp:=@hit_apd2_corrected_comp _ _ _ _ _ _ _ _");
+    typeName = "eq.hit_apd2_corrected_inv";
+    addRule("@定义", "@hit_apd2_corrected_inv:Pu:U@,Pv:U@,Pa:Uu,Px:a,Py:a,Pm:x=y,Pn:x=y,Pb:a→Uv,Pf:Πz:a,b z,Ppm:(trans b m (f x))=(f y),Ppn:(trans b n (f x))=(f y),Pr:m=n,Pcm:(apd f m)=pm,Pcn:(apd f n)=pn,Ppr:pm=((trans2 b r (f x))▪pn),Phr:(apd2 f r)=((cm▪pr)▪(inveq (ap (λt:(trans b n (f x))=(f y).((trans2 b r (f x))▪t)) cn))),(apd2 f (inveq r))=((cn▪(hit_dep2_inv b (f x) (f y) pm pn r pr))▪(inveq (ap (λt:(trans b m (f x))=(f y).((trans2 b (inveq r) (f x))▪t)) cm)))");
+    addRule("@定义", "hit_apd2_corrected_inv:=@hit_apd2_corrected_inv _ _ _ _ _ _ _");
     typeName = "S2.ind";
     addRule("@解构", "@ind_S2: Pu:U@,PC:S2->Uu,Pcb:C base2,Pcs:refl cb=(trans2 C surf cb)*(refl cb),Px:S2,C x");
     addRule("@解构", "ind_S2:=@ind_S2 _");

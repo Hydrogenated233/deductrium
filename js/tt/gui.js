@@ -56,7 +56,7 @@ export function cloneInductiveBundle(bundle) {
         metadata: bundle.metadata
             ? {
                 version: clonedHitPaths && bundle.metadata.version !== 1
-                    ? 6
+                    ? 7
                     : bundle.metadata.version,
                 kind: bundle.metadata.kind,
                 dimension: bundle.metadata.dimension,
