@@ -20,6 +20,10 @@ export type NbeEqualOptions = {
     freshBondVarId?: () => number;
     /** Keep named definitions opaque while retaining beta/iota computation. */
     unfoldDefinitions?: boolean;
+    /** Compile `_` holes as rigid neutral slots when installing a definition. */
+    rigidHoles?: boolean;
+    /** Per-definition rigid-hole policy used by bulk installation. */
+    rigidHoleDefinitions?: ReadonlySet<string>;
 };
 
 /** Options shared by the read-only weak-head evaluator. */
@@ -1624,7 +1628,16 @@ export class SemanticNbeKernel {
             computeRules: this.computeRules,
             unfolding: new Set()
         };
-    const term = compile(ast, new ScopeCursor(), [], state, false, options.rigidMetas === true);
+        const term = compile(
+            ast,
+            new ScopeCursor(),
+            [],
+            state,
+            false,
+            options.rigidMetas === true,
+            options.rigidHoles === true
+                || options.rigidHoleDefinitions?.has(name) === true
+        );
         this.definitionSources.set(name, ast);
         if (!term || state.exhausted) {
             this.definitionSourceFingerprints.delete(name);
@@ -1667,7 +1680,16 @@ export class SemanticNbeKernel {
                 computeRules: this.computeRules,
                 unfolding: new Set()
             };
-    const term = compile(ast, new ScopeCursor(), [], state, false, options.rigidMetas === true);
+        const term = compile(
+            ast,
+            new ScopeCursor(),
+            [],
+            state,
+            false,
+            options.rigidMetas === true,
+            options.rigidHoles === true
+                || options.rigidHoleDefinitions?.has(name) === true
+        );
             if (term && !state.exhausted) compiled.set(name, term);
         }
         this.definitions.clear();

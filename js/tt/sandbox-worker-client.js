@@ -1,3 +1,9 @@
+export class SandboxWorkerCancelledError extends Error {
+    constructor(message = "沙盒验证已取消") {
+        super(message);
+        this.name = "SandboxWorkerCancelledError";
+    }
+}
 /** Dedicated browser worker client for the isolated type-theory sandbox. */
 export class SandboxWorkerClient {
     options;
@@ -12,16 +18,16 @@ export class SandboxWorkerClient {
             systemRuleIds: options.systemRuleIds ? [...options.systemRuleIds] : undefined
         };
     }
-    async load(save) {
-        const result = await this.request({ kind: "load", save, options: this.options });
-        this.sessionReady = true;
-        this.sessionSaveKey = sandboxSaveKey(save);
+    async load(save, signal) {
+        const task = this.requestTask({ kind: "load", save, options: this.options });
+        const result = await this.awaitWithSignal(task, signal);
+        this.rememberValidationResult(result, save);
         return result;
     }
-    async validate(save) {
-        const result = await this.request({ kind: "validate", save, options: this.options });
-        this.sessionReady = true;
-        this.sessionSaveKey = sandboxSaveKey(save);
+    async validate(save, signal) {
+        const task = this.requestTask({ kind: "validate", save, options: this.options });
+        const result = await this.awaitWithSignal(task, signal);
+        this.rememberValidationResult(result, save);
         return result;
     }
     async check(saveOrSource, maybeSource) {
@@ -33,7 +39,10 @@ export class SandboxWorkerClient {
                 throw new Error("沙盒 Worker 尚未加载存档，请先加载或校验");
             // Recovery after Worker termination/crash is explicit and happens
             // once for the new Worker, rather than before every check.
-            await this.load(save);
+            const restored = await this.load(save);
+            if (!this.sessionReady) {
+                throw new Error(restored.error ?? "沙盒 Worker 校验未完成");
+            }
         }
         else if (save && sandboxSaveKey(save) !== this.sessionSaveKey) {
             throw new Error("沙盒存档已变更，请先校验后再检查表达式");
@@ -46,10 +55,43 @@ export class SandboxWorkerClient {
         this.sessionReady = false;
         this.rejectAll(new Error("沙盒 Worker 已终止"));
     }
+    /** Cancel one in-flight request and restart the worker to discard partial state. */
+    cancel(requestId) {
+        const pending = this.pending.get(requestId);
+        if (!pending)
+            return false;
+        this.pending.delete(requestId);
+        const worker = this.worker;
+        // Best effort protocol notification lets a non-browser session record
+        // the cancellation; termination is the authoritative fallback because
+        // a synchronous validation cannot service another message mid-call.
+        try {
+            worker?.postMessage({ id: this.nextId++, kind: "cancel", requestId });
+        }
+        catch { }
+        worker?.terminate();
+        this.worker = null;
+        this.sessionReady = false;
+        pending.reject(new SandboxWorkerCancelledError());
+        this.rejectAll(new SandboxWorkerCancelledError());
+        return true;
+    }
+    /** Start a validation and expose its request id for UI stop buttons. */
+    validateRequest(save, signal) {
+        const task = this.requestTask({ kind: "validate", save, options: this.options });
+        const promise = this.awaitWithSignal(task, signal).then(result => {
+            this.rememberValidationResult(result, save);
+            return result;
+        });
+        return { requestId: task.requestId, promise, cancel: task.cancel };
+    }
     request(message) {
+        return this.requestTask(message).promise;
+    }
+    requestTask(message) {
         const worker = this.ensureWorker();
         const id = this.nextId++;
-        return new Promise((resolve, reject) => {
+        const promise = new Promise((resolve, reject) => {
             this.pending.set(id, { resolve, reject });
             try {
                 worker.postMessage({ id, ...message });
@@ -59,6 +101,33 @@ export class SandboxWorkerClient {
                 reject(error instanceof Error ? error : new Error(String(error)));
             }
         });
+        return { requestId: id, promise, cancel: () => this.cancel(id) };
+    }
+    async awaitWithSignal(task, signal) {
+        if (!signal)
+            return task.promise;
+        if (signal.aborted) {
+            task.cancel();
+            // Await the rejected task so callers receive the same cancellation
+            // error without leaving an unhandled rejection behind.
+            return await task.promise;
+        }
+        const onAbort = () => { task.cancel(); };
+        signal.addEventListener("abort", onAbort, { once: true });
+        try {
+            return await task.promise;
+        }
+        finally {
+            signal.removeEventListener("abort", onAbort);
+        }
+    }
+    rememberValidationResult(result, save) {
+        if (result.status === "cancelled" || result.status === "budget-exhausted") {
+            this.sessionReady = false;
+            return;
+        }
+        this.sessionReady = true;
+        this.sessionSaveKey = sandboxSaveKey(save);
     }
     ensureWorker() {
         if (this.worker)

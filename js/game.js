@@ -9,6 +9,28 @@ import { GameSaveLoad } from "./saveload.js";
 import { TTGui } from "./tt/gui.js";
 import { runAfterSandboxReady, TTSandboxGui } from "./tt/sandbox-gui.js";
 import { sandboxEnabledInMode } from "./tt/sandbox.js";
+import { TYPE_THEORY_SYMBOL_ALIASES } from "./tt/symbol-aliases.js";
+function renderTypeTheorySymbolAliases(root) {
+    if (!root)
+        return;
+    root.replaceChildren();
+    const list = document.createElement("ul");
+    list.className = "type-symbol-alias-list";
+    for (const { alias, symbol } of TYPE_THEORY_SYMBOL_ALIASES) {
+        const item = document.createElement("li");
+        const shortcut = document.createElement("code");
+        shortcut.textContent = `\\${alias}`;
+        const arrow = document.createElement("span");
+        arrow.textContent = " → ";
+        const rendered = document.createElement("code");
+        rendered.textContent = symbol;
+        const suffix = document.createElement("span");
+        suffix.textContent = " + 空格";
+        item.append(shortcut, arrow, rendered, suffix);
+        list.appendChild(item);
+    }
+    root.appendChild(list);
+}
 function parseDeductriumAmout(str) {
     let coeff;
     if (str.endsWith("µg"))
@@ -76,6 +98,7 @@ export class Game {
     constructor() {
         const gamemode = window.location.search === "?creative" ? "creative" : "survival";
         langMgr.init();
+        renderTypeTheorySymbolAliases(document.getElementById("type-symbol-aliases"));
         if (sandboxEnabledInMode(gamemode)) {
             this.creative = true;
         }

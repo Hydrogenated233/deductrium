@@ -563,7 +563,9 @@ export class Core {
             merged.set(name, definition);
         for (const [name, definition] of Object.entries(this.state.userDefs))
             merged.set(name, definition);
-        const count = this.semanticKernel.replaceDefinitions(merged);
+        const count = this.semanticKernel.replaceDefinitions(merged, {
+            rigidHoleDefinitions: new Set(Object.keys(this.state.userDefs))
+        });
         this.syncSemanticTypes();
         return count;
     }
@@ -678,12 +680,29 @@ export class Core {
             }
             pathConstructorNames.add(path.name);
         }
-        if (bundle.metadata?.kind === "hit1") {
-            if (bundle.metadata.dimension !== 1) {
-                throw new Error(`一阶 HIT metadata 维度必须为 1：${bundle.metadata.dimension ?? ""}`);
+        const twoPathConstructorNames = new Set();
+        for (const path of bundle.metadata?.twoPathConstructors ?? []) {
+            if (!path.name || twoPathConstructorNames.has(path.name)) {
+                throw new Error(`二阶路径构造子 metadata 名称冲突：${path.name || ""}`);
+            }
+            if (pointConstructorNames.has(path.name) || pathConstructorNames.has(path.name)) {
+                throw new Error(`二阶路径构造子不能与一阶构造子同名：${path.name}`);
+            }
+            twoPathConstructorNames.add(path.name);
+        }
+        if (bundle.metadata?.kind === "hit1" || bundle.metadata?.kind === "hit2") {
+            const hitDimension = bundle.metadata.kind === "hit2" ? 2 : 1;
+            if (bundle.metadata.dimension !== hitDimension) {
+                throw new Error(`HIT metadata 维度必须为 ${hitDimension}：${bundle.metadata.dimension ?? ""}`);
             }
             if (!bundle.metadata.pathConstructors?.length) {
-                throw new Error("一阶 HIT metadata 至少需要一个路径构造子");
+                throw new Error("HIT metadata 至少需要一个一阶路径构造子");
+            }
+            if (bundle.metadata.kind === "hit2" && !bundle.metadata.twoPathConstructors?.length) {
+                throw new Error("二维 HIT metadata 至少需要一个二阶路径构造子");
+            }
+            if (bundle.metadata.kind === "hit1" && bundle.metadata.twoPathConstructors?.length) {
+                throw new Error("一阶 HIT metadata 不能包含二阶路径构造子");
             }
             if (bundlePointConstructorNames.length !== metadataPointConstructorNames.length
                 || bundlePointConstructorNames.some((name, index) => metadataPointConstructorNames[index] !== name)) {
@@ -714,7 +733,10 @@ export class Core {
                 result: this.desugar(Core.clone(rule.result), true)
             }));
         }
-        for (const path of bundle.metadata?.pathConstructors ?? []) {
+        for (const path of [
+            ...(bundle.metadata?.pathConstructors ?? []),
+            ...(bundle.metadata?.twoPathConstructors ?? [])
+        ]) {
             for (const head of new Set([
                 path.name,
                 path.computationName,
@@ -746,10 +768,10 @@ export class Core {
         }
         const parameters = familyBinders.slice(0, parameterCount);
         const indices = familyBinders.slice(parameterCount);
-        if (bundle.metadata?.kind === "hit1") {
+        if (bundle.metadata?.kind === "hit1" || bundle.metadata?.kind === "hit2") {
             const metadata = bundle.metadata;
             if (indexCount !== 0)
-                throw new Error("一阶 HIT metadata 暂不支持索引");
+                throw new Error("HIT metadata 暂不支持索引");
             const auxiliaryTypes = new Map();
             for (const [name, type] of bundle.auxiliaryTypes ?? []) {
                 auxiliaryTypes.set(name, this.desugar(Core.clone(type), true));
@@ -773,14 +795,14 @@ export class Core {
             };
             const requirePublicSlot = (label, metadataName, entry) => {
                 if (!metadataName || !entry || entry[0] !== metadataName) {
-                    throw new Error(`一阶 HIT metadata ${label}槽位与 bundle 不一致`);
+                    throw new Error(`HIT metadata ${label}槽位与 bundle 不一致`);
                 }
             };
             const requireFullSlot = (label, metadataName, publicName) => {
                 const expectedName = publicName ? `@${publicName}` : "";
                 if (!metadataName || metadataName !== expectedName
                     || !auxiliaryTypes.has(metadataName)) {
-                    throw new Error(`一阶 HIT metadata ${label}槽位与 bundle 不一致`);
+                    throw new Error(`HIT metadata ${label}槽位与 bundle 不一致`);
                 }
             };
             for (let index = 0; index < metadata.constructors.length; index++) {
@@ -837,6 +859,51 @@ export class Core {
                         conclusion = conclusion.nodes[1];
                     if (!generatedEqualityEndpoints(conclusion)) {
                         throw new Error(`一阶 HIT 路径计算项 ${computationName} 不是等式命题`);
+                    }
+                }
+            }
+            for (const path of metadata.twoPathConstructors ?? []) {
+                const pathType = auxiliaryTypes.get(path.name);
+                if (!pathType) {
+                    throw new Error(`二维 HIT metadata 二阶路径构造子不存在：${path.name}`);
+                }
+                const conclusion = consumeTelescope(pathType, [
+                    ...parameters.map(parameter => parameter.type),
+                    ...path.argumentTypes.map(normalizedMetadataAst)
+                ], `二维 HIT 二阶路径构造子 ${path.name}`);
+                const endpoints = generatedEqualityEndpoints(conclusion);
+                if (!endpoints
+                    || !sameGeneratedAst(endpoints[0], normalizedMetadataAst(path.left))
+                    || !sameGeneratedAst(endpoints[1], normalizedMetadataAst(path.right))) {
+                    throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 端点与 metadata 不一致`);
+                }
+                if (!pathConstructorNames.has(path.leftPath)
+                    || !pathConstructorNames.has(path.rightPath)) {
+                    throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 的一阶路径引用不存在`);
+                }
+                const computationNames = [
+                    `apd_${path.name}`,
+                    `@apd_${path.name}`,
+                    `ap_${path.name}`,
+                    `@ap_${path.name}`
+                ];
+                if (path.computationName !== computationNames[0]) {
+                    throw new Error(`二维 HIT metadata 计算定理不存在：${path.computationName ?? ""}`);
+                }
+                for (const computationName of computationNames) {
+                    const computationType = auxiliaryTypes.get(computationName);
+                    if (!computationType) {
+                        if (computationName === path.computationName) {
+                            throw new Error(`二维 HIT metadata 计算定理不存在：${computationName}`);
+                        }
+                        throw new Error(`二维 HIT 二阶路径计算项槽位不存在：${computationName}`);
+                    }
+                    let conclusion = computationType;
+                    while ((conclusion.type === "P" || conclusion.type === "->")
+                        && conclusion.nodes?.[1])
+                        conclusion = conclusion.nodes[1];
+                    if (!generatedEqualityEndpoints(conclusion)) {
+                        throw new Error(`二维 HIT 二阶路径计算项 ${computationName} 不是等式命题`);
                     }
                 }
             }
@@ -934,6 +1001,15 @@ export class Core {
                     left: Core.clone(ctor.left),
                     right: Core.clone(ctor.right),
                     computationName: ctor.computationName
+                })),
+                twoPathConstructors: bundle.metadata.twoPathConstructors?.map(ctor => ({
+                    name: ctor.name,
+                    argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    left: Core.clone(ctor.left),
+                    right: Core.clone(ctor.right),
+                    leftPath: ctor.leftPath,
+                    rightPath: ctor.rightPath,
+                    computationName: ctor.computationName
                 }))
             }
             : undefined;
@@ -1014,6 +1090,15 @@ export class Core {
                 argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
                 left: Core.clone(ctor.left),
                 right: Core.clone(ctor.right),
+                computationName: ctor.computationName
+            })),
+            twoPathConstructors: metadata.twoPathConstructors?.map(ctor => ({
+                name: ctor.name,
+                argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                left: Core.clone(ctor.left),
+                right: Core.clone(ctor.right),
+                leftPath: ctor.leftPath,
+                rightPath: ctor.rightPath,
                 computationName: ctor.computationName
             }))
         };
@@ -1142,6 +1227,11 @@ export class Core {
             this.semanticKernel.deleteDefinition(name);
             return;
         }
+        // User definitions retain surface syntax for the editor (notably
+        // `(a,b)` tuples and `A X B`).  The semantic kernel only understands
+        // the core AST, so normalize a private clone at this boundary rather
+        // than forcing the presentation copy to lose its familiar syntax.
+        const semanticDefinition = this.desugar(Core.clone(definition), true);
         const hasInferenceMetas = collectInferenceMetaNames(definition).size > 0;
         const hasTrustedTypeCache = !!this.inspectDefinitionCache(this.state.defTypes[name]);
         // Definitions carrying generalized metas are executable only after
@@ -1149,8 +1239,9 @@ export class Core {
         // transitions because the source fingerprint itself is unchanged.
         if (hasInferenceMetas)
             this.semanticKernel.deleteDefinition(name);
-        this.semanticKernel.setDefinition(name, definition, {
-            rigidMetas: hasInferenceMetas && hasTrustedTypeCache
+        this.semanticKernel.setDefinition(name, semanticDefinition, {
+            rigidMetas: hasInferenceMetas && hasTrustedTypeCache,
+            rigidHoles: this.state.userDefs[name] !== undefined
         });
     }
     syncSemanticConstantType(name) {
@@ -1839,6 +1930,14 @@ export class Core {
         if (checked.status !== "success") {
             if (checked.code === "budget-exhausted")
                 return checked;
+            // Preserve the semantic diagnostic for an unresolved constant.
+            // Returning the generic `false` here turns a simple misspelling
+            // (for example `divstate_zero` vs `divState_zero`) into the much
+            // less actionable "类型断言失败" message at the declaration
+            // boundary.  The caller can then report the actual unknown name.
+            if (checked.status === "invalid" && checked.code === "unknown-constant") {
+                return checked;
+            }
             return checked.status === "invalid" ? false : undefined;
         }
         const returnedSchematicMetaNames = new Set(checked.schematicMetaNames ?? []);
@@ -2216,7 +2315,9 @@ export class Core {
         return ast.checked;
     }
     semanticTypeFailureMessage(code, ast) {
-        const subject = this.printSemanticErrorAst(ast);
+        const subject = code === "unknown-constant"
+            ? this.findUnknownConstantName(ast) ?? this.printSemanticErrorAst(ast)
+            : this.printSemanticErrorAst(ast);
         switch (code) {
             case "budget-exhausted":
                 return TR("类型推断资源超限") + ": " + subject;
@@ -2240,6 +2341,32 @@ export class Core {
             default:
                 return TR("类型推断错误：") + code + ": " + subject;
         }
+    }
+    /** Find the first free name that is not a registered constant. */
+    findUnknownConstantName(ast, bound = new Set()) {
+        if (!ast || typeof ast !== "object")
+            return undefined;
+        if (ast.type === "var") {
+            if (ast.name && !ast.bondVarId && !bound.has(ast.name)
+                && !ast.name.startsWith("?") && ast.name !== "_"
+                && !NatLiteral.is(ast.name) && !this.hasConst(ast.name)) {
+                return ast.name;
+            }
+            return undefined;
+        }
+        const first = ast.nodes?.[0];
+        const domain = first ? this.findUnknownConstantName(first, bound) : undefined;
+        if (domain)
+            return domain;
+        const body = ast.nodes?.[1];
+        if (!body)
+            return undefined;
+        const bodyBound = new Set(bound);
+        if (ast.type === "L" || ast.type === "P" || ast.type === "W" || ast.type === "S") {
+            if (ast.name)
+                bodyBound.add(ast.name);
+        }
+        return this.findUnknownConstantName(body, bodyBound);
     }
     reportSemanticFailure(ast, failure) {
         if (failure.code === "budget-exhausted") {

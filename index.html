@@ -64,6 +64,11 @@
                             id="ord-base">0</span><label>进位</label><span id="next-ord-stepw"></span>)</li>
                 </ul>
             </div>
+            <details id="type-symbol-aliases-help">
+                <summary>类型论符号快捷输入</summary>
+                <p>在类型论输入框中输入反斜杠别名后按空格，即可插入对应符号（别名不区分大小写）。</p>
+                <div id="type-symbol-aliases"></div>
+            </details>
             <div id="ach">
                 <h3>成就统计：(手机横屏最佳)</h3>
                 <div class="achievement">
@@ -436,7 +441,7 @@
             <div class="sandbox-editor">
                 <label for="sandbox-input">添加声明</label>
                 <textarea id="sandbox-input" rows="2" spellcheck="false"
-                    placeholder="例如：A : U&#10;base : A&#10;inc := Lx:nat.succ x"></textarea>
+                    placeholder="例如：A : U&#10;base : A&#10;inc := λx:nat.succ x"></textarea>
             </div>
             <div id="sandbox-status" class="sandbox-status" role="status"></div>
             <div class="sandbox-declarations">
@@ -452,6 +457,8 @@
                 <div class="cmd-btns sandbox-actions">
                     <button id="sandbox-add-folder" type="button">新文件夹</button>
                     <button id="sandbox-validate" type="button">重新校验</button>
+                    <button id="sandbox-stop-validation" type="button" disabled
+                        title="停止当前沙盒校验">停止校验</button>
                     <button id="sandbox-export" type="button">导出</button>
                     <button id="sandbox-import-trigger" type="button">导入</button>
                     <input id="sandbox-import" type="file" accept="application/json,.json" class="hide" />
@@ -469,12 +476,14 @@
                 <summary>如何添加公理类型</summary>
                 <div class="sandbox-help-content">
                     <p>在上方输入框写一行声明，使用 <code>名称 : 类型</code> 格式，例如 <code>A : U</code>。</p>
-                    <p>要定义可展开的透明常量，使用 <code>名称 := 项</code>，也可以写 <code>名称 := 项 : 类型</code>。例如 <code>inc := Lx:nat.succ x</code>；定义会先通过类型检查，再桥接到创造模式的类型层。直接从公式或网页复制时，周围的不可见空白会自动规范化。</p>
+                    <p>要定义可展开的透明常量，使用 <code>名称 := 项</code>，也可以写 <code>名称 := 项 : 类型</code>。例如 <code>inc := λx:nat.succ x</code>；定义会先通过类型检查，再桥接到创造模式的类型层。直接从公式或网页复制时，周围的不可见空白会自动规范化。</p>
                     <p>再添加依赖它的项或命题，例如 <code>base : A</code>、<code>loop : base = base</code>。声明按列表顺序校验，不能前向引用。</p>
                     <p>创造模式沙盒可以引用当前类型层已解锁的系统内置常量；名称区分大小写，例如 <code>nat</code>、<code>ind_nat</code>、<code>succ</code>。普通定理行和局部常量不会自动进入沙盒作用域，如需使用请在沙盒中显式声明。</p>
                     <p>普通归纳类型使用 <code>inductive</code> 声明，例如：<code>inductive tri : U | nt : tri | 0t : tri | pt : tri</code>。通过校验后会生成 <code>tri</code>、构造子和 <code>ind_tri</code>。</p>
-                    <p>索引归纳把统一参数写在圆括号中，把索引写在方括号中。例如 <code>inductive Vec (A : U) [n : nat] : U | vnil : Vec A 0 | vcons : Pn:nat,A -&gt; Vec A n -&gt; Vec A (succ n)</code>。每个构造子必须显式给出返回索引；系统会生成保留索引约束的 <code>ind_Vec</code> 和 <code>rec_Vec</code>。</p>
+                    <p>索引归纳把统一参数写在圆括号中，把索引写在方括号中。例如 <code>inductive Vec (A : U) [n : nat] : U | vnil : Vec A 0 | vcons : Πn:nat,A -&gt; Vec A n -&gt; Vec A (succ n)</code>。每个构造子必须显式给出返回索引；系统会生成保留索引约束的 <code>ind_Vec</code> 和 <code>rec_Vec</code>。</p>
                     <p>一阶路径 HIT 使用 <code>hit</code> 声明，并把点构造子写在路径构造子之前。例如 <code>hit Circle2 : U | base2 : Circle2 | loop2 : base2 = base2</code>。系统会生成 <code>ind_Circle2</code>、<code>rec_Circle2</code>，以及路径的命题计算规则 <code>apd_loop2</code> 和 <code>ap_loop2</code>。</p>
+                    <p>二维 HIT 在一阶路径之后使用 <code>path2</code> 声明路径之间的一致性。例如 <code>hit Surface2 : U | baseS : Surface2 | loopA : baseS = baseS | loopB : baseS = baseS | path2 squareS : loopA = loopB</code>。系统会把点、一阶路径和二维一致性分别加入消去器，并生成 <code>apd_squareS</code>、<code>ap_squareS</code> 命题计算规则。</p>
+                    <p>当前实现的最高维度是二维；输入 <code>path3</code> 或更高维构造子会明确报错，不会静默降级成普通构造子。</p>
                     <p>构造子的 iota 计算规则由系统自动生成：上例会让 <code>ind_tri C cnt c0t cpt nt</code> 计算为 <code>cnt</code>，对 <code>0t</code>、<code>pt</code> 也分别计算到对应分支。<code>simpl</code>、定义相等检查和 NbE 会自动使用这些规则。</p>
                     <p>HIT 的点构造子保留 iota 定义计算；路径构造子的 <code>apd_</code>/<code>ap_</code> 规则是需要显式使用的命题，不会注册成定义相等。</p>
                     <p>当前版本不能在输入框中直接注册任意 <code>pattern =&gt; result</code> 计算规则。自定义计算规则必须先通过作用域、类型、严格正性、终止性和冲突检查；未经检查的规则会破坏定义相等，因此暂不接受。</p>

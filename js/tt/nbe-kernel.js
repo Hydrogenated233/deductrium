@@ -1489,7 +1489,8 @@ export class SemanticNbeKernel {
             computeRules: this.computeRules,
             unfolding: new Set()
         };
-        const term = compile(ast, new ScopeCursor(), [], state, false, options.rigidMetas === true);
+        const term = compile(ast, new ScopeCursor(), [], state, false, options.rigidMetas === true, options.rigidHoles === true
+            || options.rigidHoleDefinitions?.has(name) === true);
         this.definitionSources.set(name, ast);
         if (!term || state.exhausted) {
             this.definitionSourceFingerprints.delete(name);
@@ -1532,7 +1533,8 @@ export class SemanticNbeKernel {
                 computeRules: this.computeRules,
                 unfolding: new Set()
             };
-            const term = compile(ast, new ScopeCursor(), [], state, false, options.rigidMetas === true);
+            const term = compile(ast, new ScopeCursor(), [], state, false, options.rigidMetas === true, options.rigidHoles === true
+                || options.rigidHoleDefinitions?.has(name) === true);
             if (term && !state.exhausted)
                 compiled.set(name, term);
         }

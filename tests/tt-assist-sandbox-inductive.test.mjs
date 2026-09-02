@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { TTAssistEngine } from "../js/tt/assist-engine.js";
 import {
     lowerSandboxInductive,
-    parseSandboxInductive
+    parseSandboxInductive,
+    lowerSandboxHit,
+    parseSandboxHit
 } from "../js/tt/sandbox.js";
 import { initTypeSystem } from "../js/tt/initial.js";
 
@@ -157,5 +159,36 @@ const boxQed = boxEngine.qed();
 assert.match(boxQed.proof, /_ u u A/,
     "high-universe motives must use the implicit full eliminator with its universe level");
 assert.match(boxQed.theorem, /BoxU u A/);
+
+// HIT names are user-defined and may contain the parser's historical marker
+// letters.  The proof assistant must parse them through the surface boundary
+// rather than splitting `SurfaceX` into `Surface` and a product token.
+const surfaceHitBundle = lowerSandboxHit(parseSandboxHit(
+    "hit SurfaceX : U "
+    + "| baseX : SurfaceX "
+    + "| loopAX : baseX = baseX "
+    + "| loopBX : baseX = baseX "
+    + "| path2 squareX : loopAX = loopBX"
+));
+const surfaceHitEngine = new TTAssistEngine();
+surfaceHitEngine.configure({
+    unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))],
+    trustedInductives: [surfaceHitBundle],
+    inferDisplayMode: "_",
+    timeout: 30_000,
+    language: "zh"
+});
+
+snapshot = surfaceHitEngine.start("SurfaceX", options);
+assert.equal(snapshot.tactics.includes("exact baseX"), true);
+snapshot = surfaceHitEngine.apply("exact baseX");
+assert.equal(snapshot.goals.length, 0);
+assert.match(surfaceHitEngine.qed().proof, /baseX/);
+
+snapshot = surfaceHitEngine.start("Πx:SurfaceX,x=x", options);
+snapshot = surfaceHitEngine.apply("intro x");
+snapshot = surfaceHitEngine.apply("induction x");
+assert.equal(snapshot.goals.length, 4,
+    "a 2-dimensional HIT induction must expose point, path, and coherence branches");
 
 console.log("sandbox ordinary-inductive proof-assistant regression passed");

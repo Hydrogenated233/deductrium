@@ -1590,6 +1590,15 @@ div.wrapper.error {
     color: #176b3a;
 }
 
+.sandbox-validating .sandbox-status {
+    color: #176b3a;
+}
+
+.sandbox-actions button:disabled {
+    cursor: default;
+    opacity: 0.62;
+}
+
 .sandbox-status.error,
 .sandbox-invalid .sandbox-declaration-status {
     color: #a22;
@@ -1775,6 +1784,26 @@ div.wrapper.error {
 
 .achievement.locked div {
     font-size: 0em;
+}
+
+#type-symbol-aliases-help {
+    margin: 1em 0;
+}
+
+#type-symbol-aliases-help > p {
+    margin: 0.5em 0;
+}
+
+.type-symbol-alias-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9em, 1fr));
+    gap: 0.2em 1em;
+    margin: 0.5em 0 0;
+    padding-left: 1.5em;
+}
+
+.type-symbol-alias-list code {
+    white-space: nowrap;
 }
 
 div#loading div {

@@ -45,7 +45,13 @@ const mimeTypes = {
     ".woff": "font/woff",
     ".woff2": "font/woff2"
 };
-const publicRootFiles = new Set(["index.html", "gui.css"]);
+const publicRootFiles = new Set([
+    "index.html",
+    "devtools-bridge.html",
+    "gui.css",
+    "Deductrium证明工具-114514.1919810.user.js",
+    "Deductrium证明工具-devtools.js"
+]);
 
 class HttpError extends Error {
     constructor(status, code, message, generation) {

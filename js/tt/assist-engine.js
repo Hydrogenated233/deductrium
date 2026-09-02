@@ -74,7 +74,13 @@ export class TTAssistEngine {
         Assist.disableMultipleApply = this.options?.disableMultipleApply ?? true;
         Assist.disableDestructConds = this.options?.disableDestructConds ?? true;
         Assist.disableDestructEq = this.options?.disableDestructEq ?? true;
-        const target = markExplicitAtSyntax(parser.parse(this.targetSource));
+        // The GUI validates newly edited theorem text with parseSurface before
+        // it creates a session.  This engine is also a DOM-free compatibility
+        // API used by saved-history replay and regression fixtures, whose
+        // target strings may still use the pre-Unicode spelling.  Keep that
+        // internal boundary on the compatibility parser; strict validation
+        // belongs at the user-input/save-load boundary, not in replay.
+        const target = markExplicitAtSyntax(parser.parseSurfaceOrLegacy(this.targetSource));
         if (!target)
             throw new Error(TR("空表达式"));
         if (target.type === "===" || target.type === ":=" || target.type === ":") {

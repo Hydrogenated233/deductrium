@@ -15,6 +15,7 @@ import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheorem
 import { TheoremWorkspace } from "./theorem-workspace.js";
 import { applyWorkspaceLayout, createWorkspaceDragHandle, syncWorkspaceDomOrder } from "./theorem-workspace-view.js";
 import { TTProofSessionStore } from "./proof-sessions.js";
+import { installTypeTheorySymbolAliases } from "./symbol-aliases.js";
 const parser = new ASTParser;
 const constructors = new Set();
 const destructors = new Set();
@@ -349,6 +350,7 @@ export class TTGui {
         document.getElementById("tt-add-theorem")?.addEventListener("click", () => this.updateInhabitList());
         document.getElementById("tt-add-folder")?.addEventListener("click", () => this.addTheoremFolder());
         const input = document.getElementById("tactic-input");
+        installTypeTheorySymbolAliases(input);
         input.addEventListener("keydown", (ev) => {
             if (ev.key === "Enter" || ev.key === "Escape") {
                 ev.preventDefault();
@@ -361,8 +363,10 @@ export class TTGui {
             this.toggleTacticTextMode();
         });
         const scriptInput = document.getElementById("tactic-script");
-        if (scriptInput)
+        if (scriptInput) {
+            installTypeTheorySymbolAliases(scriptInput);
             this.tacticScriptEditor = new ProofScriptEditor(scriptInput);
+        }
         scriptInput?.addEventListener("input", () => {
             this.tacticScript = scriptInput.value;
             this.tacticScriptDirty = true;
@@ -1082,7 +1086,7 @@ export class TTGui {
                 const qed = entries.at(-1)?.command.match(/^qed(?:\s+([^\s]+))?$/);
                 const qedName = qed?.[1];
                 if (qedName) {
-                    const nameAst = parser.parse(qedName);
+                    const nameAst = parser.parseSurface(qedName);
                     if (nameAst?.type !== "var" || nameAst.name !== qedName) {
                         throw new Error(TR("qed命名参数必须是单个常量名"));
                     }
@@ -2409,7 +2413,7 @@ export class TTGui {
         }
         else {
             try {
-                const displayAst = restoreSemanticMetaNamesForDisplay(parser.parse(input.value));
+                const displayAst = restoreSemanticMetaNamesForDisplay(parser.parseSurface(input.value));
                 div.appendChild(this.ast2HTML("", displayAst, [], [], currentIdx));
                 if (error)
                     this.addSpan(div, " - " + error);
@@ -3114,6 +3118,7 @@ export class TTGui {
         const input = document.createElement("textarea");
         input.rows = 1;
         input.classList.add("tt-theorem-input");
+        installTypeTheorySymbolAliases(input);
         const div = document.createElement("div");
         const button = document.createElement("button");
         div.classList.add("inhabitat-div");
@@ -3330,7 +3335,7 @@ export class TTGui {
             let parseError = "";
             let error = "";
             try {
-                ast = parser.parse(input.value);
+                ast = parser.parseSurface(input.value);
             }
             catch (e) {
                 parseError = e;
@@ -4039,7 +4044,7 @@ export class TTGui {
             if (command === "qed") {
                 const qedName = parameter?.trim();
                 if (qedName) {
-                    const nameAst = parser.parse(qedName);
+                    const nameAst = parser.parseSurface(qedName);
                     if (nameAst?.type !== "var" || nameAst.name !== qedName) {
                         throw new Error(TR("qed命名参数必须是单个常量名"));
                     }

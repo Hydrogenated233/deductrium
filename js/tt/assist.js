@@ -4,6 +4,10 @@ import { Core, findContextByName, wrapApply, wrapLambda, wrapVar } from "./core.
 import { markExplicitAtSyntax } from "./presentation.js";
 let core = new Core;
 let parser = new ASTParser;
+/** Parse a user tactic/target expression without losing old replay support. */
+function parseAssistInput(source) {
+    return parser.parseSurfaceOrLegacy(source);
+}
 export class Assist {
     // the target theorem ast
     theorem;
@@ -19,8 +23,13 @@ export class Assist {
     constructor(h, target) {
         core = h;
         core.clearSemanticState();
+        // Direct Assist instances are also used by the engine/worker replay
+        // path and by internal regression fixtures.  User-facing editors
+        // validate their source with parseSurface before reaching this class;
+        // keep this low-level constructor compatible with migrated/legacy AST
+        // strings so replay does not reject historical targets.
         if (typeof target === "string") {
-            target = markExplicitAtSyntax(parser.parse(target));
+            target = markExplicitAtSyntax(parseAssistInput(target));
         }
         this.theorem = Core.clone(target);
         // this.theorem = Core.clone(core.markBondVars(target, []),false);
@@ -316,7 +325,7 @@ export class Assist {
     }
     dynamicConstructorApplication(constructor, uniformArguments, goal) {
         const source = this.dynamicConstructorSource(constructor.name, uniformArguments);
-        const candidate = parser.parse(source + constructor.argumentTypes.map(() => " _").join(""));
+        const candidate = parseAssistInput(source + constructor.argumentTypes.map(() => " _").join(""));
         const assertion = {
             type: ":",
             name: "",
@@ -459,7 +468,7 @@ export class Assist {
             throw TR("无证明目标，请使用qed命令结束证明");
         let target;
         try {
-            target = markExplicitAtSyntax(parser.parse(source));
+            target = markExplicitAtSyntax(parseAssistInput(source));
             core.checkType({
                 type: "===", name: "", nodes: [Core.clone(goal.type), Core.clone(target)]
             }, goal.context, false, undefined, false, true);
@@ -671,8 +680,12 @@ export class Assist {
         }
     }
     exact(ast) {
+        // Assist is also the compatibility/replay layer.  GUI-edited source
+        // is validated with parseSurface before it reaches this class; keep
+        // command arguments on the legacy parser so saved histories and
+        // internal fixtures can be replayed after the one-shot save migration.
         if (typeof ast === "string") {
-            ast = markExplicitAtSyntax(parser.parse(ast));
+            ast = markExplicitAtSyntax(parseAssistInput(ast));
         }
         const goal = this.goal.shift();
         if (!goal)
@@ -806,7 +819,7 @@ export class Assist {
             const atMatch = /^(.*)\s+at\s+([^\s]+)$/.exec(source);
             if (atMatch && atMatch[1].trim())
                 return this.applyAt(atMatch[1], atMatch[2]);
-            ast = markExplicitAtSyntax(parser.parse(source));
+            ast = markExplicitAtSyntax(parseAssistInput(source));
         }
         const goal = this.goal.shift();
         if (!goal)
@@ -918,7 +931,7 @@ export class Assist {
         let source;
         let sourceType;
         try {
-            source = markExplicitAtSyntax(parser.parse(sourceText.trim()));
+            source = markExplicitAtSyntax(parseAssistInput(sourceText.trim()));
             sourceType = core.checkType(source, sourceContext, false);
             if (sourceType.type !== "P" && sourceType.type !== "->") {
                 throw TR("apply at 来源必须是函数类型");
@@ -1024,7 +1037,7 @@ export class Assist {
         let term;
         let resultType;
         try {
-            term = markExplicitAtSyntax(parser.parse(value));
+            term = markExplicitAtSyntax(parseAssistInput(value));
             resultType = core.checkType(term, sourceContext, false);
         }
         catch (error) {
@@ -1139,7 +1152,7 @@ export class Assist {
             }
         }
         if (typeof eq === "string")
-            eq = markExplicitAtSyntax(parser.parse(eq));
+            eq = markExplicitAtSyntax(parseAssistInput(eq));
         if (!eq)
             throw TR("请输入用于改写的相等假设");
         const goal = this.goal.shift();
@@ -1510,7 +1523,7 @@ export class Assist {
         if (!goal)
             throw TR("无证明目标，请使用qed命令结束证明");
         try {
-            let ast = markExplicitAtSyntax(parser.parse(astr));
+            let ast = markExplicitAtSyntax(parseAssistInput(astr));
             const ctxtNames = new Set(goal.context.map(e => e[0]));
             let name = Core.getNewName("hyp", ctxtNames);
             if (ast.type === ":" && ast.nodes[0].type === "var") {
@@ -1913,7 +1926,10 @@ export class Assist {
         // its recommendations above. Keep the arity-derived count as the
         // compatibility path for legacy and built-in eliminators.
         const metadataBranchCount = dynamicInductive?.kind === "hit1"
-            ? dynamicInductive.constructors.length + (dynamicInductive.pathConstructors?.length ?? 0)
+            || dynamicInductive?.kind === "hit2"
+            ? dynamicInductive.constructors.length
+                + (dynamicInductive.pathConstructors?.length ?? 0)
+                + (dynamicInductive.twoPathConstructors?.length ?? 0)
             : undefined;
         const ctorNumbers = metadataBranchCount ?? inferredBranchCount;
         if (ctorNumbers < 0 || holes.length < ctorNumbers) {
@@ -2014,7 +2030,7 @@ export class Assist {
         if (n?.startsWith("?") || n === "_")
             n = null;
         try {
-            let val = n ? markExplicitAtSyntax(parser.parse(n)) : wrapVar("(?#0)");
+            let val = n ? markExplicitAtSyntax(parseAssistInput(n)) : wrapVar("(?#0)");
             // Instantiate the primitive constructor with the dependent
             // family explicitly.  The surface `pair` alias leaves its
             // universe/family parameters to NBE inference; with an indexed

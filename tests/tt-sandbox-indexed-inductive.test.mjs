@@ -161,4 +161,32 @@ assert.equal(snapshot.goals.length, 0);
 const qed = assist.qed();
 assert.match(qed.theorem, /Vec A n/);
 
+// Ordinary indexed declarations use the same user-name surface as HITs.
+// Names containing the legacy parser markers must survive lowering and later
+// proof-assistant applications.
+const namedIndexed = new SandboxEnvironment({ systemRuleIds: creativeSandboxSystemRuleIds });
+const namedIndexedResult = namedIndexed.add(
+    "inductive VecX (PType : U) [idx : nat] : U "
+    + "| vnilX : VecX PType 0 "
+    + "| vconsX : Pn:nat,Px:PType,VecX PType n -> VecX PType (succ n)"
+);
+assert.equal(namedIndexedResult.ok, true, namedIndexedResult.error);
+assert.equal(namedIndexed.check("vnilX True : VecX True 0").ok, true);
+assert.equal(namedIndexed.check(
+    "vconsX True 0 true (vnilX True) : VecX True (succ 0)"
+).ok, true);
+const namedIndexedBundle = namedIndexed.bridge().inductives[0];
+const namedIndexedAssist = new TTAssistEngine();
+namedIndexedAssist.configure({
+    unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))],
+    trustedInductives: [namedIndexedBundle],
+    inferDisplayMode: "_",
+    timeout: 30_000,
+    language: "zh"
+});
+let namedSnapshot = namedIndexedAssist.start("VecX True 0", options);
+assert.equal(namedSnapshot.tactics.includes("exact vnilX True"), true);
+namedSnapshot = namedIndexedAssist.apply("exact vnilX True");
+assert.equal(namedSnapshot.goals.length, 0);
+
 console.log("sandbox indexed-inductive regression passed");

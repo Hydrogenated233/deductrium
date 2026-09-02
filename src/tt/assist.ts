@@ -4,6 +4,11 @@ import { assignContext, Context, Core, findContextByName, Varlist, wrapApply, wr
 import { markExplicitAtSyntax } from "./presentation.js";
 let core = new Core;
 let parser = new ASTParser;
+
+/** Parse a user tactic/target expression without losing old replay support. */
+function parseAssistInput(source: string): AST {
+    return parser.parseSurfaceOrLegacy(source);
+}
 type GoalDependRel = { src: AST, dst: AST, goals: Goal[], varname: string };
 export type Goal = { context: Context, type: AST, ast: AST, depend: GoalDependRel };
 export class Assist {
@@ -21,7 +26,12 @@ export class Assist {
     constructor(h: Core, target: AST | string) {
         core = h;
         core.clearSemanticState();
-        if (typeof target === "string") { target = markExplicitAtSyntax(parser.parse(target)); }
+        // Direct Assist instances are also used by the engine/worker replay
+        // path and by internal regression fixtures.  User-facing editors
+        // validate their source with parseSurface before reaching this class;
+        // keep this low-level constructor compatible with migrated/legacy AST
+        // strings so replay does not reject historical targets.
+        if (typeof target === "string") { target = markExplicitAtSyntax(parseAssistInput(target)); }
         this.theorem = Core.clone(target);
         // this.theorem = Core.clone(core.markBondVars(target, []),false);
         // this.theorem = core.markBondVars(core.desugar(Core.clone(target),false),[]);
@@ -295,7 +305,7 @@ export class Assist {
         goal: Goal
     ) {
         const source = this.dynamicConstructorSource(constructor.name, uniformArguments);
-        const candidate = parser.parse(
+        const candidate = parseAssistInput(
             source + constructor.argumentTypes.map(() => " _").join("")
         );
         const assertion = {
@@ -434,7 +444,7 @@ export class Assist {
         if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
         let target: AST;
         try {
-            target = markExplicitAtSyntax(parser.parse(source));
+            target = markExplicitAtSyntax(parseAssistInput(source));
             core.checkType({
                 type: "===", name: "", nodes: [Core.clone(goal.type), Core.clone(target)]
             }, goal.context, false, undefined, false, true);
@@ -626,7 +636,11 @@ export class Assist {
         }
     }
     exact(ast: AST | string) {
-        if (typeof ast === "string") { ast = markExplicitAtSyntax(parser.parse(ast)); }
+        // Assist is also the compatibility/replay layer.  GUI-edited source
+        // is validated with parseSurface before it reaches this class; keep
+        // command arguments on the legacy parser so saved histories and
+        // internal fixtures can be replayed after the one-shot save migration.
+        if (typeof ast === "string") { ast = markExplicitAtSyntax(parseAssistInput(ast)); }
         const goal = this.goal.shift();
         if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
         let context = goal.context;
@@ -744,7 +758,7 @@ export class Assist {
             const source = ast.trim();
             const atMatch = /^(.*)\s+at\s+([^\s]+)$/.exec(source);
             if (atMatch && atMatch[1].trim()) return this.applyAt(atMatch[1], atMatch[2]);
-            ast = markExplicitAtSyntax(parser.parse(source));
+            ast = markExplicitAtSyntax(parseAssistInput(source));
         }
         const goal = this.goal.shift();
         if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
@@ -842,7 +856,7 @@ export class Assist {
         let source: AST;
         let sourceType: AST;
         try {
-            source = markExplicitAtSyntax(parser.parse(sourceText.trim()));
+            source = markExplicitAtSyntax(parseAssistInput(sourceText.trim()));
             sourceType = core.checkType(source, sourceContext, false);
             if (sourceType.type !== "P" && sourceType.type !== "->") {
                 throw TR("apply at 来源必须是函数类型");
@@ -952,7 +966,7 @@ export class Assist {
         let term: AST;
         let resultType: AST;
         try {
-            term = markExplicitAtSyntax(parser.parse(value));
+            term = markExplicitAtSyntax(parseAssistInput(value));
             resultType = core.checkType(term, sourceContext, false);
         } catch (error) {
             this.goal.unshift(goal);
@@ -1069,7 +1083,7 @@ export class Assist {
                 return this;
             }
         }
-        if (typeof eq === "string") eq = markExplicitAtSyntax(parser.parse(eq));
+        if (typeof eq === "string") eq = markExplicitAtSyntax(parseAssistInput(eq));
         if (!eq) throw TR("请输入用于改写的相等假设");
         const goal = this.goal.shift();
         if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
@@ -1423,7 +1437,7 @@ export class Assist {
         const goal = this.goal.shift();
         if (!goal) throw TR("无证明目标，请使用qed命令结束证明");
         try {
-            let ast = markExplicitAtSyntax(parser.parse(astr));
+            let ast = markExplicitAtSyntax(parseAssistInput(astr));
             const ctxtNames = new Set(goal.context.map(e => e[0]));
             let name = Core.getNewName("hyp", ctxtNames);
             if (ast.type === ":" && ast.nodes[0].type === "var") {
@@ -1821,7 +1835,10 @@ export class Assist {
         // its recommendations above. Keep the arity-derived count as the
         // compatibility path for legacy and built-in eliminators.
         const metadataBranchCount = dynamicInductive?.kind === "hit1"
-            ? dynamicInductive.constructors.length + (dynamicInductive.pathConstructors?.length ?? 0)
+            || dynamicInductive?.kind === "hit2"
+            ? dynamicInductive.constructors.length
+                + (dynamicInductive.pathConstructors?.length ?? 0)
+                + (dynamicInductive.twoPathConstructors?.length ?? 0)
             : undefined;
         const ctorNumbers = metadataBranchCount ?? inferredBranchCount;
         if (ctorNumbers < 0 || holes.length < ctorNumbers) {
@@ -1913,7 +1930,7 @@ export class Assist {
         n = n?.trim();
         if (n?.startsWith("?") || n === "_") n = null;
         try {
-            let val = n ? markExplicitAtSyntax(parser.parse(n)) : wrapVar("(?#0)");
+            let val = n ? markExplicitAtSyntax(parseAssistInput(n)) : wrapVar("(?#0)");
             // Instantiate the primitive constructor with the dependent
             // family explicitly.  The surface `pair` alias leaves its
             // universe/family parameters to NBE inference; with an indexed

@@ -1,4 +1,4 @@
-import { ASTParser } from "./astparser.js";
+import { ASTParser, type AST } from "./astparser.js";
 import { Core } from "./core.js";
 import {
     SANDBOX_SAVE_VERSION,
@@ -11,9 +11,15 @@ import {
     SandboxHitDeclaration,
     SandboxInductiveDeclaration,
     createSandboxDeclaration,
-    parseSandboxDeclaration
+    parseSandboxDeclaration,
+    parseSandboxDeclarationSurface,
+    migrateLegacySandboxSave
 } from "./sandbox.js";
-import { SandboxWorkerClient } from "./sandbox-worker-client.js";
+import {
+    SandboxWorkerCancelledError,
+    SandboxWorkerClient,
+    SandboxWorkerRequestHandle
+} from "./sandbox-worker-client.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import {
     TheoremWorkspace,
@@ -25,10 +31,25 @@ import {
     setWorkspaceRowData,
     syncWorkspaceDomOrder
 } from "./theorem-workspace-view.js";
+import {
+    expandTypeTheoryAliasesInSurface,
+    installTypeTheorySymbolAliases
+} from "./symbol-aliases.js";
+import { hasLegacySurfaceSyntax } from "./surface-syntax-migration.js";
 
 const storageKey = "deductrium-type-theory-sandbox-v1";
 const parser = new ASTParser();
 const emptyBridge = (): SandboxBridge => ({ axioms: [], inductives: [], definitions: [] });
+
+/** Normalize pasted aliases before the sandbox expression checker applies its
+ * strict legacy-syntax guard.  Kept pure so the boundary is regression-testable
+ * without constructing the browser UI. */
+export function normalizeSandboxCheckInput(source: string): string {
+    return expandTypeTheoryAliasesInSurface(String(source ?? "").trim());
+}
+
+type SandboxValidationResult = Awaited<ReturnType<SandboxWorkerClient["validate"]>>;
+type SandboxValidationHandle = SandboxWorkerRequestHandle<SandboxValidationResult>;
 
 export type SandboxBridgeChangeOptions = {
     /** Final publication revalidates the theorem workspace; provisional revocation does not. */
@@ -43,7 +64,12 @@ function sandboxStructuredDisplayDeclaration(declaration: SandboxDeclaration) {
         return {};
     }
     try {
-        const parsed = parseSandboxDeclaration(declaration.source);
+        let parsed: ReturnType<typeof parseSandboxDeclaration>;
+        try {
+            parsed = parseSandboxDeclarationSurface(declaration.source);
+        } catch {
+            parsed = parseSandboxDeclaration(declaration.source);
+        }
         return { hit: parsed.hit, inductive: parsed.inductive };
     } catch {
         return {};
@@ -55,9 +81,15 @@ function sandboxHitDisplayDeclaration(declaration: SandboxDeclaration) {
 }
 
 export function sandboxDeclarationDisplayKind(declaration: SandboxDeclaration) {
-    return String(declaration.kind) === "hit"
-        ? { kind: "HIT", trust: "一阶路径归纳", trustClass: "sandbox-hit" }
-        : { kind: declaration.kind, trust: "trusted", trustClass: "sandbox-trusted" };
+    if (String(declaration.kind) === "hit") {
+        const hit = sandboxHitDisplayDeclaration(declaration);
+        return {
+            kind: "HIT",
+            trust: hit?.twoPathConstructors?.length ? "二维高阶路径归纳" : "一阶路径归纳",
+            trustClass: "sandbox-hit"
+        };
+    }
+    return { kind: declaration.kind, trust: "trusted", trustClass: "sandbox-trusted" };
 }
 
 export function sandboxInductiveDisplaySources(declaration: SandboxDeclaration) {
@@ -76,8 +108,78 @@ export function sandboxInductiveDisplaySources(declaration: SandboxDeclaration) 
         : declaration.inductive?.constructors ?? [];
     return [
         `${signature.name}${parameters}${indices} : ${signature.universe}`,
-        ...constructors.map(ctor => `${ctor.name} : ${ctor.typeSource}`)
+        ...constructors.map(ctor => `${ctor.name} : ${ctor.typeSource}`),
+        ...(hit?.twoPathConstructors ?? []).map(path =>
+            `path2 ${path.name} : ${path.typeSource}`
+        )
     ];
+}
+
+/** A parsed line in an inductive/HIT declaration display. */
+export type SandboxInductiveDisplayEntry = {
+    ast: AST;
+    /** Optional declaration keyword rendered before the AST (currently `path2`). */
+    prefix?: string;
+};
+
+function sandboxDeclarationLineAst(name: string, type: AST): AST {
+    return {
+        type: ":",
+        name: "",
+        nodes: [
+            { type: "var", name, nodes: [] },
+            Core.clone(type)
+        ]
+    };
+}
+
+function sandboxDisplayTypeAst(value: { type?: AST; typeSource: string }): AST | null {
+    if (value.type) return Core.clone(value.type);
+    // Older saves may contain only the type source.  Parse that source, never
+    // the complete `name : type` line: declaration-owned names can begin with
+    // parser-reserved letters such as L, P, S, W, or X.
+    try {
+        return parser.parseSurfaceOrLegacy(value.typeSource);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Build structured display ASTs for an inductive/HIT declaration.
+ *
+ * Constructor names are kept as `var` nodes instead of being reparsed from
+ * source text.  This is important for names such as `Loop2`, where the
+ * generic parser treats the leading `L` as its lambda token.
+ */
+export function sandboxInductiveDisplayAsts(
+    declaration: SandboxDeclaration
+): SandboxInductiveDisplayEntry[] | null {
+    const structured = sandboxStructuredDisplayDeclaration(declaration);
+    const hit = structured.hit;
+    const signature = declaration.kind === "inductive" ? structured.inductive : hit;
+    if (!signature) return null;
+
+    const entries: SandboxInductiveDisplayEntry[] = [
+        { ast: sandboxInductiveHeaderAst(signature) }
+    ];
+    const constructors = hit
+        ? [...hit.pointConstructors, ...hit.pathConstructors]
+        : declaration.inductive?.constructors ?? [];
+    for (const constructor of constructors) {
+        const type = sandboxDisplayTypeAst(constructor);
+        if (!type) return null;
+        entries.push({ ast: sandboxDeclarationLineAst(constructor.name, type) });
+    }
+    for (const path of hit?.twoPathConstructors ?? []) {
+        const type = sandboxDisplayTypeAst(path);
+        if (!type) return null;
+        entries.push({
+            ast: sandboxDeclarationLineAst(path.name, type),
+            prefix: "path2 "
+        });
+    }
+    return entries;
 }
 
 function sandboxInductiveHeaderAst(signature: Pick<
@@ -118,6 +220,8 @@ export class TTSandboxGui {
     private readonly status: HTMLElement;
     private readonly checkInput: HTMLInputElement;
     private readonly checkOutput: HTMLElement;
+    private readonly validateButton: HTMLButtonElement | null;
+    private readonly stopValidationButton: HTMLButtonElement | null;
     private readonly worker: SandboxWorkerClient;
     private readonly environmentOptions: SandboxEnvironmentOptions;
     private readonly onAxiomsChange?: (
@@ -135,6 +239,11 @@ export class TTSandboxGui {
     private dragger: ListDragger;
     private validationRequest = 0;
     private validationPromise: Promise<void> = Promise.resolve();
+    private validationHandle: SandboxValidationHandle | null = null;
+    /** Whether the active validation may restore the bridge it found on entry. */
+    private validationCanRestoreBridge = false;
+    /** Last bridge known to be published successfully for the current save. */
+    private lastTrustedBridge: SandboxBridge | null = null;
     private initialized = false;
     private persistenceSuspended = false;
 
@@ -163,6 +272,10 @@ export class TTSandboxGui {
         this.status = root.querySelector("#sandbox-status") as HTMLElement;
         this.checkInput = root.querySelector("#sandbox-check-input") as HTMLInputElement;
         this.checkOutput = root.querySelector("#sandbox-check-output") as HTMLElement;
+        this.validateButton = rootButton(root, "#sandbox-validate");
+        this.stopValidationButton = rootButton(root, "#sandbox-stop-validation");
+        installTypeTheorySymbolAliases(this.input);
+        installTypeTheorySymbolAliases(this.checkInput);
         this.dragger = new ListDragger(this.list);
         this.dragger.cols = 1;
         this.dragger.queryDraggedNames = source => this.syncWorkspaceFromState().dragBlockIds(source);
@@ -193,7 +306,8 @@ export class TTSandboxGui {
             this.persist();
             this.render();
         });
-        rootButton(this.root, "#sandbox-validate")?.addEventListener("click", () => void this.requestValidation());
+        this.validateButton?.addEventListener("click", () => void this.requestValidation(false));
+        this.stopValidationButton?.addEventListener("click", () => this.cancelValidation());
         rootButton(this.root, "#sandbox-export")?.addEventListener("click", () => this.exportSave());
         rootButton(this.root, "#sandbox-import-trigger")?.addEventListener("click", () => {
             (this.root.querySelector("#sandbox-import") as HTMLInputElement)?.click();
@@ -219,6 +333,7 @@ export class TTSandboxGui {
                 this.add();
             }
         });
+        this.updateValidationControls(false);
     }
 
     private add() {
@@ -228,6 +343,12 @@ export class TTSandboxGui {
     private addToFolder(folderId: string | null) {
         const source = this.input.value.trim();
         if (!source) return;
+        try {
+            parseSandboxDeclarationSurface(source);
+        } catch (error) {
+            this.setStatus(String(error), true);
+            return;
+        }
         if (folderId) {
             const folder = this.folders.find(item => item.id === folderId);
             if (!folder) return;
@@ -266,13 +387,22 @@ export class TTSandboxGui {
         return this.validationPromise;
     }
 
-    private requestValidation() {
-        // Source/order/enable mutations are authoritative immediately. Revoke
-        // the last validated projection before yielding to the Worker so a
-        // deleted or edited name cannot remain usable during validation. The
-        // final publication below is the only one that revalidates theorems.
-        this.invalidateBridge();
-        const promise = this.validate();
+    /**
+     * Queue a validation.  A manual re-check keeps the currently trusted
+     * bridge available while the worker runs; mutations pass the default
+     * `true` so stale declarations are revoked before checking the new save.
+     */
+    private requestValidation(revokeBridge = true) {
+        // A new request supersedes an in-flight one.  It must not restore the
+        // old bridge because the new request may represent a newer save.
+        this.cancelValidation(false);
+        if (revokeBridge) {
+            this.invalidateBridge();
+            // Once a save mutation revoked the bridge, the previous bridge is
+            // no longer valid for restoration if this validation is cancelled.
+            this.lastTrustedBridge = null;
+        }
+        const promise = this.validate(!revokeBridge);
         this.validationPromise = promise;
         return promise;
     }
@@ -282,41 +412,116 @@ export class TTSandboxGui {
         this.onAxiomsChange?.(emptyBridge(), { revalidate: false });
     }
 
-    private async validate() {
+    /** Stop the active Worker request, retaining a bridge only for a manual re-check. */
+    private cancelValidation(announce = true) {
+        const handle = this.validationHandle;
+        if (!handle || !handle.cancel()) return false;
+        const canRestore = this.validationCanRestoreBridge;
+        this.validationHandle = null;
+        this.validationCanRestoreBridge = false;
+        ++this.validationRequest;
+        if (announce) {
+            this.setStatus(
+                canRestore && this.lastTrustedBridge
+                    ? "沙盒校验已取消，保留上次可信声明"
+                    : "沙盒校验已取消",
+                false
+            );
+        }
+        this.updateValidationControls(false);
+        return true;
+    }
+
+    private async validate(canRestoreBridge = false) {
         if (this.persistenceSuspended) return;
         const request = ++this.validationRequest;
         const save = this.toSave();
+        this.validationCanRestoreBridge = canRestoreBridge;
+        this.updateValidationControls(true);
         this.setStatus("正在校验沙盒声明…", false);
-        let result: Awaited<ReturnType<SandboxWorkerClient["validate"]>>;
+        let result: SandboxValidationResult;
         try {
-            result = await this.worker.validate(save);
+            // New clients expose a cancellable request handle.  Keep the
+            // legacy `validate()` path for deterministic mocks and older
+            // integrations that do not yet implement the handle API.
+            const worker = this.worker as SandboxWorkerClient & {
+                validateRequest?: (save: SandboxSave) => SandboxValidationHandle;
+            };
+            const handle = typeof worker.validateRequest === "function"
+                ? worker.validateRequest(save)
+                : null;
+            if (handle) {
+                this.validationHandle = handle;
+                try {
+                    result = await handle.promise;
+                } finally {
+                    if (this.validationHandle === handle) this.validationHandle = null;
+                }
+            } else {
+                result = await this.worker.validate(save);
+            }
         } catch (error) {
             if (request !== this.validationRequest || this.persistenceSuspended) return;
+            this.updateValidationControls(false);
+            if (error instanceof SandboxWorkerCancelledError) {
+                this.setStatus(
+                    canRestoreBridge && this.lastTrustedBridge
+                        ? "沙盒校验已取消，保留上次可信声明"
+                        : "沙盒校验已取消",
+                    false
+                );
+                return;
+            }
             try { this.onAxiomsChange?.(emptyBridge(), { revalidate: true }); } catch { }
+            this.lastTrustedBridge = null;
             const reason = error instanceof Error ? error.message : String(error);
             this.setStatus(`沙盒 Worker 校验失败：${reason}`, true);
             return;
         }
         if (request !== this.validationRequest || this.persistenceSuspended) return;
+        this.updateValidationControls(false);
+        if (result.status === "cancelled" || result.status === "budget-exhausted") {
+            const message = result.status === "cancelled"
+                ? "沙盒校验已取消，保留上次可信声明"
+                : `沙盒校验已停止：${result.error ?? "达到资源上限"}`;
+            this.setStatus(message, result.status === "budget-exhausted");
+            return;
+        }
         this.declarations = result.declarations;
         this.syncWorkspaceFromState();
         try {
             this.onAxiomsChange?.(result.bridge ?? emptyBridge(), { revalidate: true });
         } catch (error) {
             try { this.onAxiomsChange?.(emptyBridge(), { revalidate: true }); } catch { }
+            this.lastTrustedBridge = null;
             const reason = error instanceof Error ? error.message : String(error);
             this.setStatus(`沙盒类型层发布失败：${reason}`, true);
             return;
         }
+        this.lastTrustedBridge = result.bridge ?? emptyBridge();
+        this.validationCanRestoreBridge = false;
         this.persist();
         this.render();
         const invalid = this.declarations.filter(declaration => declaration.status === "invalid").length;
         this.setStatus(invalid ? `有 ${invalid} 条声明未通过校验` : "沙盒声明已校验；原始公理标记为 trusted", invalid > 0);
     }
 
+    private updateValidationControls(running: boolean) {
+        if (this.validateButton) this.validateButton.disabled = running;
+        if (this.stopValidationButton) this.stopValidationButton.disabled = !running;
+        this.root?.classList.toggle("sandbox-validating", running);
+    }
+
     private async check() {
-        const source = this.checkInput.value.trim();
+        // Pasted aliases may reach this expression checker without a keydown
+        // event. Expand them before the legacy-syntax guard; otherwise the
+        // supported `\\*` spelling is seen as a legacy `*` and rejected.
+        const source = normalizeSandboxCheckInput(this.checkInput.value);
         if (!source) return;
+        if (hasLegacySurfaceSyntax(source)) {
+            this.checkOutput.textContent = "失败：不再支持旧语法，请使用 Unicode 符号";
+            return;
+        }
         await this.whenReady();
         try {
             const result = await this.worker.check(this.toSave(), source);
@@ -424,6 +629,7 @@ export class TTSandboxGui {
         source.className = "sandbox-source tt-theorem-input hide";
         source.value = declaration.source;
         source.title = "按 Enter 更新声明";
+        installTypeTheorySymbolAliases(source);
         const display = document.createElement("div");
         display.className = "inhabitat-div sandbox-source-display";
         display.title = "点击进入编辑";
@@ -437,6 +643,14 @@ export class TTSandboxGui {
         });
         const finishEdit = () => {
             if (source.value !== declaration.source) {
+                try {
+                    parseSandboxDeclarationSurface(source.value.trim());
+                } catch (error) {
+                    this.setStatus(String(error), true);
+                    source.classList.remove("hide");
+                    display.classList.add("hide");
+                    return;
+                }
                 declaration.source = source.value;
                 declaration.status = declaration.enabled ? "unchecked" : "disabled";
                 delete declaration.error;
@@ -518,41 +732,56 @@ export class TTSandboxGui {
         // persistence; otherwise the type layer can keep using declarations
         // from the deleted sandbox save until the next page load.
         try { this.onAxiomsChange?.(emptyBridge(), { revalidate: false }); } catch { }
+        this.lastTrustedBridge = null;
+        this.cancelValidation(false);
         this.persistenceSuspended = true;
         this.validationRequest++;
         this.worker.terminate();
+        this.validationHandle = null;
+        this.updateValidationControls(false);
         try { localStorage.removeItem(storageKey); } catch { }
     }
 
     private renderDeclarationDisplay(declaration: SandboxDeclaration, display: HTMLElement) {
         display.replaceChildren();
         try {
-            const inductiveSources = sandboxInductiveDisplaySources(declaration);
-            if (inductiveSources) {
+            const inductiveEntries = sandboxInductiveDisplayAsts(declaration);
+            if (inductiveEntries) {
                 const hit = sandboxHitDisplayDeclaration(declaration);
                 const keyword = document.createElement("span");
                 keyword.className = hit ? "sandbox-hit-keyword" : "";
                 keyword.textContent = hit ? "hit " : "inductive ";
                 display.appendChild(keyword);
-                inductiveSources.forEach((source, index) => {
+                inductiveEntries.forEach((entry, index) => {
                     if (index > 0) {
                         const separator = document.createElement("span");
                         separator.textContent = " | ";
                         display.appendChild(separator);
                     }
-                    const ast = index === 0
-                        ? sandboxInductiveHeaderAst(hit ?? declaration.inductive!)
-                        : parser.parse(source);
-                    if (this.renderAst) display.appendChild(this.renderAst(ast));
+                    if (entry.prefix) {
+                        const prefix = document.createElement("span");
+                        prefix.textContent = entry.prefix;
+                        display.appendChild(prefix);
+                    }
+                    if (this.renderAst) display.appendChild(this.renderAst(entry.ast));
                     else {
                         const text = document.createElement("span");
-                        text.textContent = parser.stringify(ast);
+                        text.textContent = parser.stringify(entry.ast);
                         display.appendChild(text);
                     }
                 });
                 return;
             }
-            const ast = parser.parse(declaration.source);
+            // Keep malformed/legacy declarations readable without feeding a
+            // constructor name back through the generic parser.  A source-only
+            // fallback is preferable to a misleading lambda-token diagnostic.
+            const inductiveSources = sandboxInductiveDisplaySources(declaration);
+            if (inductiveSources) {
+                const hit = sandboxHitDisplayDeclaration(declaration);
+                display.textContent = `${hit ? "hit " : "inductive "}${inductiveSources.join(" | ")}`;
+                return;
+            }
+            const ast = parser.parseSurfaceOrLegacy(declaration.source);
             if (this.renderAst) display.appendChild(this.renderAst(ast));
             else display.textContent = parser.stringify(ast);
         } catch (error) {
@@ -649,12 +878,15 @@ export class TTSandboxGui {
     }
 
     private load(value: unknown, validate = true, persist = true) {
-        if (!value || typeof value !== "object" || (value as any).version !== SANDBOX_SAVE_VERSION
-            || !Array.isArray((value as any).declarations)) {
+        const migrated = migrateLegacySandboxSave(value) as Partial<SandboxSave> & {
+            declarations?: SandboxSave["declarations"];
+        };
+        if (!migrated || migrated.version !== SANDBOX_SAVE_VERSION
+            || !Array.isArray(migrated.declarations)) {
             throw new Error("不支持的沙盒存档版本");
         }
-        this.folders = Array.isArray((value as any).folders)
-            ? (value as SandboxSave).folders!.map(folder => ({
+        this.folders = Array.isArray(migrated.folders)
+            ? migrated.folders.map(folder => ({
                 ...folder,
                 // Saves created before the shared workspace did not persist
                 // subtree lengths.  Keep a marker until ownership can be
@@ -663,7 +895,7 @@ export class TTSandboxGui {
             }))
             : [];
         const folderIds = new Set(this.folders.map(folder => folder.id));
-        this.declarations = (value as SandboxSave).declarations.map((declaration, index) => {
+        this.declarations = migrated.declarations.map((declaration, index) => {
             const source = declaration.source || `${declaration.name} : ${declaration.typeSource}`;
             const restored = createSandboxDeclaration(source, declaration.id || `sandbox-${index + 1}`);
             restored.enabled = declaration.enabled !== false;
@@ -676,7 +908,7 @@ export class TTSandboxGui {
             ...this.folders.map(folder => folder.id),
             ...this.declarations.map(declaration => declaration.id)
         ]);
-        this.order = (Array.isArray((value as SandboxSave).order) ? (value as SandboxSave).order : [])
+        this.order = (Array.isArray(migrated.order) ? migrated.order : [])
             .filter(id => knownIds.has(id));
         for (const id of [...this.folders.map(folder => folder.id), ...this.declarations.map(declaration => declaration.id)]) {
             if (!this.order.includes(id)) this.order.push(id);

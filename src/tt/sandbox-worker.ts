@@ -9,10 +9,23 @@ import {
 export type SandboxWorkerRequest =
     | { id: number; kind: "load"; save: SandboxSave; options?: SandboxEnvironmentOptions }
     | { id: number; kind: "validate"; save: SandboxSave; options?: SandboxEnvironmentOptions }
-    | { id: number; kind: "check"; source: string; options?: SandboxEnvironmentOptions };
+    | { id: number; kind: "check"; source: string; options?: SandboxEnvironmentOptions }
+    | { id: number; kind: "cancel"; requestId: number };
+
+export type SandboxWorkerCancelResult = {
+    cancelled: true;
+    requestId: number;
+};
 
 function optionsKey(options: SandboxEnvironmentOptions | undefined) {
-    return JSON.stringify(options?.systemRuleIds ?? null);
+    return JSON.stringify({
+        systemRuleIds: options?.systemRuleIds ?? null,
+        semanticResourceScale: options?.semanticResourceScale ?? null,
+        validationMaxDeclarations: options?.validationMaxDeclarations ?? null,
+        validationMaxNodes: options?.validationMaxNodes ?? null,
+        validationMaxSteps: options?.validationMaxSteps ?? null,
+        validationTimeoutMs: options?.validationTimeoutMs ?? null
+    });
 }
 
 /** Stateful request owner shared by the browser Worker and deterministic Node tests. */
@@ -20,13 +33,31 @@ export class SandboxWorkerSession {
     private environment = new SandboxEnvironment();
     private environmentOptionsKey = optionsKey(undefined);
     private loaded = false;
+    private readonly cancelledRequests = new Set<number>();
 
-    handle(request: SandboxWorkerRequest): SandboxValidationResult | SandboxCheckResult {
+    cancel(requestId: number): SandboxWorkerCancelResult {
+        const id = Number(requestId);
+        if (Number.isFinite(id)) this.cancelledRequests.add(id);
+        return { cancelled: true, requestId: id };
+    }
+
+    handle(request: SandboxWorkerRequest): SandboxValidationResult | SandboxCheckResult | SandboxWorkerCancelResult {
+        if (request.kind === "cancel") return this.cancel(request.requestId);
+        if (this.cancelledRequests.has(request.id)) {
+            this.cancelledRequests.delete(request.id);
+            throw new Error("沙盒验证已取消");
+        }
         const current = this.getEnvironment(request.options);
         if (request.kind === "load" || request.kind === "validate") {
-            const result = current.load(request.save);
-            this.loaded = true;
-            return result;
+            try {
+                const result = current.load(request.save, {
+                    shouldCancel: () => this.cancelledRequests.has(request.id)
+                });
+                this.loaded = result.status !== "cancelled" && result.status !== "budget-exhausted";
+                return result;
+            } finally {
+                this.cancelledRequests.delete(request.id);
+            }
         }
         if (!this.loaded) {
             throw new Error("沙盒 Worker 尚未加载存档，请先加载或校验");
