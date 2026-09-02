@@ -2666,6 +2666,14 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         "ap3",
         "@hit_ap2",
         "hit_ap2",
+        "@hit_ap2_comp",
+        "hit_ap2_comp",
+        "@hit_ap2_inv",
+        "hit_ap2_inv",
+        "@hit_apd2_comp",
+        "hit_apd2_comp",
+        "@hit_apd2_inv",
+        "hit_apd2_inv",
         "@hit_map_transport",
         "hit_map_transport"
     ]);

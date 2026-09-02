@@ -204,7 +204,7 @@ hit Circle2 : U
 - 提供沙盒包导入、导出、复制、禁用和清空功能。
 - 对不同版本生成的沙盒包执行兼容性迁移或明确拒绝加载。
 
-### 当前实现状态（2026-09-02）
+### 当前实现状态（2026-09-03）
 
 - 二维 HIT 已完成结构解析、消去器 lowering、命题计算规则和 Core schema 认证。
 - 三维扩展第一批已支持 `path3` 的结构化解析：端点必须是直接的二阶路径构造子应用，统一参数、局部参数、共享一阶路径边界和点边界都会被检查；`path4` 及更高维仍明确拒绝。
@@ -218,6 +218,7 @@ hit Circle2 : U
 - GUI 的新增、编辑和存档恢复只建立 source-only draft，不在主线程运行 AST parser；普通声明的 `presentationAst` 与 HIT/归纳结构只由 Worker 回传并且不写入存档。
 - 存档携带的 validation cache 仅进入下一次 Worker 请求，Worker 重认证前不会进入 autosave；声明、cache 与 DOM 只在新 bridge 成功发布后一起提交。
 - GUI 与 Worker client 共用 ordered declaration validation key；只有源码、声明顺序、启停或递归停用变化才撤回 bridge 和 cache，空文件夹、折叠与重命名不会触发重复校验或使表达式检查误报存档变化。
+- 复合三阶端点所需的 `hit_ap2_comp`、`hit_ap2_inv`、`hit_apd2_comp`、`hit_apd2_inv` 已作为普通等式归纳证明的透明定义加入系统；在 metadata v7、lowerer 和 Core 递归重建完成前，作者语法仍只接受原子二阶路径端点。
 
 ### 验收标准
 

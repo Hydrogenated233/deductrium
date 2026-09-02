@@ -128,6 +128,11 @@ GUI cache invalidation and Worker session reuse share one validation-semantics
 key over ordered declaration id/source/enabled/effective-disabled tuples. Empty
 folders, folding, renaming, and other presentation-only changes do not revoke a
 valid bridge; declaration reordering or recursive disabling does.
+Composite third-path endpoints require transparent lower-dimensional laws, not
+new axioms. The system provides checked `hit_ap2_comp`, `hit_ap2_inv`,
+`hit_apd2_comp`, and `hit_apd2_inv` definitions. Authoring syntax remains
+limited to atomic second-path endpoints until expression metadata and Core
+reconstruction use those laws end to end.
 
 ## Type-theory Proof Pages / 类型论证明页
 
