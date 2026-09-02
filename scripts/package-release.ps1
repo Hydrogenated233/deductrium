@@ -79,7 +79,7 @@ try {
         "package.json",
         "server.mjs",
         "tt-process.mjs",
-        "start.cmd",
+        "start.cmd"
     )
     foreach ($relativePath in $runtimeFiles) {
         $source = Join-Path $projectRoot $relativePath
