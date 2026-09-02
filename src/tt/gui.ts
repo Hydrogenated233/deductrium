@@ -150,7 +150,8 @@ export function cloneInductiveBundle(bundle: CoreSystemInductiveBundle): CoreSys
                     rightTwoPath: ctor.rightTwoPath,
                     sourcePath: Core.clone(ctor.sourcePath),
                     targetPath: Core.clone(ctor.targetPath),
-                    computationName: ctor.computationName
+                    computationName: ctor.computationName,
+                    actionComputationName: ctor.actionComputationName
                 }))
             }
             : undefined
@@ -191,6 +192,7 @@ export function sandboxInductiveEntryPresentation(
         path.computationName === publicName
         || `ap_${path.name}` === publicName
         || ("strongComputationName" in path && path.strongComputationName === publicName)
+        || ("actionComputationName" in path && path.actionComputationName === publicName)
     )) {
         return { postfix: "计算", prefix, category: "compute" };
     }

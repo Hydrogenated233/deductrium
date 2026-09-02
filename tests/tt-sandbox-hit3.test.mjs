@@ -43,12 +43,17 @@ assert.equal(bundle.metadata.dimension, 3);
 assert.equal(bundle.metadata.ruleSchemaVersion, 1);
 assert.equal(bundle.metadata.threePathConstructors[0].name, "cell3");
 assert.equal(bundle.metadata.threePathConstructors[0].computationName, undefined);
+assert.equal(bundle.metadata.threePathConstructors[0].actionComputationName, "ap3_cell3");
 assert.ok(bundle.auxiliaryTypes.some(([name]) => name === "cell3"));
 for (const name of ["apd_cell3", "@apd_cell3", "ap_cell3", "@ap_cell3"]) {
     assert.equal(bundle.auxiliaryTypes.some(([entryName]) => entryName === name), false);
     assert.equal(bundle.computeRules[name], undefined);
 }
 assert.equal(bundle.computeRules.cell3, undefined);
+for (const name of ["ap3_cell3", "@ap3_cell3"]) {
+    assert.ok(bundle.auxiliaryTypes.some(([entryName]) => entryName === name));
+    assert.equal(bundle.computeRules[name], undefined);
+}
 
 const sandbox = new SandboxEnvironment({ systemRuleIds: creativeSandboxSystemRuleIds });
 const added = sandbox.add(cubeSource);
@@ -56,7 +61,10 @@ assert.equal(added.ok, true, added.error);
 assert.equal(added.declarations[0].status, "valid");
 assert.ok(added.declarations[0].generatedNames.includes("cell3"));
 assert.equal(added.declarations[0].generatedNames.includes("apd_cell3"), false);
+assert.ok(added.declarations[0].generatedNames.includes("ap3_cell3"));
 assert.equal(sandbox.check("cell3 : faceA3 = faceB3").ok, true);
+assert.equal(sandbox.check("ap3_cell3").ok, true);
+assert.equal(sandbox.check("@ap3_cell3").ok, true);
 
 const useInd3 = sandbox.add(
     "useInd3 := λC:Cube3→U.λc:(C base3)."
@@ -69,6 +77,12 @@ const useInd3 = sandbox.add(
 );
 assert.equal(useInd3.ok, true, useInd3.error);
 assert.equal(sandbox.check("useInd3").ok, true);
+const useAp3 = sandbox.add(
+    "useAp3 := λC:U.λr:C.λq0:(r=r).λq1:(r=r)."
+        + "λq2a:(q0=q1).λq2b:(q0=q1).λq3:(q2a=q2b)."
+        + "ap3_cell3 C r q0 q1 q2a q2b q3"
+);
+assert.equal(useAp3.ok, true, useAp3.error);
 assert.equal(
     sandbox.check("rec_Cube3 True true rfl rfl rfl rfl rfl base3 === true").ok,
     true
@@ -82,6 +96,7 @@ restored.load(JSON.parse(sandbox.serialize()));
 assert.equal(restored.getDeclarations()[0].status, "valid");
 assert.equal(restored.bridge().inductives[0].metadata.kind, "hit3");
 assert.equal(restored.check("cell3 : faceA3 = faceB3").ok, true);
+assert.equal(restored.check("ap3_cell3").ok, true);
 
 const parameterized = parseSandboxHit(
     "hit CubeP (A : U) : U "
@@ -186,6 +201,20 @@ definitionalCell.computeRules.cell3 = [{
     result: parser.parse("faceA3")
 }];
 assert.throws(() => register(definitionalCell), /路径构造子不能注册为定义计算规则/);
+
+const forgedAction = structuredClone(bundle);
+const actionTypes = new Map(forgedAction.auxiliaryTypes);
+for (const [target, source] of [
+    ["ap3_cell3", "ap2_faceA3"],
+    ["@ap3_cell3", "@ap2_faceA3"]
+]) {
+    const index = forgedAction.auxiliaryTypes.findIndex(([name]) => name === target);
+    forgedAction.auxiliaryTypes[index] = [target, structuredClone(actionTypes.get(source))];
+}
+assert.throws(
+    () => register(forgedAction),
+    /三维 HIT action 计算定理 ap3_cell3 与 metadata 不一致/
+);
 
 const forgedCoherence = structuredClone(bundle);
 const replaceThreeCoherenceWithTrue = ast => {

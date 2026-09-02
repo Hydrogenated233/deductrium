@@ -485,7 +485,7 @@
                     <p>索引归纳把统一参数写在圆括号中，把索引写在方括号中。例如 <code>inductive Vec (A : U) [n : nat] : U | vnil : Vec A 0 | vcons : Πn:nat,A -&gt; Vec A n -&gt; Vec A (succ n)</code>。每个构造子必须显式给出返回索引；系统会生成保留索引约束的 <code>ind_Vec</code> 和 <code>rec_Vec</code>。</p>
                     <p>一阶路径 HIT 使用 <code>hit</code> 声明，并把点构造子写在路径构造子之前。例如 <code>hit Circle2 : U | base2 : Circle2 | loop2 : base2 = base2</code>。系统会生成 <code>ind_Circle2</code>、<code>rec_Circle2</code>，以及路径的命题计算规则 <code>apd_loop2</code> 和 <code>ap_loop2</code>。</p>
                     <p>二维 HIT 在一阶路径之后使用 <code>path2</code> 声明路径之间的一致性。例如 <code>hit Surface2 : U | baseS : Surface2 | loopA : baseS = baseS | loopB : baseS = baseS | path2 squareS : loopA = loopB</code>。系统会把点、一阶路径和二维一致性分别加入消去器，并生成 <code>apd_squareS</code>、兼容旧存档的 <code>ap_squareS</code>，以及关联用户二维 coherence 的强计算规则 <code>ap2_squareS</code>。</p>
-                    <p>当前可注册实验性三维 HIT：<code>path3</code> 会生成依赖三阶 coherence，并加入 <code>ind_</code>/<code>rec_</code>；三阶 <code>apd_</code>/<code>ap_</code> 命题计算规则仍未开放。<code>path4</code> 及更高维目前直接拒绝，不会降级成低维规则。</p>
+                    <p>当前可注册实验性三维 HIT：<code>path3</code> 会生成依赖三阶 coherence，并加入 <code>ind_</code>/<code>rec_</code>；非依赖三阶 action 通过 <code>ap3_名称</code> 提供，依赖三阶 <code>apd3_名称</code> 仍未开放。<code>path4</code> 及更高维目前直接拒绝，不会降级成低维规则。</p>
                     <p>构造子的 iota 计算规则由系统自动生成：上例会让 <code>ind_tri C cnt c0t cpt nt</code> 计算为 <code>cnt</code>，对 <code>0t</code>、<code>pt</code> 也分别计算到对应分支。<code>simpl</code>、定义相等检查和 NbE 会自动使用这些规则。</p>
                     <p>HIT 的点构造子保留 iota 定义计算；路径构造子的 <code>apd_</code>/<code>ap_</code> 规则是需要显式使用的命题，不会注册成定义相等。</p>
                     <p>当前版本不能在输入框中直接注册任意 <code>pattern =&gt; result</code> 计算规则。自定义计算规则必须先通过作用域、类型、严格正性、终止性和冲突检查；未经检查的规则会破坏定义相等，因此暂不接受。</p>

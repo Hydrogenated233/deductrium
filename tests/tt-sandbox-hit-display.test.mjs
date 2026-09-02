@@ -126,11 +126,12 @@ hit3Bundle.metadata.threePathConstructors = [{
     rightTwoPath: "squarePath",
     sourcePath: parse("loopSquareA"),
     targetPath: parse("loopSquareB"),
-    computationName: "apd_cubePath"
+    actionComputationName: "ap3_cubePath"
 }];
 const clonedHit3 = cloneInductiveBundle(hit3Bundle);
 assert.equal(clonedHit3.metadata.kind, "hit3");
 assert.equal(clonedHit3.metadata.threePathConstructors[0].leftTwoPath, "squarePath");
+assert.equal(clonedHit3.metadata.threePathConstructors[0].actionComputationName, "ap3_cubePath");
 assert.notEqual(clonedHit3.metadata.threePathConstructors[0].left,
     hit3Bundle.metadata.threePathConstructors[0].left);
 assert.notEqual(clonedHit3.metadata.threePathConstructors[0].sourcePath,
@@ -157,6 +158,13 @@ for (const name of [
         `${name} must render as a propositional two-path HIT computation rule`
     );
 }
+assert.deepEqual(
+    sandboxInductiveEntryPresentation(hit3Bundle, "ap3_cubePath", {
+        postfix: "定义",
+        category: "axiom"
+    }),
+    { postfix: "计算", prefix: "sandbox HIT", category: "compute" }
+);
 
 assert.deepEqual(
     sandboxInductiveEntryPresentation(bundle, "loopDisplay", {
@@ -324,7 +332,7 @@ assert.match(indexHtml, /hit Circle2 : U \| base2 : Circle2 \| loop2 : base2 = b
 assert.match(indexHtml, /apd_loop2[\s\S]*ap_loop2/);
 assert.match(indexHtml, /path2[\s\S]*apd_squareS[\s\S]*ap_squareS/);
 assert.match(indexHtml, /ap2_squareS/);
-assert.match(indexHtml, /实验性三维 HIT[\s\S]*path3[\s\S]*三阶[\s\S]*apd_/);
+assert.match(indexHtml, /实验性三维 HIT[\s\S]*path3[\s\S]*ap3_名称[\s\S]*apd3_名称/);
 assert.match(indexHtml, /路径构造子的 <code>apd_<\/code>\/<code>ap_<\/code> 规则是需要显式使用的命题/);
 
 console.log("sandbox HIT bridge and display regression passed");

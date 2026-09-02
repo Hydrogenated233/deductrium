@@ -207,7 +207,8 @@ hit Circle2 : U
 - 三维扩展第一批已支持 `path3` 的结构化解析：端点必须是直接的二阶路径构造子应用，统一参数、局部参数、共享一阶路径边界和点边界都会被检查；`path4` 及更高维仍明确拒绝。
 - 三维声明已生成真正的 dependent/recursor coherence binder、点 iota 参数和 metadata v5；Core 会重建并验证三阶端点、统一参数及共享低维边界。
 - 二维非依赖 action 现已额外生成兼容的新强计算槽 `ap2_<path2>`：它把二阶 action 与经两端 `ap_<path1>` 校正后的用户 `q2` 关联；旧 `ap_<path2>` 类型保持不变。
-- 三阶 `apd_`/`ap_` 命题计算规则仍未开放。下一批将使用已认证的二维强计算边界，生成并认证经过边界校正的三维计算公式。
+- 非依赖三阶 action 已生成 `ap3_<path3>`：它使用两端已认证的 `ap2_<path2>`、低维 `ap_<path1>` 和用户 `q3` 构造校正公式，并由 Core 独立重建类型。
+- 依赖三阶 `apd3_<path3>` 命题计算规则仍未开放；下一批需要加入随二阶路径变化的 dependent correction naturality。
 
 ### 验收标准
 
