@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 
 import { ASTParser } from "../js/tt/astparser.js";
 import { TTCoreEngine } from "../js/tt/engine.js";
-import { lowerSandboxHit, parseSandboxHit } from "../js/tt/sandbox.js";
+import {
+    SandboxEnvironment,
+    creativeSandboxSystemRuleIds,
+    lowerSandboxHit,
+    parseSandboxHit
+} from "../js/tt/sandbox.js";
 
 const parser = new ASTParser();
 const headName = ast => {
@@ -31,10 +36,52 @@ assert.equal(headName(cell.targetPath), "loopB3");
 assert.equal(headName(cell.sourcePoint), "base3");
 assert.equal(headName(cell.targetPoint), "base3");
 
-assert.throws(
-    () => lowerSandboxHit(parsed),
-    /三维 HIT 已完成结构解析.*Core lowering 尚未启用/
+const bundle = lowerSandboxHit(parsed);
+assert.equal(bundle.metadata.version, 5);
+assert.equal(bundle.metadata.kind, "hit3");
+assert.equal(bundle.metadata.dimension, 3);
+assert.equal(bundle.metadata.ruleSchemaVersion, 1);
+assert.equal(bundle.metadata.threePathConstructors[0].name, "cell3");
+assert.equal(bundle.metadata.threePathConstructors[0].computationName, undefined);
+assert.ok(bundle.auxiliaryTypes.some(([name]) => name === "cell3"));
+for (const name of ["apd_cell3", "@apd_cell3", "ap_cell3", "@ap_cell3"]) {
+    assert.equal(bundle.auxiliaryTypes.some(([entryName]) => entryName === name), false);
+    assert.equal(bundle.computeRules[name], undefined);
+}
+assert.equal(bundle.computeRules.cell3, undefined);
+
+const sandbox = new SandboxEnvironment({ systemRuleIds: creativeSandboxSystemRuleIds });
+const added = sandbox.add(cubeSource);
+assert.equal(added.ok, true, added.error);
+assert.equal(added.declarations[0].status, "valid");
+assert.ok(added.declarations[0].generatedNames.includes("cell3"));
+assert.equal(added.declarations[0].generatedNames.includes("apd_cell3"), false);
+assert.equal(sandbox.check("cell3 : faceA3 = faceB3").ok, true);
+
+const useInd3 = sandbox.add(
+    "useInd3 := λC:Cube3→U.λc:(C base3)."
+        + "λp0:((trans C loopA3 c)=c)."
+        + "λp1:((trans C loopB3 c)=c)."
+        + "λp2a:(p0=((trans2 C faceA3 c)▪p1))."
+        + "λp2b:(p0=((trans2 C faceB3 c)▪p1))."
+        + "λp3:((trans (λr:(loopA3=loopB3).p0=((trans2 C r c)▪p1)) cell3 p2a)=p2b)."
+        + "ind_Cube3 C c p0 p1 p2a p2b p3"
 );
+assert.equal(useInd3.ok, true, useInd3.error);
+assert.equal(sandbox.check("useInd3").ok, true);
+assert.equal(
+    sandbox.check("rec_Cube3 True true rfl rfl rfl rfl rfl base3 === true").ok,
+    true
+);
+
+const bridge = sandbox.bridge();
+assert.equal(bridge.inductives[0].metadata.kind, "hit3");
+assert.equal(bridge.inductives[0].metadata.threePathConstructors[0].name, "cell3");
+const restored = new SandboxEnvironment({ systemRuleIds: creativeSandboxSystemRuleIds });
+restored.load(JSON.parse(sandbox.serialize()));
+assert.equal(restored.getDeclarations()[0].status, "valid");
+assert.equal(restored.bridge().inductives[0].metadata.kind, "hit3");
+assert.equal(restored.check("cell3 : faceA3 = faceB3").ok, true);
 
 const parameterized = parseSandboxHit(
     "hit CubeP (A : U) : U "
@@ -104,21 +151,59 @@ assert.throws(
     /最高只解析三维 HIT.*path4/
 );
 
+const register = candidate => {
+    const engine = new TTCoreEngine();
+    engine.configure({ unlockedTypes: creativeSandboxSystemRuleIds });
+    return engine.core.registerSystemInductive(candidate);
+};
+assert.doesNotThrow(() => register(structuredClone(bundle)));
+assert.doesNotThrow(() => register(lowerSandboxHit(parameterized)));
+
+const wrongKind = structuredClone(bundle);
+wrongKind.metadata.kind = "hit2";
+wrongKind.metadata.dimension = 2;
+assert.throws(() => register(wrongKind), /二维 HIT metadata 不能包含三阶路径构造子/);
+
+const wrongBoundary = structuredClone(bundle);
+wrongBoundary.metadata.threePathConstructors[0].sourcePath = parser.parse("loopB3");
+assert.throws(() => register(wrongBoundary), /边界 metadata 不一致/);
+
+const wrongEndpoint = structuredClone(bundle);
+wrongEndpoint.metadata.threePathConstructors[0].left = parser.parse("faceB3");
+assert.throws(() => register(wrongEndpoint), /端点与 metadata 不一致/);
+
+const prematureComputation = structuredClone(bundle);
+prematureComputation.metadata.threePathConstructors[0].computationName = "apd_cell3";
+assert.throws(() => register(prematureComputation), /三维 HIT 计算定理尚未开放/);
+
+const missingArgumentNames = structuredClone(bundle);
+delete missingArgumentNames.metadata.threePathConstructors[0].argumentNames;
+assert.throws(() => register(missingArgumentNames), /argumentNames 与 telescope 不一致/);
+
+const definitionalCell = structuredClone(bundle);
+definitionalCell.computeRules.cell3 = [{
+    pattern: [parser.parse("cell3")],
+    result: parser.parse("faceA3")
+}];
+assert.throws(() => register(definitionalCell), /路径构造子不能注册为定义计算规则/);
+
+const forgedCoherence = structuredClone(bundle);
+const replaceThreeCoherenceWithTrue = ast => {
+    if (!ast) return;
+    if ((ast.type === "P" || ast.type === "->")
+        && (ast.name === "p3_0" || ast.name === "q3_0")) {
+        ast.nodes[0] = parser.parse("True");
+    }
+    for (const child of ast.nodes ?? []) replaceThreeCoherenceWithTrue(child);
+};
+replaceThreeCoherenceWithTrue(forgedCoherence.eliminator[1]);
+replaceThreeCoherenceWithTrue(forgedCoherence.recursor[1]);
+for (const [, type] of forgedCoherence.auxiliaryTypes) {
+    replaceThreeCoherenceWithTrue(type);
+}
 assert.throws(
-    () => new TTCoreEngine().core.registerSystemInductive({
-        type: ["UnsafeHit3", parser.parse("U")],
-        constructors: [],
-        metadata: {
-            version: 5,
-            kind: "hit3",
-            dimension: 3,
-            ruleSchemaVersion: 1,
-            typeName: "UnsafeHit3",
-            eliminatorName: "ind_UnsafeHit3",
-            constructors: []
-        }
-    }),
-    /Core 注册尚未启用.*拒绝未经认证的三阶 coherence/
+    () => register(forgedCoherence),
+    /三阶 coherence cell3 与 metadata 不一致/
 );
 
-console.log("sandbox third-path parser boundary regression passed");
+console.log("sandbox third-path lowering and Core boundary regression passed");

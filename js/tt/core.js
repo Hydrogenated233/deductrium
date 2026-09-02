@@ -469,7 +469,8 @@ function validateSystemInductiveComputeRules(bundle, rulesByHead, parameters, in
         const metadata = bundle.metadata;
         const constructorCount = metadata.constructors.length;
         const coherenceCount = (metadata.pathConstructors?.length ?? 0)
-            + (metadata.twoPathConstructors?.length ?? 0);
+            + (metadata.twoPathConstructors?.length ?? 0)
+            + (metadata.threePathConstructors?.length ?? 0);
         for (const constructor of metadata.constructors) {
             if (!Array.isArray(constructor.argumentNames)
                 || constructor.argumentNames.length !== constructor.argumentTypes.length
@@ -1156,7 +1157,8 @@ export class Core {
         const constructorIndex = new Map(metadata.constructors.map((constructor, index) => [constructor.name, index]));
         const constructorSchemas = new Map(metadata.constructors.map(constructor => [constructor.name, constructor]));
         const coherenceCount = (metadata.pathConstructors?.length ?? 0)
-            + (metadata.twoPathConstructors?.length ?? 0);
+            + (metadata.twoPathConstructors?.length ?? 0)
+            + (metadata.threePathConstructors?.length ?? 0);
         let captureSequence = 0;
         const instantiateBinder = (cursor, argument) => {
             if ((cursor.type !== "P" && cursor.type !== "->")
@@ -1312,11 +1314,6 @@ export class Core {
             && bundle.metadata.ruleSchemaVersion !== 1) {
             throw new Error(`不支持的归纳计算规则 schema：${bundle.metadata.ruleSchemaVersion}`);
         }
-        if (bundle.metadata?.kind === "hit3"
-            || metadataVersion === 5
-            || bundle.metadata?.threePathConstructors?.length) {
-            throw new Error("三维 HIT metadata 已定义，但 Core 注册尚未启用；拒绝未经认证的三阶 coherence");
-        }
         if (bundle.metadata?.ruleSchemaVersion === 1) {
             const metadata = bundle.metadata;
             const actualConstructorNames = bundle.constructors.map(([name]) => name);
@@ -1335,6 +1332,7 @@ export class Core {
             const expectedAuxiliaryNames = [
                 ...(metadata.pathConstructors ?? []).map(path => path.name),
                 ...(metadata.twoPathConstructors ?? []).map(path => path.name),
+                ...(metadata.threePathConstructors ?? []).map(path => path.name),
                 metadata.fullEliminatorName,
                 metadata.fullRecursorName,
                 ...(metadata.pathConstructors ?? []).flatMap(path => [
@@ -1387,8 +1385,24 @@ export class Core {
             }
             twoPathConstructorNames.add(path.name);
         }
-        if (bundle.metadata?.kind === "hit1" || bundle.metadata?.kind === "hit2") {
-            const hitDimension = bundle.metadata.kind === "hit2" ? 2 : 1;
+        const threePathConstructorNames = new Set();
+        for (const path of bundle.metadata?.threePathConstructors ?? []) {
+            if (!path.name || threePathConstructorNames.has(path.name)) {
+                throw new Error(`三阶路径构造子 metadata 名称冲突：${path.name || ""}`);
+            }
+            if (pointConstructorNames.has(path.name)
+                || pathConstructorNames.has(path.name)
+                || twoPathConstructorNames.has(path.name)) {
+                throw new Error(`三阶路径构造子不能与低维构造子同名：${path.name}`);
+            }
+            threePathConstructorNames.add(path.name);
+        }
+        if (bundle.metadata?.kind === "hit1"
+            || bundle.metadata?.kind === "hit2"
+            || bundle.metadata?.kind === "hit3") {
+            const hitDimension = bundle.metadata.kind === "hit3"
+                ? 3
+                : bundle.metadata.kind === "hit2" ? 2 : 1;
             if (bundle.metadata.dimension !== hitDimension) {
                 throw new Error(`HIT metadata 维度必须为 ${hitDimension}：${bundle.metadata.dimension ?? ""}`);
             }
@@ -1398,8 +1412,18 @@ export class Core {
             if (bundle.metadata.kind === "hit2" && !bundle.metadata.twoPathConstructors?.length) {
                 throw new Error("二维 HIT metadata 至少需要一个二阶路径构造子");
             }
-            if (bundle.metadata.kind === "hit1" && bundle.metadata.twoPathConstructors?.length) {
-                throw new Error("一阶 HIT metadata 不能包含二阶路径构造子");
+            if (bundle.metadata.kind === "hit3"
+                && (!bundle.metadata.twoPathConstructors?.length
+                    || !bundle.metadata.threePathConstructors?.length)) {
+                throw new Error("三维 HIT metadata 至少需要二阶和三阶路径构造子");
+            }
+            if (bundle.metadata.kind === "hit1"
+                && (bundle.metadata.twoPathConstructors?.length
+                    || bundle.metadata.threePathConstructors?.length)) {
+                throw new Error("一阶 HIT metadata 不能包含高阶路径构造子");
+            }
+            if (bundle.metadata.kind === "hit2" && bundle.metadata.threePathConstructors?.length) {
+                throw new Error("二维 HIT metadata 不能包含三阶路径构造子");
             }
             if (bundlePointConstructorNames.length !== metadataPointConstructorNames.length
                 || bundlePointConstructorNames.some((name, index) => metadataPointConstructorNames[index] !== name)) {
@@ -1437,7 +1461,8 @@ export class Core {
         }
         for (const path of [
             ...(bundle.metadata?.pathConstructors ?? []),
-            ...(bundle.metadata?.twoPathConstructors ?? [])
+            ...(bundle.metadata?.twoPathConstructors ?? []),
+            ...(bundle.metadata?.threePathConstructors ?? [])
         ]) {
             for (const head of new Set([
                 path.name,
@@ -1473,7 +1498,9 @@ export class Core {
         const constructorTypes = new Map(normalizedEntries
             .filter(([name]) => bundlePointConstructorNames.includes(name)));
         validateSystemInductiveComputeRules(bundle, normalizedRules, parameters, indexCount, constructorTypes, ast => this.desugar(Core.clone(ast), true));
-        if (bundle.metadata?.kind === "hit1" || bundle.metadata?.kind === "hit2") {
+        if (bundle.metadata?.kind === "hit1"
+            || bundle.metadata?.kind === "hit2"
+            || bundle.metadata?.kind === "hit3") {
             const metadata = bundle.metadata;
             if (indexCount !== 0)
                 throw new Error("HIT metadata 暂不支持索引");
@@ -1527,6 +1554,12 @@ export class Core {
                 }
             }
             for (const path of metadata.pathConstructors ?? []) {
+                if (metadata.ruleSchemaVersion === 1
+                    && (!Array.isArray(path.argumentNames)
+                        || path.argumentNames.length !== path.argumentTypes.length
+                        || new Set(path.argumentNames).size !== path.argumentNames.length)) {
+                    throw new Error(`一阶 HIT 路径构造子 ${path.name} argumentNames 与 telescope 不一致`);
+                }
                 const pathType = auxiliaryTypes.get(path.name);
                 if (!pathType) {
                     throw new Error(`一阶 HIT metadata 路径构造子不存在：${path.name}`);
@@ -1568,6 +1601,7 @@ export class Core {
                 }
             }
             const pathMetadataByName = new Map((metadata.pathConstructors ?? []).map(path => [path.name, path]));
+            const twoPathMetadataByName = new Map((metadata.twoPathConstructors ?? []).map(path => [path.name, path]));
             const validateTwoPathEndpoint = (owner, side, endpoint, referencedName) => {
                 const referencedPath = pathMetadataByName.get(referencedName);
                 if (!referencedPath) {
@@ -1595,8 +1629,31 @@ export class Core {
                             + parameter.name);
                     }
                 }
+                const argumentNames = referencedPath.argumentNames ?? [];
+                if (metadata.ruleSchemaVersion === 1
+                    && (argumentNames.length !== referencedPath.argumentTypes.length
+                        || new Set(argumentNames).size !== argumentNames.length)) {
+                    throw new Error(`二维 HIT 一阶路径 ${referencedName} argumentNames 与 telescope 不一致`);
+                }
+                const replacements = new Map();
+                parameters.forEach((parameter, index) => {
+                    replacements.set(parameter.name, application.arguments[index]);
+                });
+                argumentNames.forEach((name, index) => {
+                    replacements.set(name, application.arguments[parameters.length + index]);
+                });
+                return {
+                    sourcePoint: substituteGeneratedFreeNames(normalizedMetadataAst(referencedPath.left), replacements),
+                    targetPoint: substituteGeneratedFreeNames(normalizedMetadataAst(referencedPath.right), replacements)
+                };
             };
             for (const path of metadata.twoPathConstructors ?? []) {
+                if (metadata.ruleSchemaVersion === 1
+                    && (!Array.isArray(path.argumentNames)
+                        || path.argumentNames.length !== path.argumentTypes.length
+                        || new Set(path.argumentNames).size !== path.argumentNames.length)) {
+                    throw new Error(`二维 HIT 二阶路径构造子 ${path.name} argumentNames 与 telescope 不一致`);
+                }
                 const pathType = auxiliaryTypes.get(path.name);
                 if (!pathType) {
                     throw new Error(`二维 HIT metadata 二阶路径构造子不存在：${path.name}`);
@@ -1611,8 +1668,12 @@ export class Core {
                     || !sameGeneratedAst(endpoints[1], normalizedMetadataAst(path.right))) {
                     throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 端点与 metadata 不一致`);
                 }
-                validateTwoPathEndpoint(path.name, "左", normalizedMetadataAst(path.left), path.leftPath);
-                validateTwoPathEndpoint(path.name, "右", normalizedMetadataAst(path.right), path.rightPath);
+                const leftEndpoint = validateTwoPathEndpoint(path.name, "左", normalizedMetadataAst(path.left), path.leftPath);
+                const rightEndpoint = validateTwoPathEndpoint(path.name, "右", normalizedMetadataAst(path.right), path.rightPath);
+                if (!sameGeneratedAstAlpha(leftEndpoint.sourcePoint, rightEndpoint.sourcePoint)
+                    || !sameGeneratedAstAlpha(leftEndpoint.targetPoint, rightEndpoint.targetPoint)) {
+                    throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 的点边界不一致`);
+                }
                 const computationNames = [
                     `apd_${path.name}`,
                     `@apd_${path.name}`,
@@ -1638,6 +1699,228 @@ export class Core {
                         throw new Error(`二维 HIT 二阶路径计算项 ${computationName} 不是等式命题`);
                     }
                 }
+            }
+            const validateThreePathEndpoint = (owner, side, endpoint, referencedName) => {
+                const referencedPath = twoPathMetadataByName.get(referencedName);
+                if (!referencedPath) {
+                    throw new Error(`三维 HIT 三阶路径构造子 ${owner} 的二阶路径引用不存在：${referencedName}`);
+                }
+                const application = generatedApplicationParts(endpoint);
+                const endpointHead = application.head.type === "var"
+                    ? application.head.name
+                    : "";
+                if (endpointHead !== referencedName) {
+                    throw new Error(`三维 HIT 三阶路径构造子 ${owner} ${side}端点头常量与 ${side}TwoPath metadata 不一致：`
+                        + `${endpointHead || "<非常量>"} != ${referencedName}`);
+                }
+                const expectedArgumentCount = parameters.length
+                    + referencedPath.argumentTypes.length;
+                if (application.arguments.length !== expectedArgumentCount) {
+                    throw new Error(`三维 HIT 三阶路径构造子 ${owner} ${side}端点参数数量与二阶路径 `
+                        + `${referencedName} telescope 不一致：需要 ${expectedArgumentCount} 个，`
+                        + `实际 ${application.arguments.length} 个`);
+                }
+                for (let index = 0; index < parameters.length; index++) {
+                    const parameter = parameters[index];
+                    if (!sameGeneratedAst(application.arguments[index], wrapVar(parameter.name))) {
+                        throw new Error(`三维 HIT 三阶路径构造子 ${owner} ${side}端点未保持统一参数：`
+                            + parameter.name);
+                    }
+                }
+                const argumentNames = referencedPath.argumentNames ?? [];
+                if (argumentNames.length !== referencedPath.argumentTypes.length
+                    || new Set(argumentNames).size !== argumentNames.length) {
+                    throw new Error(`三维 HIT 二阶路径 ${referencedName} argumentNames 与 telescope 不一致`);
+                }
+                const replacements = new Map();
+                parameters.forEach((parameter, index) => {
+                    replacements.set(parameter.name, application.arguments[index]);
+                });
+                argumentNames.forEach((name, index) => {
+                    replacements.set(name, application.arguments[parameters.length + index]);
+                });
+                const sourcePath = substituteGeneratedFreeNames(normalizedMetadataAst(referencedPath.left), replacements);
+                const targetPath = substituteGeneratedFreeNames(normalizedMetadataAst(referencedPath.right), replacements);
+                validateTwoPathEndpoint(owner, `${side}端点的来源`, sourcePath, referencedPath.leftPath);
+                validateTwoPathEndpoint(owner, `${side}端点的目标`, targetPath, referencedPath.rightPath);
+                return { sourcePath, targetPath };
+            };
+            for (const path of metadata.threePathConstructors ?? []) {
+                if (!Array.isArray(path.argumentNames)
+                    || path.argumentNames.length !== path.argumentTypes.length
+                    || new Set(path.argumentNames).size !== path.argumentNames.length) {
+                    throw new Error(`三维 HIT 三阶路径构造子 ${path.name} argumentNames 与 telescope 不一致`);
+                }
+                if (path.computationName !== undefined) {
+                    throw new Error(`三维 HIT 计算定理尚未开放：${path.computationName}`);
+                }
+                const pathType = auxiliaryTypes.get(path.name);
+                if (!pathType) {
+                    throw new Error(`三维 HIT metadata 三阶路径构造子不存在：${path.name}`);
+                }
+                const conclusion = consumeTelescope(pathType, [
+                    ...parameters.map(parameter => parameter.type),
+                    ...path.argumentTypes.map(normalizedMetadataAst)
+                ], `三维 HIT 三阶路径构造子 ${path.name}`);
+                const endpoints = generatedEqualityEndpoints(conclusion);
+                if (!endpoints
+                    || !sameGeneratedAst(endpoints[0], normalizedMetadataAst(path.left))
+                    || !sameGeneratedAst(endpoints[1], normalizedMetadataAst(path.right))) {
+                    throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 端点与 metadata 不一致`);
+                }
+                const leftEndpoint = validateThreePathEndpoint(path.name, "左", normalizedMetadataAst(path.left), path.leftTwoPath);
+                const rightEndpoint = validateThreePathEndpoint(path.name, "右", normalizedMetadataAst(path.right), path.rightTwoPath);
+                if (!sameGeneratedAstAlpha(leftEndpoint.sourcePath, rightEndpoint.sourcePath)
+                    || !sameGeneratedAstAlpha(leftEndpoint.targetPath, rightEndpoint.targetPath)) {
+                    throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 的二阶路径边界不一致`);
+                }
+                if (!sameGeneratedAstAlpha(leftEndpoint.sourcePath, normalizedMetadataAst(path.sourcePath))
+                    || !sameGeneratedAstAlpha(leftEndpoint.targetPath, normalizedMetadataAst(path.targetPath))) {
+                    throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 的边界 metadata 不一致`);
+                }
+            }
+            if (metadata.kind === "hit3") {
+                const readTelescope = (source, label) => {
+                    const binders = [];
+                    let cursor = source;
+                    while ((cursor.type === "P" || cursor.type === "->")
+                        && cursor.nodes?.[0] && cursor.nodes?.[1]) {
+                        binders.push({
+                            name: cursor.type === "P" ? cursor.name : "",
+                            type: Core.clone(cursor.nodes[0])
+                        });
+                        cursor = cursor.nodes[1];
+                    }
+                    if (!binders.length)
+                        throw new Error(`${label} telescope 不完整`);
+                    return binders;
+                };
+                const surfaceEquality = (left, right) => ({
+                    type: "=",
+                    name: "",
+                    nodes: [left, right]
+                });
+                const surfaceCompose = (left, right) => ({
+                    type: "*",
+                    name: "",
+                    nodes: [left, right]
+                });
+                const surfaceLambda = (name, type, body) => ({
+                    type: "L",
+                    name,
+                    nodes: [type, body]
+                });
+                const surfaceWrapPis = (names, types, body) => {
+                    let result = body;
+                    for (let index = names.length - 1; index >= 0; index--) {
+                        result = {
+                            type: "P",
+                            name: names[index],
+                            nodes: [Core.clone(types[index]), result]
+                        };
+                    }
+                    return result;
+                };
+                const methodValue = (endpoint, entries, methodNames, label) => {
+                    const application = generatedApplicationParts(endpoint);
+                    const headName = generatedFreeConstantName(application.head) ?? "";
+                    const index = entries.findIndex(entry => entry.name === headName);
+                    if (index < 0)
+                        throw new Error(`${label} 引用了未知端点：${headName}`);
+                    return wrapApply(wrapVar(methodNames[index]), ...application.arguments.slice(parameters.length).map(argument => Core.clone(argument)));
+                };
+                const branchValue = (point, branchNames, label) => {
+                    const application = generatedApplicationParts(point);
+                    const headName = generatedFreeConstantName(application.head) ?? "";
+                    const index = metadata.constructors.findIndex(entry => entry.name === headName);
+                    if (index < 0)
+                        throw new Error(`${label} 引用了未知点端点：${headName}`);
+                    return wrapApply(wrapVar(branchNames[index]), ...application.arguments.slice(parameters.length).map(argument => Core.clone(argument)));
+                };
+                const validateThreeCoherenceTelescope = (source, full, dependent, label) => {
+                    const binders = readTelescope(source, label);
+                    const pathEntries = metadata.pathConstructors ?? [];
+                    const twoPathEntries = metadata.twoPathConstructors ?? [];
+                    const threePathEntries = metadata.threePathConstructors ?? [];
+                    const expectedCount = (full ? 1 : 0)
+                        + parameters.length
+                        + 1
+                        + metadata.constructors.length
+                        + pathEntries.length
+                        + twoPathEntries.length
+                        + threePathEntries.length
+                        + 1;
+                    if (binders.length !== expectedCount) {
+                        throw new Error(`${label} telescope 长度与三维 metadata 不一致`);
+                    }
+                    let offset = full ? 1 : 0;
+                    offset += parameters.length;
+                    const motiveName = binders[offset++].name;
+                    const branchNames = binders
+                        .slice(offset, offset + metadata.constructors.length)
+                        .map(binder => binder.name);
+                    offset += metadata.constructors.length;
+                    const pathMethodNames = binders
+                        .slice(offset, offset + pathEntries.length)
+                        .map(binder => binder.name);
+                    offset += pathEntries.length;
+                    const twoPathMethodNames = binders
+                        .slice(offset, offset + twoPathEntries.length)
+                        .map(binder => binder.name);
+                    offset += twoPathEntries.length;
+                    for (let index = 0; index < threePathEntries.length; index++) {
+                        const path = threePathEntries[index];
+                        const argumentNames = path.argumentNames ?? [];
+                        const argumentTypes = path.argumentTypes.map(normalizedMetadataAst);
+                        const leftMethod = methodValue(normalizedMetadataAst(path.left), twoPathEntries, twoPathMethodNames, `${label} ${path.name}`);
+                        const rightMethod = methodValue(normalizedMetadataAst(path.right), twoPathEntries, twoPathMethodNames, `${label} ${path.name}`);
+                        let expectedBody;
+                        if (dependent) {
+                            const sourcePath = normalizedMetadataAst(path.sourcePath);
+                            const targetPath = normalizedMetadataAst(path.targetPath);
+                            const sourceMethod = methodValue(sourcePath, pathEntries, pathMethodNames, `${label} ${path.name}`);
+                            const targetMethod = methodValue(targetPath, pathEntries, pathMethodNames, `${label} ${path.name}`);
+                            const sourcePathName = generatedFreeConstantName(generatedApplicationParts(sourcePath).head) ?? "";
+                            const pointBoundary = validateTwoPathEndpoint(path.name, "三阶 coherence 来源", sourcePath, sourcePathName);
+                            const pointValue = branchValue(pointBoundary.sourcePoint, branchNames, `${label} ${path.name}`);
+                            const occupied = new Set([
+                                ...binders.slice(0, offset).map(binder => binder.name),
+                                ...argumentNames
+                            ]);
+                            let pathValueName = "twoPathValue";
+                            while (occupied.has(pathValueName))
+                                pathValueName += "_";
+                            const pathValue = wrapVar(pathValueName);
+                            const family = surfaceLambda(pathValueName, surfaceEquality(Core.clone(sourcePath), Core.clone(targetPath)), surfaceEquality(sourceMethod, surfaceCompose(wrapApply(wrapVar("trans2"), wrapVar(motiveName), pathValue, pointValue), targetMethod)));
+                            const pathTerm = wrapApply(wrapVar(path.name), ...parameters.map(parameter => wrapVar(parameter.name)), ...argumentNames.map(wrapVar));
+                            expectedBody = surfaceEquality(wrapApply(wrapVar("trans"), family, pathTerm, leftMethod), rightMethod);
+                        }
+                        else {
+                            expectedBody = surfaceEquality(leftMethod, rightMethod);
+                        }
+                        const expected = normalizedMetadataAst(surfaceWrapPis(argumentNames, argumentTypes, expectedBody));
+                        const actual = binders[offset + index]?.type;
+                        if (!actual || !sameGeneratedAstAlpha(actual, expected)) {
+                            throw new Error(`${label} 三阶 coherence ${path.name} 与 metadata 不一致`);
+                        }
+                    }
+                };
+                const publicEliminatorType = bundle.eliminator?.[1];
+                const fullEliminatorType = metadata.fullEliminatorName
+                    ? auxiliaryTypes.get(metadata.fullEliminatorName)
+                    : undefined;
+                const publicRecursorType = bundle.recursor?.[1];
+                const fullRecursorType = metadata.fullRecursorName
+                    ? auxiliaryTypes.get(metadata.fullRecursorName)
+                    : undefined;
+                if (!publicEliminatorType || !fullEliminatorType
+                    || !publicRecursorType || !fullRecursorType) {
+                    throw new Error("三维 HIT 消去器/递归器槽位不完整");
+                }
+                validateThreeCoherenceTelescope(normalizedMetadataAst(publicEliminatorType), false, true, "公开消去器");
+                validateThreeCoherenceTelescope(fullEliminatorType, true, true, "完整消去器");
+                validateThreeCoherenceTelescope(normalizedMetadataAst(publicRecursorType), false, false, "公开递归器");
+                validateThreeCoherenceTelescope(fullRecursorType, true, false, "完整递归器");
             }
             requirePublicSlot("公开消去器", metadata.eliminatorName, bundle.eliminator);
             requireFullSlot("完整消去器", metadata.fullEliminatorName, metadata.eliminatorName);
@@ -1770,6 +2053,7 @@ export class Core {
                 pathConstructors: bundle.metadata.pathConstructors?.map(ctor => ({
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
                     left: Core.clone(ctor.left),
                     right: Core.clone(ctor.right),
                     computationName: ctor.computationName
@@ -1777,6 +2061,7 @@ export class Core {
                 twoPathConstructors: bundle.metadata.twoPathConstructors?.map(ctor => ({
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
                     left: Core.clone(ctor.left),
                     right: Core.clone(ctor.right),
                     leftPath: ctor.leftPath,
@@ -1786,6 +2071,7 @@ export class Core {
                 threePathConstructors: bundle.metadata.threePathConstructors?.map(ctor => ({
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
                     left: Core.clone(ctor.left),
                     right: Core.clone(ctor.right),
                     leftTwoPath: ctor.leftTwoPath,
@@ -1881,6 +2167,7 @@ export class Core {
             pathConstructors: metadata.pathConstructors?.map(ctor => ({
                 name: ctor.name,
                 argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
                 left: Core.clone(ctor.left),
                 right: Core.clone(ctor.right),
                 computationName: ctor.computationName
@@ -1888,6 +2175,7 @@ export class Core {
             twoPathConstructors: metadata.twoPathConstructors?.map(ctor => ({
                 name: ctor.name,
                 argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
                 left: Core.clone(ctor.left),
                 right: Core.clone(ctor.right),
                 leftPath: ctor.leftPath,
@@ -1897,6 +2185,7 @@ export class Core {
             threePathConstructors: metadata.threePathConstructors?.map(ctor => ({
                 name: ctor.name,
                 argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
                 left: Core.clone(ctor.left),
                 right: Core.clone(ctor.right),
                 leftTwoPath: ctor.leftTwoPath,

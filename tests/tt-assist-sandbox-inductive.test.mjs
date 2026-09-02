@@ -191,4 +191,31 @@ snapshot = surfaceHitEngine.apply("induction x");
 assert.equal(snapshot.goals.length, 4,
     "a 2-dimensional HIT induction must expose point, path, and coherence branches");
 
+const cubeHitBundle = lowerSandboxHit(parseSandboxHit(
+    "hit CubeAssist : U "
+        + "| baseCubeAssist : CubeAssist "
+        + "| loopCubeAssistA : baseCubeAssist=baseCubeAssist "
+        + "| loopCubeAssistB : baseCubeAssist=baseCubeAssist "
+        + "| path2 faceCubeAssistA : loopCubeAssistA=loopCubeAssistB "
+        + "| path2 faceCubeAssistB : loopCubeAssistA=loopCubeAssistB "
+        + "| path3 cellCubeAssist : faceCubeAssistA=faceCubeAssistB"
+));
+const cubeHitEngine = new TTAssistEngine();
+cubeHitEngine.configure({
+    unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))],
+    trustedInductives: [cubeHitBundle],
+    inferDisplayMode: "_",
+    timeout: 30_000,
+    language: "zh"
+});
+
+snapshot = cubeHitEngine.start("CubeAssist", options);
+assert.equal(snapshot.tactics.includes("exact baseCubeAssist"), true,
+    "constructor recommendations must still expose only point constructors");
+snapshot = cubeHitEngine.start("Πx:CubeAssist,x=x", options);
+snapshot = cubeHitEngine.apply("intro x");
+snapshot = cubeHitEngine.apply("induction x");
+assert.equal(snapshot.goals.length, 6,
+    "a 3-dimensional HIT induction must expose point, path, 2-path, and 3-path branches");
+
 console.log("sandbox ordinary-inductive proof-assistant regression passed");

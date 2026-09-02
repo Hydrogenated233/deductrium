@@ -46,7 +46,7 @@ export function sandboxDeclarationDisplayKind(declaration) {
         return {
             kind: "HIT",
             trust: hit?.threePathConstructors?.length
-                ? "三维高阶路径（实验解析）"
+                ? "三维高阶路径归纳（实验）"
                 : hit?.twoPathConstructors?.length
                     ? "二维高阶路径归纳"
                     : "一阶路径归纳",

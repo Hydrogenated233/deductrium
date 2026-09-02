@@ -124,6 +124,7 @@ export function cloneInductiveBundle(bundle: CoreSystemInductiveBundle): CoreSys
                 pathConstructors: bundle.metadata.pathConstructors?.map(ctor => ({
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
                     left: Core.clone(ctor.left),
                     right: Core.clone(ctor.right),
                     computationName: ctor.computationName
@@ -131,6 +132,7 @@ export function cloneInductiveBundle(bundle: CoreSystemInductiveBundle): CoreSys
                 twoPathConstructors: bundle.metadata.twoPathConstructors?.map(ctor => ({
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
                     left: Core.clone(ctor.left),
                     right: Core.clone(ctor.right),
                     leftPath: ctor.leftPath,
@@ -140,6 +142,7 @@ export function cloneInductiveBundle(bundle: CoreSystemInductiveBundle): CoreSys
                 threePathConstructors: bundle.metadata.threePathConstructors?.map(ctor => ({
                     name: ctor.name,
                     argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
+                    argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
                     left: Core.clone(ctor.left),
                     right: Core.clone(ctor.right),
                     leftTwoPath: ctor.leftTwoPath,

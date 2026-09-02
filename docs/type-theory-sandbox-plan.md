@@ -205,8 +205,8 @@ hit Circle2 : U
 
 - 二维 HIT 已完成结构解析、消去器 lowering、命题计算规则和 Core schema 认证。
 - 三维扩展第一批已支持 `path3` 的结构化解析：端点必须是直接的二阶路径构造子应用，统一参数、局部参数、共享一阶路径边界和点边界都会被检查；`path4` 及更高维仍明确拒绝。
-- 三维声明目前只完成解析、复制和显示通路。Core 注册与 lowering 仍明确拒绝，防止把依赖三阶 coherence 错误降级成二维等式。
-- 下一批需要加入真正的三阶 dependent/recursor coherence binder、metadata v5 的 Core 重建校验，并先补强二维非依赖计算定理，之后才能开放 `apd_`/`ap_` 三维命题计算规则。
+- 三维声明已生成真正的 dependent/recursor coherence binder、点 iota 参数和 metadata v5；Core 会重建并验证三阶端点、统一参数及共享低维边界。
+- 三阶 `apd_`/`ap_` 命题计算规则仍未开放。下一批需要先补强二维非依赖计算定理，再生成并认证经过边界校正的三维计算公式。
 
 ### 验收标准
 

@@ -12,7 +12,7 @@ export const SANDBOX_VALIDATION_CACHE_VERSION = 1;
  * Bump whenever parsing, lowering, Core registration, or NbE cache semantics
  * change. Persisted validation data is an optimization hint, never authority.
  */
-export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit3-parser-v1-2026-09-02";
+export const SANDBOX_VALIDATION_SEMANTIC_EPOCH = "sandbox-nbe-hit3-binder-v1-2026-09-02";
 const SANDBOX_VALIDATION_CACHE_MAX_ENTRIES = 4_096;
 const SANDBOX_VALIDATION_CACHE_MAX_OBJECTS = 500_000;
 const SANDBOX_VALIDATION_CACHE_MAX_DEPTH = 256;
@@ -1424,6 +1424,15 @@ function sandboxHitPathMethodValue(endpoint, parameters, pathConstructors, metho
     const arguments_ = terms.slice(1 + parameters.length).map(argument => Core.clone(argument));
     return sandboxApply(sandboxVar(methodNames[pathIndex]), ...arguments_);
 }
+function sandboxHitTwoPathMethodValue(endpoint, parameters, twoPathConstructors, methodNames, owner) {
+    const terms = flattenApplication(endpoint);
+    const pathName = terms[0]?.type === "var" ? terms[0].name : "";
+    const pathIndex = twoPathConstructors.findIndex(path => path.name === pathName);
+    if (pathIndex < 0)
+        throw new Error(`未知的三维 HIT 二阶路径端点：${pathName || owner}`);
+    const arguments_ = terms.slice(1 + parameters.length).map(argument => Core.clone(argument));
+    return sandboxApply(sandboxVar(methodNames[pathIndex]), ...arguments_);
+}
 /**
  * Resolve one of a 2-path's endpoint paths together with the dependent
  * equality type required by its path method.  Keeping this information in one
@@ -1527,6 +1536,52 @@ function sandboxRenameHitTwoPathArguments(path, reserved) {
         right,
         leftPoint,
         rightPoint
+    };
+}
+function sandboxRenameHitThreePathArguments(path, reserved) {
+    const chosen = new Set(reserved);
+    const occupied = new Set(reserved);
+    for (const argument of path.arguments) {
+        occupied.add(argument.name);
+        collectSandboxAstNames(argument.type, occupied);
+    }
+    for (const ast of [
+        path.left,
+        path.right,
+        path.sourcePath,
+        path.targetPath,
+        path.sourcePoint,
+        path.targetPoint
+    ])
+        collectSandboxAstNames(ast, occupied);
+    const replacements = new Map();
+    const arguments_ = [];
+    for (const argument of path.arguments) {
+        const type = renameFreeInductiveNames(argument.type, replacements);
+        let name = argument.name;
+        if (chosen.has(name))
+            name = sandboxFreshName(`path3_${name}`, occupied);
+        else
+            occupied.add(name);
+        chosen.add(name);
+        replacements.set(argument.name, name);
+        arguments_.push({ name, type, typeSource: parser.stringify(type) });
+    }
+    const rename = (ast) => renameFreeInductiveNames(ast, replacements);
+    const left = rename(path.left);
+    const right = rename(path.right);
+    const type = sandboxWrapPis(arguments_, sandboxEquality(Core.clone(left), Core.clone(right)));
+    return {
+        ...path,
+        arguments: arguments_,
+        type,
+        typeSource: parser.stringify(type),
+        left,
+        right,
+        sourcePath: rename(path.sourcePath),
+        targetPath: rename(path.targetPath),
+        sourcePoint: rename(path.sourcePoint),
+        targetPoint: rename(path.targetPoint)
     };
 }
 function sandboxRenameHitUniformParameters(signature, reserved) {
@@ -1669,9 +1724,6 @@ export function lowerSandboxHit(signature) {
         throw new Error("一阶 HIT 第一版暂不支持索引");
     if (!signature.pathConstructors.length)
         throw new Error("一阶 HIT 至少需要一个一阶路径构造子");
-    if (signature.threePathConstructors.length) {
-        throw new Error("三维 HIT 已完成结构解析，但 Core lowering 尚未启用；不会把三阶 coherence 降级为二维规则");
-    }
     for (const constructor of signature.pointConstructors) {
         if (constructor.argumentAsts.some(argument => argument.recursiveTelescope !== null)) {
             throw new Error(`一阶 HIT 暂不支持递归点构造子：${constructor.name}`);
@@ -1694,6 +1746,13 @@ export function lowerSandboxHit(signature) {
             `ap_${path.name}`,
             `@ap_${path.name}`
         ]),
+        ...signature.threePathConstructors.flatMap(path => [
+            path.name,
+            `apd_${path.name}`,
+            `@apd_${path.name}`,
+            `ap_${path.name}`,
+            `@ap_${path.name}`
+        ]),
         `ind_${signature.name}`,
         `@ind_${signature.name}`,
         `rec_${signature.name}`,
@@ -1703,10 +1762,13 @@ export function lowerSandboxHit(signature) {
         "eq",
         "trans",
         "trans2",
+        "trans3",
         "apd",
         "ap",
         "apd2",
-        "ap2"
+        "ap2",
+        "apd3",
+        "ap3"
     ]);
     signature = sandboxRenameHitUniformParameters(signature, uniformParameterReserved);
     const ordinary = {
@@ -1742,6 +1804,7 @@ export function lowerSandboxHit(signature) {
         ...signature.pointConstructors.map(constructor => constructor.name),
         ...signature.pathConstructors.map(path => path.name),
         ...signature.twoPathConstructors.map(path => path.name),
+        ...signature.threePathConstructors.map(path => path.name),
         `ind_${signature.name}`,
         `@ind_${signature.name}`,
         `rec_${signature.name}`,
@@ -1750,16 +1813,21 @@ export function lowerSandboxHit(signature) {
     signature = {
         ...signature,
         pathConstructors: signature.pathConstructors.map(path => sandboxRenameHitPathArguments(path, reserved)),
-        twoPathConstructors: signature.twoPathConstructors.map(path => sandboxRenameHitTwoPathArguments(path, reserved))
+        twoPathConstructors: signature.twoPathConstructors.map(path => sandboxRenameHitTwoPathArguments(path, reserved)),
+        threePathConstructors: signature.threePathConstructors.map(path => sandboxRenameHitThreePathArguments(path, reserved))
     };
     const coherenceScope = new Set([
         ...reserved,
-        ...signature.pathConstructors.flatMap(path => path.arguments.map(argument => argument.name))
+        ...signature.pathConstructors.flatMap(path => path.arguments.map(argument => argument.name)),
+        ...signature.twoPathConstructors.flatMap(path => path.arguments.map(argument => argument.name)),
+        ...signature.threePathConstructors.flatMap(path => path.arguments.map(argument => argument.name))
     ]);
     const pathMethodNames = signature.pathConstructors.map((_, index) => sandboxFreshName(`p${index}`, coherenceScope));
     const recursorPathMethodNames = signature.pathConstructors.map((_, index) => sandboxFreshName(`q${index}`, coherenceScope));
     const dependentTwoPathMethodNames = signature.twoPathConstructors.map((_, index) => sandboxFreshName(`p2_${index}`, coherenceScope));
     const recursorTwoPathMethodNames = signature.twoPathConstructors.map((_, index) => sandboxFreshName(`q2_${index}`, coherenceScope));
+    const dependentThreePathMethodNames = signature.threePathConstructors.map((_, index) => sandboxFreshName(`p3_${index}`, coherenceScope));
+    const recursorThreePathMethodNames = signature.threePathConstructors.map((_, index) => sandboxFreshName(`q3_${index}`, coherenceScope));
     const parameterVars = signature.parameters.map(parameter => sandboxVar(parameter.name));
     const dependentPathBinders = [];
     const recursorPathBinders = [];
@@ -1818,13 +1886,51 @@ export function lowerSandboxHit(signature) {
             typeSource: parser.stringify(recursorType)
         });
     }
+    const dependentThreePathBinders = [];
+    const recursorThreePathBinders = [];
+    for (let index = 0; index < signature.threePathConstructors.length; index++) {
+        const path = signature.threePathConstructors[index];
+        const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
+        const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
+        const leftMethod = sandboxHitTwoPathMethodValue(path.left, signature.parameters, signature.twoPathConstructors, dependentTwoPathMethodNames, path.name);
+        const rightMethod = sandboxHitTwoPathMethodValue(path.right, signature.parameters, signature.twoPathConstructors, dependentTwoPathMethodNames, path.name);
+        const sourceMethod = sandboxHitPathMethodValue(path.sourcePath, signature.parameters, signature.pathConstructors, pathMethodNames, path.name);
+        const targetMethod = sandboxHitPathMethodValue(path.targetPath, signature.parameters, signature.pathConstructors, pathMethodNames, path.name);
+        const endpointValue = sandboxHitBranchValue(path.sourcePoint, signature.parameters, signature.pointConstructors, branchNames);
+        const lambdaScope = new Set([
+            ...coherenceScope,
+            ...path.arguments.map(argument => argument.name)
+        ]);
+        for (const ast of [path.sourcePath, path.targetPath, sourceMethod, targetMethod]) {
+            collectSandboxAstNames(ast, lambdaScope);
+        }
+        const pathValueName = sandboxFreshName("twoPathValue", lambdaScope);
+        const pathValue = sandboxVar(pathValueName);
+        const coherenceFamily = sandboxLambda(pathValueName, sandboxEquality(Core.clone(path.sourcePath), Core.clone(path.targetPath)), sandboxEquality(sourceMethod, sandboxCompose(sandboxApply(sandboxVar("trans2"), sandboxVar(motiveName), pathValue, endpointValue), targetMethod)));
+        const dependentType = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("trans"), coherenceFamily, pathTerm, leftMethod), rightMethod));
+        dependentThreePathBinders.push({
+            name: dependentThreePathMethodNames[index],
+            type: dependentType,
+            typeSource: parser.stringify(dependentType)
+        });
+        const leftRecursorMethod = sandboxHitTwoPathMethodValue(path.left, signature.parameters, signature.twoPathConstructors, recursorTwoPathMethodNames, path.name);
+        const rightRecursorMethod = sandboxHitTwoPathMethodValue(path.right, signature.parameters, signature.twoPathConstructors, recursorTwoPathMethodNames, path.name);
+        const recursorType = sandboxWrapPis(path.arguments, sandboxEquality(leftRecursorMethod, rightRecursorMethod));
+        recursorThreePathBinders.push({
+            name: recursorThreePathMethodNames[index],
+            type: recursorType,
+            typeSource: parser.stringify(recursorType)
+        });
+    }
     const allDependentPathBinders = [
         ...dependentPathBinders,
-        ...dependentTwoPathBinders
+        ...dependentTwoPathBinders,
+        ...dependentThreePathBinders
     ];
     const allRecursorPathBinders = [
         ...recursorPathBinders,
-        ...recursorTwoPathBinders
+        ...recursorTwoPathBinders,
+        ...recursorThreePathBinders
     ];
     const publicEliminatorType = sandboxInsertPis(base.eliminator[1], signature.parameters.length + 1 + signature.pointConstructors.length, allDependentPathBinders);
     const fullEliminatorType = sandboxInsertPis(fullEliminatorEntry[1], 1 + signature.parameters.length + 1 + signature.pointConstructors.length, allDependentPathBinders);
@@ -1836,6 +1942,8 @@ export function lowerSandboxHit(signature) {
     const recursorPathPatternVariables = recursorPathMethodNames.map((_, index) => sandboxVar(`?hitRecPath${index}`));
     const twoPathPatternVariables = dependentTwoPathMethodNames.map((_, index) => sandboxVar(`?hitTwoPath${index}`));
     const recursorTwoPathPatternVariables = recursorTwoPathMethodNames.map((_, index) => sandboxVar(`?hitRecTwoPath${index}`));
+    const threePathPatternVariables = dependentThreePathMethodNames.map((_, index) => sandboxVar(`?hitThreePath${index}`));
+    const recursorThreePathPatternVariables = recursorThreePathMethodNames.map((_, index) => sandboxVar(`?hitRecThreePath${index}`));
     const computeRules = Object.fromEntries(Object.entries(base.computeRules ?? {}).map(([head, rules]) => [
         head,
         rules.map(rule => {
@@ -1844,8 +1952,16 @@ export function lowerSandboxHit(signature) {
             const insertion = 1 + (full ? 1 : 0) + signature.parameters.length + 1
                 + signature.pointConstructors.length;
             pattern.splice(insertion, 0, ...(head.includes("rec_")
-                ? [...recursorPathPatternVariables, ...recursorTwoPathPatternVariables]
-                : [...pathPatternVariables, ...twoPathPatternVariables])
+                ? [
+                    ...recursorPathPatternVariables,
+                    ...recursorTwoPathPatternVariables,
+                    ...recursorThreePathPatternVariables
+                ]
+                : [
+                    ...pathPatternVariables,
+                    ...twoPathPatternVariables,
+                    ...threePathPatternVariables
+                ])
                 .map(term => Core.clone(term)));
             return { pattern, result: Core.clone(rule.result) };
         })
@@ -1858,15 +1974,19 @@ export function lowerSandboxHit(signature) {
         path.name,
         sandboxWrapPis(signature.parameters, Core.clone(path.type))
     ]));
+    pathTypes.push(...signature.threePathConstructors.map(path => [
+        path.name,
+        sandboxWrapPis(signature.parameters, Core.clone(path.type))
+    ]));
     const computationTypes = [];
     for (let index = 0; index < signature.pathConstructors.length; index++) {
         const path = signature.pathConstructors[index];
         const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
         const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
-        const dependentHead = sandboxApply(sandboxVar(`ind_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)));
-        const fullDependentHead = sandboxApply(sandboxVar(`@ind_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)));
-        const recursorHead = sandboxApply(sandboxVar(`rec_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)));
-        const fullRecursorHead = sandboxApply(sandboxVar(`@rec_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)));
+        const dependentHead = sandboxApply(sandboxVar(`ind_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)));
+        const fullDependentHead = sandboxApply(sandboxVar(`@ind_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)));
+        const recursorHead = sandboxApply(sandboxVar(`rec_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)));
+        const fullRecursorHead = sandboxApply(sandboxVar(`@rec_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)));
         const pathMethodValue = sandboxApply(sandboxVar(pathMethodNames[index]), ...pathArguments);
         const recursorPathMethodValue = sandboxApply(sandboxVar(recursorPathMethodNames[index]), ...pathArguments);
         const publicApdBody = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("apd"), dependentHead, pathTerm), pathMethodValue));
@@ -1907,10 +2027,10 @@ export function lowerSandboxHit(signature) {
         const path = signature.twoPathConstructors[index];
         const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
         const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
-        const dependentHead = sandboxApply(sandboxVar(`ind_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)));
-        const fullDependentHead = sandboxApply(sandboxVar(`@ind_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)));
-        const recursorHead = sandboxApply(sandboxVar(`rec_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)));
-        const fullRecursorHead = sandboxApply(sandboxVar(`@rec_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)));
+        const dependentHead = sandboxApply(sandboxVar(`ind_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)));
+        const fullDependentHead = sandboxApply(sandboxVar(`@ind_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)));
+        const recursorHead = sandboxApply(sandboxVar(`rec_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)));
+        const fullRecursorHead = sandboxApply(sandboxVar(`@rec_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)));
         const dependentMethodValue = sandboxApply(sandboxVar(dependentTwoPathMethodNames[index]), ...pathArguments);
         const leftPathData = sandboxHitPathData(path.left, signature.parameters, signature.pointConstructors, signature.pathConstructors, motiveName, branchNames, path.name);
         const rightPathData = sandboxHitPathData(path.right, signature.parameters, signature.pointConstructors, signature.pathConstructors, motiveName, branchNames, path.name);
@@ -1921,7 +2041,7 @@ export function lowerSandboxHit(signature) {
         // unparameterized HITs; for `hit SurfaceP (A : U)`, the old
         // expression treated `C` as `A` and made the final `apd2` slot fail
         // type checking.
-        const makeDependentPathComputation = (data, full) => sandboxApply(sandboxVar(`${full ? "@" : ""}apd_${data.path.name}`), ...(full ? [sandboxVar(motiveUniverseName)] : []), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...data.arguments_);
+        const makeDependentPathComputation = (data, full) => sandboxApply(sandboxVar(`${full ? "@" : ""}apd_${data.path.name}`), ...(full ? [sandboxVar(motiveUniverseName)] : []), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)), ...data.arguments_);
         const leftDependentComputation = makeDependentPathComputation(leftPathData, false);
         const rightDependentComputation = makeDependentPathComputation(rightPathData, false);
         const leftDependentComputationFull = makeDependentPathComputation(leftPathData, true);
@@ -1983,7 +2103,8 @@ export function lowerSandboxHit(signature) {
             `@apd_${path.name}`,
             `ap_${path.name}`,
             `@ap_${path.name}`
-        ])
+        ]),
+        ...signature.threePathConstructors.map(path => path.name)
     ];
     return {
         type: [base.type[0], Core.clone(base.type[1])],
@@ -1998,9 +2119,15 @@ export function lowerSandboxHit(signature) {
         recursor: [`rec_${signature.name}`, publicRecursorType],
         computeRules,
         metadata: {
-            version: signature.twoPathConstructors.length ? 4 : 3,
-            kind: signature.twoPathConstructors.length ? "hit2" : "hit1",
-            dimension: signature.twoPathConstructors.length ? 2 : 1,
+            version: signature.threePathConstructors.length
+                ? 5
+                : signature.twoPathConstructors.length ? 4 : 3,
+            kind: signature.threePathConstructors.length
+                ? "hit3"
+                : signature.twoPathConstructors.length ? "hit2" : "hit1",
+            dimension: signature.threePathConstructors.length
+                ? 3
+                : signature.twoPathConstructors.length ? 2 : 1,
             ruleSchemaVersion: 1,
             typeName: signature.name,
             parameterCount: signature.parameters.length,
@@ -2020,6 +2147,7 @@ export function lowerSandboxHit(signature) {
             pathConstructors: signature.pathConstructors.map(path => ({
                 name: path.name,
                 argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
+                argumentNames: path.arguments.map(argument => argument.name),
                 left: Core.clone(path.left),
                 right: Core.clone(path.right),
                 computationName: `apd_${path.name}`
@@ -2027,11 +2155,23 @@ export function lowerSandboxHit(signature) {
             twoPathConstructors: signature.twoPathConstructors.map(path => ({
                 name: path.name,
                 argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
+                argumentNames: path.arguments.map(argument => argument.name),
                 left: Core.clone(path.left),
                 right: Core.clone(path.right),
                 leftPath: flattenApplication(path.left)[0]?.name ?? "",
                 rightPath: flattenApplication(path.right)[0]?.name ?? "",
                 computationName: `apd_${path.name}`
+            })),
+            threePathConstructors: signature.threePathConstructors.map(path => ({
+                name: path.name,
+                argumentTypes: path.arguments.map(argument => Core.clone(argument.type)),
+                argumentNames: path.arguments.map(argument => argument.name),
+                left: Core.clone(path.left),
+                right: Core.clone(path.right),
+                leftTwoPath: path.leftTwoPath,
+                rightTwoPath: path.rightTwoPath,
+                sourcePath: Core.clone(path.sourcePath),
+                targetPath: Core.clone(path.targetPath)
             }))
         },
         generatedNames
@@ -2269,12 +2409,7 @@ function sandboxHitGeneratedNames(signature) {
             `ap_${path.name}`,
             `@ap_${path.name}`
         ]),
-        ...signature.threePathConstructors.flatMap(path => [
-            `apd_${path.name}`,
-            `@apd_${path.name}`,
-            `ap_${path.name}`,
-            `@ap_${path.name}`
-        ])
+        ...signature.threePathConstructors.map(path => path.name)
     ];
 }
 function collectInductiveDependencies(signature) {
