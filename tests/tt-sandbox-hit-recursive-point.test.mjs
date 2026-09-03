@@ -39,6 +39,65 @@ assert.throws(
     "function-recursive point arguments in path endpoints must remain an explicit boundary"
 );
 
+for (const [dimension, localRecursiveSource] of [
+    ["path1",
+        "hit LocalRecursive1 : U | baseLR1 : LocalRecursive1 "
+        + "| loopLR1 : Πx:LocalRecursive1,baseLR1=baseLR1"],
+    ["path2",
+        "hit LocalRecursive2 : U | baseLR2 : LocalRecursive2 "
+        + "| loopLR2 : baseLR2=baseLR2 "
+        + "| path2 faceLR2 : Πx:LocalRecursive2,loopLR2=loopLR2"],
+    ["path3",
+        "hit LocalRecursive3 : U | baseLR3 : LocalRecursive3 "
+        + "| loopLR3 : baseLR3=baseLR3 "
+        + "| path2 faceLR3 : loopLR3=loopLR3 "
+        + "| path3 cellLR3 : Πx:LocalRecursive3,faceLR3=faceLR3"]
+]) {
+    assert.throws(
+        () => parseSandboxHit(localRecursiveSource),
+        /参数不能递归引用/,
+        `${dimension} local binders must not recursively reference the HIT without an IH`
+    );
+}
+
+const parameterizedRecursiveSources = {
+    hit1: "hit ParamRecursive1 (A:U) : U "
+        + "| leafPR1 : A→ParamRecursive1 A "
+        + "| stepPR1 : ParamRecursive1 A→ParamRecursive1 A "
+        + "| loopPR1 : Πa:A,stepPR1 (leafPR1 a)=stepPR1 (leafPR1 a)",
+    hit1Explicit: "hit ParamRecursive1Explicit (A:U) : U "
+        + "| leafPR1E : A→ParamRecursive1Explicit A "
+        + "| stepPR1E : ParamRecursive1Explicit A→ParamRecursive1Explicit A "
+        + "| loopPR1E : Πa:A,stepPR1E A (leafPR1E A a)=stepPR1E A (leafPR1E A a)",
+    hit2: "hit ParamRecursive2 (A:U) : U "
+        + "| leafPR2 : A→ParamRecursive2 A "
+        + "| stepPR2 : ParamRecursive2 A→ParamRecursive2 A "
+        + "| loopPR2 : Πa:A,stepPR2 (leafPR2 a)=stepPR2 (leafPR2 a) "
+        + "| path2 facePR2 : Πa:A,loopPR2 a=loopPR2 a",
+    hit3: "hit ParamRecursive3 (A:U) : U "
+        + "| leafPR3 : A→ParamRecursive3 A "
+        + "| stepPR3 : ParamRecursive3 A→ParamRecursive3 A "
+        + "| loopPR3 : Πa:A,stepPR3 (leafPR3 a)=stepPR3 (leafPR3 a) "
+        + "| path2 facePR3 : Πa:A,loopPR3 a=loopPR3 a "
+        + "| path3 cellPR3 : Πa:A,facePR3 a=facePR3 a"
+};
+for (const [label, parameterizedSource] of Object.entries(parameterizedRecursiveSources)) {
+    const parameterized = new SandboxEnvironment({ systemRuleIds: creativeSandboxSystemRuleIds });
+    const result = parameterized.add(parameterizedSource);
+    assert.equal(result.ok, true, `${label}: ${result.error}`);
+    const suffix = label.startsWith("hit1") ? "loopPR1" + (label === "hit1Explicit" ? "E" : "")
+        : label === "hit2" ? "facePR2" : "cellPR3";
+    const generated = label.startsWith("hit1")
+        ? [`apd_${suffix}`, `ap_${suffix}`]
+        : label === "hit2"
+            ? [`apd_${suffix}`, `ap2_${suffix}`]
+            : [`apd3_${suffix}`, `ap3_${suffix}`];
+    for (const name of generated) {
+        assert.equal(parameterized.check(name).ok, true,
+            `${label} generated computation theorem ${name} must form`);
+    }
+}
+
 const bundle3 = lowerSandboxHit(parseSandboxHit(source3));
 assert.equal(bundle3.metadata.kind, "hit3");
 assert.equal(bundle3.metadata.constructors

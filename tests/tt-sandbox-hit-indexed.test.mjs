@@ -63,6 +63,47 @@ const register = candidate => {
 };
 assert.doesNotThrow(() => register(structuredClone(bundle)));
 
+const parameterizedRecursive = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+});
+const parameterizedRecursiveResult = parameterizedRecursive.add(
+    "hit ParamRecursiveFiber (A:U) [n:nat] : U "
+    + "| basePRF : Πn:nat,A→ParamRecursiveFiber A n "
+    + "| stepPRF : Πn:nat,ParamRecursiveFiber A n→ParamRecursiveFiber A n "
+    + "| loopPRF : Πn:nat,Πa:A,"
+    + "stepPRF n (basePRF n a)=stepPRF n (basePRF n a)"
+);
+assert.equal(parameterizedRecursiveResult.ok, true, parameterizedRecursiveResult.error);
+for (const name of ["apd_loopPRF", "ap_loopPRF"]) {
+    assert.equal(parameterizedRecursive.check(name).ok, true,
+        `parameterized indexed recursive endpoint must generate ${name}`);
+}
+
+for (const [label, source] of [
+    ["non-final constructor with an extra argument",
+        "hit PairFiber (A:U) [n:nat] : U "
+        + "| leftP : Πn:nat,A→PairFiber A n "
+        + "| rightP : Πn:nat,PairFiber A n "
+        + "| bridgeP : Πn:nat,Πa:A,leftP n a=rightP n"],
+    ["reordered control with the extra-argument constructor last",
+        "hit PairFiberRev (A:U) [n:nat] : U "
+        + "| leftR : Πn:nat,PairFiberRev A n "
+        + "| rightR : Πn:nat,A→PairFiberRev A n "
+        + "| bridgeR : Πn:nat,Πa:A,leftR n=rightR n a"],
+    ["middle constructor with an extra argument",
+        "hit TripleFiber (A:U) [n:nat] : U "
+        + "| firstT : Πn:nat,TripleFiber A n "
+        + "| middleT : Πn:nat,A→TripleFiber A n "
+        + "| lastT : Πn:nat,TripleFiber A n "
+        + "| bridgeT : Πn:nat,Πa:A,middleT n a=lastT n"]
+]) {
+    const candidate = lowerSandboxHit(parseSandboxHit(source));
+    assert.doesNotThrow(
+        () => register(structuredClone(candidate)),
+        `canonical iota validation must not depend on constructor order: ${label}`
+    );
+}
+
 const betaFiberBundle = lowerSandboxHit(parseSandboxHit(
     "hit BetaFiber [n:nat] : U "
     + "| pF : Πn:nat,BetaFiber n "

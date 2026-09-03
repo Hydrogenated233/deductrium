@@ -1950,7 +1950,6 @@ export class Core {
                 const context: Context = [];
                 const captureReplacements = new Map<string, AST>();
                 const schemaReplacements = new Map<string, AST>();
-                let nextBondVarId = 1;
                 let cursor = Core.clone(headType);
                 const bindCapture = (capture: AST, type: AST) => {
                     if (capture.type !== "var" || !capture.name?.startsWith("?")) {
@@ -1958,10 +1957,12 @@ export class Core {
                     }
                     let name = `_ruleCapture${captureSequence++}`;
                     while (context.some(([candidate]) => candidate === name)) name += "_";
-                    const id = nextBondVarId++;
-                    const variable: AST = { type: "var", name, nodes: [], bondVarId: id };
+                    // Let checkType assign ids after it has reserved binders in
+                    // every context type.  Preallocating ids here can collide
+                    // with dependent Pi binders while the context is marked.
+                    const variable: AST = { type: "var", name, nodes: [] };
                     captureReplacements.set(capture.name, variable);
-                    context.unshift([name, Core.clone(type), id]);
+                    context.unshift([name, Core.clone(type), 0]);
                     return variable;
                 };
 

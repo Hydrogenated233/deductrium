@@ -1219,8 +1219,12 @@ function elaborateHitEndpoint(
     parameters: readonly SandboxInductiveBinder[],
     pointConstructors: readonly SandboxInductiveConstructor[],
     pathName: string,
-    boundNames: ReadonlySet<string>
+    boundNames: ReadonlySet<string>,
+    state = { nodes: 0 },
+    depth = 0
 ) {
+    if (depth > 128) throw new Error(`路径构造子 ${pathName} 的点端点嵌套过深`);
+    if (++state.nodes > 4_096) throw new Error(`路径构造子 ${pathName} 的点端点节点过多`);
     const terms = flattenApplication(endpoint);
     const headName = terms[0]?.type === "var" ? terms[0].name : "";
     if (boundNames.has(headName)) {
@@ -1255,6 +1259,20 @@ function elaborateHitEndpoint(
         throw new Error(
             `路径构造子 ${pathName} 的端点 ${headName} 参数数量错误：需要 ${pointArgumentCount} 个点参数`
         );
+    }
+    for (let index = 0; index < point.argumentAsts.length; index++) {
+        const recursive = point.argumentAsts[index].recursiveTelescope;
+        if (!recursive || recursive.length) continue;
+        arguments_[parameters.length + index] = elaborateHitEndpoint(
+            arguments_[parameters.length + index],
+            signatureName,
+            parameters,
+            pointConstructors,
+            pathName,
+            boundNames,
+            state,
+            depth + 1
+        ).term;
     }
     const argumentReplacements = new Map<string, AST>();
     point.argumentAsts.forEach((argument, index) => {
@@ -1691,6 +1709,9 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
             if (parameterNames.has(argument.name)) {
                 throw new Error(`二阶路径构造子 ${path2.name} 的参数不能遮蔽统一参数：${argument.name}`);
             }
+            if (containsSandboxName(argument.type, ordinary.name)) {
+                throw new Error(`二阶路径构造子 ${path2.name} 的参数不能递归引用 ${ordinary.name}`);
+            }
         }
         const endpointBoundNames = new Set([
             ...ordinary.parameters.map(parameter => parameter.name),
@@ -1733,6 +1754,9 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
         for (const argument of arguments_) {
             if (parameterNames.has(argument.name)) {
                 throw new Error(`三阶路径构造子 ${path3.name} 的参数不能遮蔽统一参数：${argument.name}`);
+            }
+            if (containsSandboxName(argument.type, ordinary.name)) {
+                throw new Error(`三阶路径构造子 ${path3.name} 的参数不能递归引用 ${ordinary.name}`);
             }
         }
         const endpointBoundNames = new Set([
