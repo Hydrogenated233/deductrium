@@ -51,14 +51,26 @@ export class SandboxWorkerClient {
 
     async load(save: SandboxSave, signal?: AbortSignal) {
         const task = this.requestTask<SandboxValidationResult>({ kind: "load", save, options: this.options });
-        const result = await this.awaitWithSignal(task, signal);
+        let result: SandboxValidationResult;
+        try {
+            result = await this.awaitWithSignal(task, signal);
+        } catch (error) {
+            this.invalidateSession();
+            throw error;
+        }
         this.rememberValidationResult(result, save);
         return result;
     }
 
     async validate(save: SandboxSave, signal?: AbortSignal) {
         const task = this.requestTask<SandboxValidationResult>({ kind: "validate", save, options: this.options });
-        const result = await this.awaitWithSignal(task, signal);
+        let result: SandboxValidationResult;
+        try {
+            result = await this.awaitWithSignal(task, signal);
+        } catch (error) {
+            this.invalidateSession();
+            throw error;
+        }
         this.rememberValidationResult(result, save);
         return result;
     }
@@ -113,10 +125,18 @@ export class SandboxWorkerClient {
     /** Start a validation and expose its request id for UI stop buttons. */
     validateRequest(save: SandboxSave, signal?: AbortSignal): SandboxWorkerRequestHandle<SandboxValidationResult> {
         const task = this.requestTask<SandboxValidationResult>({ kind: "validate", save, options: this.options });
-        const promise = this.awaitWithSignal(task, signal).then(result => {
-            this.rememberValidationResult(result, save);
-            return result;
-        });
+        const promise = this.awaitWithSignal(task, signal).then(
+            result => {
+                this.rememberValidationResult(result, save);
+                return result;
+            },
+            error => {
+                // A rejected validation may follow a partially-mutated worker
+                // session. Do not let a later check() reuse that stale state.
+                this.invalidateSession();
+                throw error;
+            }
+        );
         return { requestId: task.requestId, promise, cancel: task.cancel };
     }
 
@@ -158,11 +178,16 @@ export class SandboxWorkerClient {
 
     private rememberValidationResult(result: SandboxValidationResult, save: SandboxSave) {
         if (result.status === "cancelled" || result.status === "budget-exhausted") {
-            this.sessionReady = false;
+            this.invalidateSession();
             return;
         }
         this.sessionReady = true;
         this.sessionSaveKey = sandboxValidationSemanticsKey(save);
+    }
+
+    private invalidateSession() {
+        this.sessionReady = false;
+        this.sessionSaveKey = "";
     }
 
     private ensureWorker() {

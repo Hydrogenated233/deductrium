@@ -234,6 +234,8 @@ const differentFibersResult = differentFibers.add(
 assert.equal(differentFibersResult.ok, false);
 assert.match(differentFibersResult.declarations[0].error ?? "", /索引|类型|断言|fiber|纤维/i);
 
+const indexedHigherPathError =
+    /索引.*(?:path[23]|二维|三维)|(?:path[23]|二维|三维).*索引/i;
 for (const unsupported of [
     "hit IndexedHit2 [n : nat] : U | p2 : Πn:nat,IndexedHit2 n "
         + "| l2 : Πn:nat,p2 n=p2 n | path2 s2 : Πn:nat,l2 n=l2 n",
@@ -242,9 +244,88 @@ for (const unsupported of [
         + "| path3 c3 : Πn:nat,s3 n=s3 n"
 ]) {
     assert.throws(
-        () => lowerSandboxHit(parseSandboxHit(unsupported)),
-        /索引.*(?:path[23]|二维|三维)|(?:path[23]|二维|三维).*索引/i
+        () => parseSandboxHit(unsupported),
+        indexedHigherPathError,
+        "the parser must reject indexed higher paths before elaboration"
     );
 }
+
+// Keep a separate lowerer guard: structured callers can bypass the source parser.
+const forgedIndexedHigherPath = parseSandboxHit(
+    "hit IndexedHit1 [n : nat] : U "
+    + "| p1 : Πn:nat,IndexedHit1 n "
+    + "| l1 : Πn:nat,p1 n=p1 n"
+);
+forgedIndexedHigherPath.pathLevels[1].constructors.push({});
+assert.throws(
+    () => lowerSandboxHit(forgedIndexedHigherPath),
+    indexedHigherPathError,
+    "the lowerer must reject indexed higher paths from structured input"
+);
+
+// Core is the final trust boundary, even for a forged indexed metadata bundle.
+// Start with a fully valid non-indexed HIT2 bundle, then add one family index
+// and matching path result metadata so the explicit unsupported check is the
+// first indexed-HIT higher-path boundary reached by registration.
+const nonIndexedHigher = lowerSandboxHit(parseSandboxHit(
+    "hit HigherPath : U | p : HigherPath | l : p=p | path2 q : l=l"
+));
+const forgedCoreHigherPath = structuredClone(nonIndexedHigher);
+forgedCoreHigherPath.type[1] = {
+    type: "P",
+    name: "n",
+    nodes: [parser.parse("nat"), forgedCoreHigherPath.type[1]]
+};
+forgedCoreHigherPath.metadata.kind = "hit2";
+forgedCoreHigherPath.metadata.dimension = 2;
+forgedCoreHigherPath.metadata.indexCount = 1;
+forgedCoreHigherPath.metadata.parameterCount = 0;
+forgedCoreHigherPath.metadata.indices = [{ name: "n", type: parser.parse("nat") }];
+for (const path of forgedCoreHigherPath.metadata.pathLevels[0].constructors) {
+    path.resultIndices = [parser.parse("n")];
+}
+assert.throws(
+    () => register(forgedCoreHigherPath),
+    /二维和三维 HIT metadata 暂不支持索引/,
+    "Core must reject indexed hit2/hit3 metadata"
+);
+
+// Indexed recursive points must carry the child fiber explicitly.  The
+// lowerer is also a trust boundary for structured callers, so reject missing
+// or truncated metadata before it can produce a malformed bundle/TypeError.
+const recursiveEndpointSource = "hit FiberTree [n:nat] : U "
+    + "| leafTree : Πn:nat,FiberTree n "
+    + "| stepTree : Πn:nat,FiberTree n→FiberTree (succ n) "
+    + "| loopTree : Πn:nat,stepTree n (leafTree n)=stepTree n (leafTree n)";
+const recursiveEndpointSignature = parseSandboxHit(recursiveEndpointSource);
+const recursivePoint = recursiveEndpointSignature.pointConstructors
+    .find(constructor => constructor.name === "stepTree");
+assert.deepEqual(
+    recursivePoint?.argumentAsts[1].recursiveResultIndices
+        ?.map(index => parser.stringify(index)),
+    ["n"],
+    "indexed recursive point arguments must retain their child fiber"
+);
+const recursiveEndpointBundle = lowerSandboxHit(recursiveEndpointSignature);
+assert.doesNotThrow(
+    () => register(structuredClone(recursiveEndpointBundle)),
+    "same-fiber paths over indexed recursive points must remain certifiable"
+);
+const forgedRecursiveIndices = structuredClone(recursiveEndpointSignature);
+forgedRecursiveIndices.pointConstructors
+    .find(constructor => constructor.name === "stepTree")
+    .argumentAsts[1].recursiveResultIndices = [];
+assert.throws(
+    () => lowerSandboxHit(forgedRecursiveIndices),
+    /递归参数.*resultIndices.*索引数量不一致/,
+    "the lowerer must reject truncated indexed recursive result metadata"
+);
+const forgedPathIndices = structuredClone(recursiveEndpointSignature);
+delete forgedPathIndices.pathLevels[0].constructors[0].resultIndices;
+assert.throws(
+    () => lowerSandboxHit(forgedPathIndices),
+    /一阶路径构造子.*resultIndices.*索引数量不一致/,
+    "the lowerer must reject missing indexed path result metadata"
+);
 
 console.log("sandbox indexed fiberwise hit1 regression passed");

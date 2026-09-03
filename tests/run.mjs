@@ -196,6 +196,8 @@ const tests = [
     "./tt-sandbox-gui-cache-mutation.test.mjs",
     "./tt-sandbox-gui-cancel.test.mjs",
     "./tt-sandbox-gui-error-boundary.test.mjs",
+    "./tt-sandbox-worker-load-error.test.mjs",
+    "./tt-sandbox-presentation-mutations.test.mjs",
     "./issue-14-build-output.test.mjs"
 ];
 

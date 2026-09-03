@@ -36,7 +36,24 @@ export class SandboxWorkerSession {
                     shouldCancel: () => this.cancelledRequests.has(request.id)
                 });
                 this.loaded = result.status !== "cancelled" && result.status !== "budget-exhausted";
+                if (!this.loaded) {
+                    // Validation may have installed a prefix before it noticed
+                    // cancellation or a budget limit.  Discard that partial
+                    // Core instead of allowing a later request to reuse it.
+                    this.environment = new SandboxEnvironment(request.options);
+                    this.environmentOptionsKey = optionsKey(request.options);
+                }
                 return result;
+            }
+            catch (error) {
+                // A malformed save or an unexpected validation exception must
+                // not leave the previous environment addressable by a later
+                // check request.  Keep the worker alive so the caller can
+                // recover by supplying a fresh valid save.
+                this.loaded = false;
+                this.environment = new SandboxEnvironment(request.options);
+                this.environmentOptionsKey = optionsKey(request.options);
+                throw error;
             }
             finally {
                 this.cancelledRequests.delete(request.id);

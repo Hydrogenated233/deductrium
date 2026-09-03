@@ -3332,12 +3332,118 @@ function sandboxRenameHitUniformParameters(
     };
 }
 
+/**
+ * Validate the structured indexed-HIT1 metadata before lowering.  Parsed
+ * source always supplies these arrays, but callers may provide a structured
+ * clone (for example a save cache or a forged bridge).  Lowering must reject
+ * missing or truncated index metadata explicitly instead of producing a
+ * malformed bundle or throwing a generic `TypeError` later in the pipeline.
+ */
+function assertSandboxHitOnePathMetadata(signature: SandboxHitDeclaration) {
+    if (!signature || !Array.isArray(signature.indices)
+        || !Array.isArray(signature.pointConstructors)) {
+        throw new Error("HIT indexed metadata 结构无效");
+    }
+    const indexCount = signature.indices.length;
+    const assertAst = (value: unknown, label: string) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)
+            || typeof (value as { type?: unknown }).type !== "string") {
+            throw new Error(`${label} AST 结构无效`);
+        }
+        const stack: unknown[] = [value];
+        const seen = new WeakSet<object>();
+        let nodes = 0;
+        while (stack.length) {
+            const current = stack.pop();
+            if (!current || typeof current !== "object" || Array.isArray(current)
+                || typeof (current as { type?: unknown }).type !== "string") {
+                throw new Error(`${label} AST 结构无效`);
+            }
+            if (seen.has(current)) continue;
+            seen.add(current);
+            if (++nodes > 4_096) throw new Error(`${label} AST 节点过多`);
+            const children = (current as { nodes?: unknown }).nodes;
+            if (children !== undefined && !Array.isArray(children)) {
+                throw new Error(`${label} AST 子节点结构无效`);
+            }
+            const childNodes: unknown[] = Array.isArray(children) ? children : [];
+            for (const child of childNodes) stack.push(child);
+        }
+    };
+    const assertAstArray = (value: unknown, expectedLength: number, label: string) => {
+        if (!Array.isArray(value) || value.length !== expectedLength) {
+            throw new Error(`${label} 与索引数量不一致`);
+        }
+        value.forEach((entry, index) => assertAst(entry, `${label}[${index}]`));
+    };
+    for (const constructor of signature.pointConstructors) {
+        if (!constructor || typeof constructor !== "object"
+            || !Array.isArray(constructor.argumentAsts)) {
+            throw new Error("HIT 点构造子 metadata 结构无效");
+        }
+        assertAstArray(
+            constructor.resultIndices,
+            indexCount,
+            `HIT 点构造子 ${constructor.name} resultIndices`
+        );
+        for (const argument of constructor.argumentAsts) {
+            if (!argument || typeof argument !== "object") {
+                throw new Error(`HIT 点构造子 ${constructor.name} 参数 metadata 结构无效`);
+            }
+            const telescope = argument.recursiveTelescope;
+            const recursive = telescope !== null && telescope !== undefined;
+            if (recursive) {
+                if (!Array.isArray(telescope)) {
+                    throw new Error(
+                        `HIT 点构造子 ${constructor.name} 递归参数 ${argument.name}`
+                        + " 的 telescope 结构无效"
+                    );
+                }
+                for (const [index, binder] of telescope.entries()) {
+                    if (!binder || typeof binder !== "object"
+                        || typeof (binder as { name?: unknown }).name !== "string") {
+                        throw new Error(
+                            `HIT 点构造子 ${constructor.name} 递归参数 ${argument.name}`
+                            + ` 的 telescope[${index}] 结构无效`
+                        );
+                    }
+                    assertAst(
+                        (binder as { type?: unknown }).type,
+                        `HIT 点构造子 ${constructor.name} 递归参数 ${argument.name}`
+                        + ` telescope[${index}]`
+                    );
+                }
+                assertAstArray(
+                    argument.recursiveResultIndices,
+                    indexCount,
+                    `HIT 点构造子 ${constructor.name} 递归参数 ${argument.name}`
+                    + " 的 resultIndices"
+                );
+            } else if (argument.recursiveResultIndices !== null
+                && argument.recursiveResultIndices !== undefined) {
+                throw new Error(
+                    `HIT 点构造子 ${constructor.name} 非递归参数 ${argument.name}`
+                    + " 不能携带 recursiveResultIndices"
+                );
+            }
+        }
+    }
+    for (const path of hitPathConstructorsAt(signature.pathLevels, 1)) {
+        assertAstArray(
+            path.resultIndices,
+            indexCount,
+            `HIT 一阶路径构造子 ${path.name} resultIndices`
+        );
+    }
+}
+
 /** Lower a HIT while keeping path computation propositional. */
 export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInductiveBundle {
     assertCanonicalHitPathLevels(signature.pathLevels);
     const inputPathConstructors = hitPathConstructorsAt(signature.pathLevels, 1);
     const inputTwoPathConstructors = hitPathConstructorsAt(signature.pathLevels, 2);
     const inputThreePathConstructors = hitPathConstructorsAt(signature.pathLevels, 3);
+    assertSandboxHitOnePathMetadata(signature);
     if (signature.indices.length && (inputTwoPathConstructors.length || inputThreePathConstructors.length)) {
         throw new Error("索引 HIT 当前只支持一阶路径，暂不支持 path2/path3");
     }
@@ -6504,7 +6610,10 @@ export class SandboxEnvironment {
         this.syncWorkspaceFromState();
         const mutation = this.workspace.setFolderOpen(id, !!open);
         this.applyWorkspaceSnapshot(mutation.snapshot);
-        return this.validate();
+        // Folding is presentation-only.  Sandbox declarations are always
+        // global (their folderId does not affect dependencies), so rerunning
+        // Core here only wastes work and can race a caller's validation.
+        return this.currentValidationResult();
     }
 
     setFolderDisabled(id: string, disabled: boolean) {
@@ -6524,7 +6633,8 @@ export class SandboxEnvironment {
         this.syncWorkspaceFromState();
         const mutation = this.workspace.renameFolder(id, name.trim() || folder.name);
         this.applyWorkspaceSnapshot(mutation.snapshot);
-        return this.validate();
+        // A folder label is not part of declaration order or scope.
+        return this.currentValidationResult();
     }
 
     removeFolder(id: string) {
@@ -6534,6 +6644,16 @@ export class SandboxEnvironment {
         if (!mutation.changed) return this.validate();
         this.applyWorkspaceSnapshot(mutation.snapshot);
         this.markWorkspaceChange(before);
+        // Removing an enabled folder only changes presentation/ownership; a
+        // disabled folder, however, may re-enable its descendants and must
+        // rebuild the affected suffix.  Compare the semantic signatures
+        // after applying the shared workspace mutation instead of trusting
+        // TheoremWorkspace's broader theorem-layer invalidation flag.
+        const after = this.validationSignatures();
+        if (before.length === after.length
+            && before.every((signature, index) => signature === after[index])) {
+            return this.currentValidationResult();
+        }
         return this.validate();
     }
 
@@ -6930,6 +7050,27 @@ export class SandboxEnvironment {
             bridge: this.bridge(),
             validationStats: { ...this.lastValidationStats },
             validationCache
+        };
+    }
+
+    /**
+     * Return the already-certified state after a presentation-only mutation.
+     * Folder folding/renaming must keep the public result shape used by older
+     * callers, but must not invoke validate() or rebuild the incremental Core.
+     */
+    private currentValidationResult(): SandboxValidationResult {
+        const declarations = this.getDeclarations();
+        const invalid = declarations.find(declaration => declaration.status === "invalid");
+        const pending = declarations.find(declaration => declaration.status === "unchecked");
+        const error = invalid?.error
+            ?? (pending ? "沙盒声明尚未校验" : undefined);
+        return {
+            ok: !invalid && !pending,
+            declarations,
+            error,
+            status: error ? "invalid" : "ok",
+            bridge: this.bridge(),
+            validationStats: { ...this.lastValidationStats }
         };
     }
 
