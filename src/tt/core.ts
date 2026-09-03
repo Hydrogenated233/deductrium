@@ -472,6 +472,12 @@ export type CoreHitTwoPathExpression =
         arguments: AST[];
     }
     | {
+        /** Reflexivity at one declared first-path constructor application. */
+        kind: "refl";
+        pathName: string;
+        arguments: AST[];
+    }
+    | {
         kind: "compose";
         left: CoreHitTwoPathExpression;
         right: CoreHitTwoPathExpression;
@@ -585,6 +591,20 @@ function cloneCoreHitTwoPathExpression(
             return {
                 kind: "atom",
                 name: object.name,
+                arguments: (object.arguments as AST[]).map(argument => Core.clone(argument))
+            };
+        }
+        if (object.kind === "refl") {
+            const keys = Object.keys(object);
+            if (keys.some(key => !["kind", "pathName", "arguments"].includes(key))
+                || typeof object.pathName !== "string" || !object.pathName
+                || !Array.isArray(object.arguments)
+                || object.arguments.some(argument => !argument || typeof argument !== "object")) {
+                throw new Error(`${label} 二阶路径 refl 结构无效`);
+            }
+            return {
+                kind: "refl",
+                pathName: object.pathName,
                 arguments: (object.arguments as AST[]).map(argument => Core.clone(argument))
             };
         }
@@ -3019,6 +3039,14 @@ export class Core {
                     targetPath: AST;
                 }
                 | {
+                    kind: "refl";
+                    path: CoreHitPathConstructorMetadata;
+                    arguments: AST[];
+                    term: AST;
+                    sourcePath: AST;
+                    targetPath: AST;
+                }
+                | {
                     kind: "compose";
                     left: EvaluatedTwoPathExpression;
                     right: EvaluatedTwoPathExpression;
@@ -3101,6 +3129,42 @@ export class Core {
                             ),
                             sourcePath,
                             targetPath
+                        };
+                    }
+                    if (expression.kind === "refl") {
+                        const referencedPath = pathMetadataByName.get(expression.pathName);
+                        if (!referencedPath) {
+                            throw new Error(`${label}引用的一阶路径不存在：${expression.pathName}`);
+                        }
+                        const argumentNames = referencedPath.argumentNames ?? [];
+                        if (argumentNames.length !== referencedPath.argumentTypes.length
+                            || new Set(argumentNames).size !== argumentNames.length) {
+                            throw new Error(
+                                `三维 HIT 一阶路径 ${expression.pathName} argumentNames 与 telescope 不一致`
+                            );
+                        }
+                        if (expression.arguments.length !== argumentNames.length) {
+                            throw new Error(
+                                `${label}参数数量与一阶路径 ${expression.pathName} telescope 不一致：`
+                                + `需要 ${argumentNames.length} 个，实际 ${expression.arguments.length} 个`
+                            );
+                        }
+                        const arguments_ = expression.arguments.map(normalizedMetadataAst);
+                        const pathTerm = wrapApply(
+                            wrapVar(expression.pathName),
+                            ...parameters.map(parameter => wrapVar(parameter.name)),
+                            ...arguments_.map(argument => Core.clone(argument))
+                        );
+                        validateTwoPathEndpoint(
+                            owner, `${side}端点的反身一阶路径`, pathTerm, expression.pathName
+                        );
+                        return {
+                            kind: "refl",
+                            path: referencedPath,
+                            arguments: arguments_,
+                            term: wrapApply(wrapVar("refl"), Core.clone(pathTerm)),
+                            sourcePath: Core.clone(pathTerm),
+                            targetPath: Core.clone(pathTerm)
                         };
                     }
                     if (expression.kind === "compose") {
@@ -3504,6 +3568,17 @@ export class Core {
                                 ...expression.arguments.map(argument => Core.clone(argument))
                             );
                         }
+                        if (expression.kind === "refl") {
+                            return wrapApply(
+                                wrapVar("refl"),
+                                endpointMethod(
+                                    expression.sourcePath,
+                                    pathEntries,
+                                    pathMethodNames,
+                                    computationName
+                                )
+                            );
+                        }
                         if (expression.kind === "compose") {
                             return strongCompose(
                                 recursorExpressionMethod(expression.left),
@@ -3548,6 +3623,35 @@ export class Core {
                                     wrapVar(`${full ? "@" : ""}ap2_${expression.path.name}`),
                                     ...prefixValues.map(value => Core.clone(value)),
                                     ...expression.arguments.map(argument => Core.clone(argument))
+                                )
+                            };
+                        }
+                        if (expression.kind === "refl") {
+                            const sourceMethod = endpointMethod(
+                                expression.sourcePath,
+                                pathEntries,
+                                pathMethodNames,
+                                computationName
+                            );
+                            const sourceComputation = pathComputation(expression.sourcePath);
+                            return {
+                                sourceMethod,
+                                targetMethod: Core.clone(sourceMethod),
+                                method: wrapApply(wrapVar("refl"), Core.clone(sourceMethod)),
+                                sourceComputation,
+                                targetComputation: Core.clone(sourceComputation),
+                                proof: wrapApply(
+                                    wrapVar("@hit_ap2_corrected_refl"),
+                                    Core.clone(hitUniverseLevel),
+                                    Core.clone(motiveUniverseLevel),
+                                    Core.clone(hitType),
+                                    wrapVar(motiveName),
+                                    Core.clone(pointBoundary.sourcePoint),
+                                    Core.clone(pointBoundary.targetPoint),
+                                    Core.clone(expression.sourcePath),
+                                    Core.clone(recursorHead),
+                                    Core.clone(sourceMethod),
+                                    Core.clone(sourceComputation)
                                 )
                             };
                         }
@@ -3837,6 +3941,14 @@ export class Core {
                                 )
                             };
                         }
+                        if (expression.kind === "refl") {
+                            const sourceMethod = pathMethodValue(expression.sourcePath);
+                            return {
+                                sourceMethod,
+                                targetMethod: Core.clone(sourceMethod),
+                                proof: wrapApply(wrapVar("refl"), Core.clone(sourceMethod))
+                            };
+                        }
                         if (expression.kind === "compose") {
                             const left = dependentExpressionMethod(expression.left);
                             const right = dependentExpressionMethod(expression.right);
@@ -3900,6 +4012,32 @@ export class Core {
                                     wrapVar(`${full ? "@" : ""}apd_${expression.path.name}`),
                                     ...prefixValues.map(value => Core.clone(value)),
                                     ...expression.arguments.map(argument => Core.clone(argument))
+                                )
+                            };
+                        }
+                        if (expression.kind === "refl") {
+                            const sourceMethod = pathMethodValue(expression.sourcePath);
+                            const sourceComputation = pathComputation(expression.sourcePath);
+                            return {
+                                sourcePath: Core.clone(expression.sourcePath),
+                                targetPath: Core.clone(expression.sourcePath),
+                                sourceMethod,
+                                targetMethod: Core.clone(sourceMethod),
+                                method: wrapApply(wrapVar("refl"), Core.clone(sourceMethod)),
+                                sourceComputation,
+                                targetComputation: Core.clone(sourceComputation),
+                                proof: wrapApply(
+                                    wrapVar("@hit_apd2_corrected_refl"),
+                                    Core.clone(hitUniverseLevel),
+                                    Core.clone(motiveUniverseLevel),
+                                    Core.clone(hitType),
+                                    Core.clone(sourcePathData.sourcePoint),
+                                    Core.clone(sourcePathData.targetPoint),
+                                    Core.clone(expression.sourcePath),
+                                    wrapVar(motiveName),
+                                    Core.clone(dependentHead),
+                                    Core.clone(sourceMethod),
+                                    Core.clone(sourceComputation)
                                 )
                             };
                         }
@@ -4278,6 +4416,17 @@ export class Core {
                                     ...expression.arguments.map(argument => Core.clone(argument))
                                 );
                             }
+                            if (expression.kind === "refl") {
+                                return wrapApply(
+                                    wrapVar("refl"),
+                                    methodValue(
+                                        expression.sourcePath,
+                                        pathEntries,
+                                        pathMethodNames,
+                                        `${label} ${path.name}`
+                                    )
+                                );
+                            }
                             if (expression.kind === "compose") {
                                 return surfaceCompose(
                                     recursorExpressionMethod(expression.left),
@@ -4354,6 +4503,19 @@ export class Core {
                                             wrapVar(twoPathMethodNames[endpointIndex]),
                                             ...expression.arguments.map(argument => Core.clone(argument))
                                         )
+                                    };
+                                }
+                                if (expression.kind === "refl") {
+                                    const sourceMethod = methodValue(
+                                        expression.sourcePath,
+                                        pathEntries,
+                                        pathMethodNames,
+                                        `${label} ${path.name}`
+                                    );
+                                    return {
+                                        sourceMethod,
+                                        targetMethod: Core.clone(sourceMethod),
+                                        proof: wrapApply(wrapVar("refl"), Core.clone(sourceMethod))
                                     };
                                 }
                                 if (expression.kind === "compose") {

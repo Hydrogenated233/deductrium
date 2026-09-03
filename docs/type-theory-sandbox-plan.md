@@ -232,6 +232,7 @@ hit FiberLoop [n : nat] : U
 - 一阶 HIT 已支持同纤维 indexed family：点构造子沿用结构化 `resultIndices` 和递归子项索引，路径 lowering 会把 motive、消去器和递归器特化到端点所在纤维。不同纤维端点、indexed `path2`/`path3`、跨索引 dependent path 和函数型递归端点仍明确拒绝。
 - 二维 HIT 已完成结构解析、消去器 lowering、命题计算规则和 Core schema 认证。
 - 三维 `path3` 已支持原子二阶路径端点、使用 `▪` 的组合端点和 `inveq` 逆端点；统一参数、局部参数、递归组合边界和点边界都会被检查。三维是面向用户的最高维度，`path4` 及更高维仍明确拒绝。
+- 三维端点已支持受限的反身形式 `refl loop`：它只能引用当前 HIT 已声明的一阶路径构造子，并由 Core 重新注入统一参数、检查局部 telescope 和重建二阶边界。它不是任意二阶路径 AST，也不会放开 `refl face` 或四维端点。
 - 三维声明已生成真正的 dependent/recursor coherence binder 和点 iota 参数。HIT writer 使用 metadata v7：只传输连续的 `pathLevels` 和结构化三阶表达式端点；Core 会把旧 v3-v5 分栏 metadata 及 v6 canonical/原子端点 metadata 一次性迁移为 v7，并重建验证三阶端点、统一参数及共享低维边界。
 - 二维非依赖 action 现已额外生成兼容的新强计算槽 `ap2_<path2>`：它把二阶 action 与经两端 `ap_<path1>` 校正后的用户 `q2` 关联；旧 `ap_<path2>` 类型保持不变。
 - 非依赖三阶 action 已生成 `ap3_<path3>`：它使用两端已认证的 `ap2_<path2>`、低维 `ap_<path1>` 和用户 `q3` 构造校正公式，并由 Core 独立重建类型。
@@ -249,6 +250,7 @@ hit FiberLoop [n : nat] : U
 
 - **二维验收**：可以声明并验证至少一个包含二维路径构造子的 HIT；高阶路径的端点和二维 coherence 条件能够正确显示和检查。
 - **三维验收**：参数化和非参数化三维 HIT 都能生成并使用 dependent/recursor coherence、`apd3` 和 `ap3`；Core 能拒绝伪造的三阶边界或计算定理。
+- **三维端点语言验收**：三阶端点至少覆盖二阶构造子原子、组合、逆，以及一阶路径构造子的受限反身二阶路径；每种形式的 dependent/action 计算证明都必须独立认证，不能由语法降级或 body-less 公理代替。
 - **四维边界验收**：实验 fixture 能稳定触发 parser/lowerer/Core 的明确拒绝或资源错误；四维声明不能降级成三维成功，也不能进入存档桥接。
 - 非终止、冲突或不合法的计算规则无法注册。
 - 大型沙盒声明不会阻塞游戏主线程。

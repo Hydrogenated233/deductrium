@@ -110,8 +110,9 @@ support through dimension 3. Internally, path constructors are organized as
 contiguous `pathLevels` so later experiments do not require another storage
 rewrite. Dimension 4 is limited to fixtures, preflight rejection, and resource
 boundaries; arbitrary-dimensional HIT support is not a project commitment.
-HIT metadata version 6 carries only this canonical `pathLevels` structure.
-Legacy versions 3 through 5 are normalized once at the Core boundary; sandbox
+HIT metadata version 7 carries only this canonical `pathLevels` structure and
+the restricted structured endpoint language needed by three-dimensional paths.
+Legacy versions 3 through 6 are normalized once at the Core boundary; sandbox
 saves retain source declarations rather than persisting derived metadata.
 The sandbox authoring model follows the same rule: `SandboxHitDeclaration`
 stores point constructors separately and has no parallel legacy path arrays.
