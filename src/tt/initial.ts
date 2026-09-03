@@ -779,6 +779,10 @@ export function initTypeSystem() {
     addRule("@计算", "apd_trunc := @apd_trunc _ _ _ _ _ _");
     addRule("_计算", "apd_trunc");
 
+    // Creative mode unlocks every rule group; survival never unlocks this
+    // final group. Keep it appended so existing rule indices remain stable.
+    typeName = "sorry";
+    addRule("构造", "false:False");
 
     return ruleList;
 }

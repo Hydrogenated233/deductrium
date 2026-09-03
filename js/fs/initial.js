@@ -4,6 +4,7 @@ import { FormalSystem } from "./formalsystem.js";
 import { SavesParser } from "./savesparser.js";
 const astparser = new ASTParser;
 let deductionFrom = "";
+export const CREATIVE_SORRY_DEDUCTION = "sorry";
 export function initFormalSystem(creative) {
     const fs = new FormalSystem;
     function addMetaRule(key, str, condIdxs, replNames) {
@@ -446,9 +447,17 @@ export function initFormalSystem(creative) {
     const verbs = ["Prime", "Equiv", "Order", "WellOrder", "Rel", "DdkCut", "Point", "Line", "Plane", "Between", "Angle"];
     const sp = new SavesParser();
     sp.deserializeArr(fs, [consts, fns, verbs, [], sysAxioms, null, null]);
-    if (creative)
-        return sp.deserializeArr(fs, [[], [], [], [], intMacros, initFolders(Object.keys(sysAxioms)), null]);
-    return sp.deserializeArr(fs, [[], [], [], [], intMacros, ["mp", "a1", "a2"], null]);
+    const result = creative
+        ? sp.deserializeArr(fs, [[], [], [], [], intMacros, initFolders(Object.keys(sysAxioms)), null])
+        : sp.deserializeArr(fs, [[], [], [], [], intMacros, ["mp", "a1", "a2"], null]);
+    if (creative) {
+        fs.addDeduction(CREATIVE_SORRY_DEDUCTION, astparser.parse("⊢$0"), "创造模式内置");
+        result.arrD = [
+            CREATIVE_SORRY_DEDUCTION,
+            ...result.arrD.filter(name => name !== CREATIVE_SORRY_DEDUCTION)
+        ];
+    }
+    return result;
 }
 function initFolders(keys) {
     const dirTable = {};

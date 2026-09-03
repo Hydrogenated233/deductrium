@@ -738,6 +738,10 @@ export function initTypeSystem() {
     addRule("@计算", "@apd_trunc : Pu:U@,Pv:U@,Pa:Uu,PC:[[a]]->Uv,Pc:Px:a,C[x],Pctr:Px:[[a]],Py:[[a]],Pcx:C x,Pcy:C y,trans C (trunc x y) (cx) = cy,Px:[[a]],Py:[[a]],apd (@ind_Trunc u v a C c ctr) (trunc x y) = ctr x y (@ind_Trunc u v a C c ctr x) (@ind_Trunc u v a C c ctr y)");
     addRule("@计算", "apd_trunc := @apd_trunc _ _ _ _ _ _");
     addRule("_计算", "apd_trunc");
+    // Creative mode unlocks every rule group; survival never unlocks this
+    // final group. Keep it appended so existing rule indices remain stable.
+    typeName = "sorry";
+    addRule("构造", "false:False");
     return ruleList;
 }
 //# sourceMappingURL=initial.js.map

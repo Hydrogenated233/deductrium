@@ -1,13 +1,85 @@
 import { AssertionSystem } from "./assertion.js";
 import { ASTParser } from "./astparser.js";
 import { DEFERRED_ASSISTANT_STEP } from "./formalsystem.js";
-import { initFormalSystem } from "./initial.js";
+import { CREATIVE_SORRY_DEDUCTION, initFormalSystem } from "./initial.js";
 import { RuleParser } from "./metarule.js";
 import { TR } from "../lang.js";
 // Ensure the synchronous replay hook is registered for CLI save consumers too;
 // the GUI is not necessarily imported by callers of SavesParser.
 import "./proof-assistant.js";
 const FS_SAVE_FORMAT_VERSION = 2;
+function savedDeductionSteps(value) {
+    if (!Array.isArray(value) || !Array.isArray(value[2]))
+        return [];
+    return value[2].filter(step => Array.isArray(step));
+}
+function assistantHistoryUsesRule(payload, name) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const token = new RegExp(`(?:^|\\s|:=)${escaped}(?:\\s|$)`);
+    return !!payload?.history?.some(command => {
+        const normalized = String(command).trim();
+        return normalized === name || token.test(normalized);
+    });
+}
+function savedAssistantUsesRule(value, name) {
+    if (!Array.isArray(value))
+        return false;
+    return assistantHistoryUsesRule(value[5], name);
+}
+function deductionNameUsesAny(fs, deductionIdx, names) {
+    if (typeof deductionIdx !== "string" || !deductionIdx)
+        return false;
+    const atoms = [];
+    try {
+        fs.getAtomDeductionTokens(deductionIdx, atoms);
+    }
+    catch {
+        atoms.push(deductionIdx);
+    }
+    return atoms.some(name => names.has(name));
+}
+function creativeOnlySavedDeductions(fs, dictionary) {
+    // A user-created survival rule named `sorry` is allowed when its own
+    // serialized proof is present.  The creative intrinsic is never stored in
+    // the dictionary, so an unresolved reference to that name identifies the
+    // mode-only rule without breaking old user macros that happened to use the
+    // same name.
+    const blocked = new Set();
+    if (!Array.isArray(dictionary?.[CREATIVE_SORRY_DEDUCTION])) {
+        blocked.add(CREATIVE_SORRY_DEDUCTION);
+    }
+    let changed = true;
+    while (changed) {
+        changed = false;
+        for (const [name, value] of Object.entries(dictionary ?? {})) {
+            if (blocked.has(name))
+                continue;
+            const dependsOnBlocked = savedDeductionSteps(value).some(step => deductionNameUsesAny(fs, step[0], blocked));
+            const replaysBlockedAssistant = Array.from(blocked).some(rule => savedAssistantUsesRule(value, rule));
+            if (!dependsOnBlocked && !replaysBlockedAssistant)
+                continue;
+            blocked.add(name);
+            changed = true;
+        }
+    }
+    return blocked;
+}
+function neutralizeCreativeOnlyPageProofs(fs, blocked) {
+    if (!blocked.size)
+        return;
+    for (const page of fs.inferencePages.pages) {
+        let tainted = false;
+        for (const proposition of page.propositions) {
+            if (!tainted && proposition.from) {
+                tainted = deductionNameUsesAny(fs, proposition.from.deductionIdx, blocked) || Array.from(blocked).some(rule => assistantHistoryUsesRule(proposition.from?.assistant, rule));
+            }
+            if (!tainted)
+                continue;
+            proposition.from = null;
+            delete proposition.deferredKind;
+        }
+    }
+}
 const astparser = new ASTParser;
 export class SavesParser {
     creative = false;
@@ -286,6 +358,9 @@ export class SavesParser {
         if (arr.length < 7)
             arr.splice(2, 0, [], []);
         const [arrC, arrFn, arrVb, arrM, dictD, arrD, arrP, pagePayload] = arr;
+        const blocked = this.creative
+            ? new Set()
+            : creativeOnlySavedDeductions(fs, dictD ?? {});
         for (const v of arrC) {
             fs.consts.add(v);
         }
@@ -296,6 +371,8 @@ export class SavesParser {
             fs.verbs.add(v);
         }
         for (const [k, v] of Object.entries(dictD)) {
+            if (blocked.has(k))
+                continue;
             if (v.length)
                 this.deserializeDeduction(k, fs, v);
         }
@@ -333,7 +410,12 @@ export class SavesParser {
             for (const v of arrP) {
                 fs.propositions.push(this.deserializeProposition(v));
             }
-        return { fs, arrD, arrM };
+        if (!this.creative)
+            neutralizeCreativeOnlyPageProofs(fs, blocked);
+        const visibleDeductions = Array.isArray(arrD)
+            ? arrD.filter(name => !deductionNameUsesAny(fs, name, blocked))
+            : [];
+        return { fs, arrD: visibleDeductions, arrM };
     }
     deserializeMetaMacro(gui, arr) {
         // todo
