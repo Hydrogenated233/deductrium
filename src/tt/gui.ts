@@ -28,8 +28,7 @@ import { ListDragger } from "../fs/itemdragger.js";
 import { TypeRule, initTypeSystem } from "./initial.js";
 import { ProofScriptEditor, scriptThroughCaret } from "../proof-editor.js";
 import {
-    prettySandboxInductiveNamesForDisplay,
-    restoreSemanticMetaNamesForDisplay
+    prettySandboxInductiveNamesForDisplay
 } from "./presentation.js";
 import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator, typeTheoryValidationTimedOut } from "./theorem-validation.js";
 import {
@@ -112,7 +111,7 @@ export function cloneInductiveBundle(bundle: CoreSystemInductiveBundle): CoreSys
         metadata: bundle.metadata
             ? {
                 version: clonedHitPaths && bundle.metadata.version !== 1
-                    ? 7
+                    ? 8
                     : bundle.metadata.version,
                 kind: bundle.metadata.kind,
                 dimension: bundle.metadata.dimension,
@@ -1916,7 +1915,7 @@ export class TTGui {
             // this.core.state.sysDefs[vname] = def;
             if (render && ast.type === "var") {
                 if (ast.checked) {
-                    const displayAst = restoreSemanticMetaNamesForDisplay(Core.clone(ast, true));
+                    const displayAst = Core.clone(ast, true);
                     itVal!.appendChild(this.ast2HTML("", {
                         type: ":",
                         nodes: [displayAst, displayAst.checked],
@@ -1932,7 +1931,7 @@ export class TTGui {
             } else if (render) {
                 itVal!.appendChild(this.ast2HTML(
                     "",
-                    restoreSemanticMetaNamesForDisplay(Core.clone(ast, true))
+                    Core.clone(ast, true)
                 ));
             }
             if (ast.type === ":=") {
@@ -1979,7 +1978,7 @@ export class TTGui {
                     try { this.core.checkType(ast, [], false); } catch { }
                 }
                 const displayType = ast.checked
-                    ? restoreSemanticMetaNamesForDisplay(Core.clone(ast.checked, true))
+                    ? Core.clone(ast.checked, true)
                     : wrapVar("_");
                 container.appendChild(this.ast2HTML("", {
                     type: ":",
@@ -2022,7 +2021,7 @@ export class TTGui {
             value.className = "val";
             const nameAst: AST = { type: "var", name, nodes: [] };
             const typeAst = prettySandboxInductiveNamesForDisplay(
-                restoreSemanticMetaNamesForDisplay(Core.clone(type, true)),
+                Core.clone(type, true),
                 displayOptions
             );
             nameAst.checked = typeAst;
@@ -2441,7 +2440,7 @@ export class TTGui {
             this.addSpan(div, input.value + " - " + parseError);
         } else {
             try {
-                const displayAst = restoreSemanticMetaNamesForDisplay(parser.parseSurface(input.value));
+                const displayAst = parser.parseSurface(input.value);
                 div.appendChild(this.ast2HTML("", displayAst, [], [], currentIdx));
                 if (error) this.addSpan(div, " - " + error);
                 const validatedType = input["validatedType"] as AST | undefined;
@@ -2449,7 +2448,7 @@ export class TTGui {
                     this.addSpan(div, " &nbsp; : &nbsp; ", true);
                     div.appendChild(this.ast2HTML(
                         "",
-                        restoreSemanticMetaNamesForDisplay(Core.clone(validatedType, true)),
+                        Core.clone(validatedType, true),
                         [],
                         [],
                         currentIdx
@@ -3529,9 +3528,7 @@ export class TTGui {
                 input["ttDisplayParseError"] = parseError;
                 input["ttDisplayError"] = error;
                 if (this.isTypePanelVisible()) {
-                    const displayAst = ast
-                        ? restoreSemanticMetaNamesForDisplay(ast)
-                        : ast;
+                    const displayAst = ast;
                     const newDom = parseError
                         ? this.addSpan(div, input.value + " - " + parseError)
                         : this.ast2HTML("", displayAst, [], [], currentIdx);

@@ -97,7 +97,7 @@ assert.equal(sandbox.check(
 assert.equal(sandbox.check("ap_loopC True true rfl").ok, true);
 
 const circleBundle = lowerSandboxHit(circle);
-assert.equal(circleBundle.metadata.version, 7);
+assert.equal(circleBundle.metadata.version, 8);
 assert.equal(circleBundle.metadata.kind, "hit1");
 assert.deepEqual(circleBundle.metadata.constructors.map(ctor => ctor.name), ["baseC"]);
 assert.deepEqual(

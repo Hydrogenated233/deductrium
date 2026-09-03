@@ -66,6 +66,18 @@ assert.equal(theoremInferenceComplete(theoremInferenceTarget(
     nbeInternalMetavariable.ast,
     nbeInternalMetavariable.filledDefinition
 )), true, "the legacy inference fallback must also ignore NbE-private metavariables");
+const reflMeta = nbeInternalMetavariable.filledDefinition.nodes[0].nodes[1].nodes[1];
+assert.equal(reflMeta.name, "?0");
+assert.equal(reflMeta.nbeGeneratedMeta, true,
+    "the Worker result must preserve NbE-generated provenance after public renaming");
+assert.equal(theoremInferenceComplete({
+    type: "apply",
+    name: "",
+    nodes: [
+        { type: "var", name: "refl" },
+        { type: "var", name: "?nbe0" }
+    ]
+}), false, "an unmarked user metavariable must not be trusted because of its spelling");
 
 function hasInferenceHole(ast, seen = new WeakSet()) {
     if (!ast || seen.has(ast)) return false;

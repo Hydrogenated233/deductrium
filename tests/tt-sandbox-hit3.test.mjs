@@ -60,7 +60,7 @@ assert.throws(
     /第 3 阶不能越过空的低阶路径层级/
 );
 
-assert.equal(bundle.metadata.version, 7);
+assert.equal(bundle.metadata.version, 8);
 assert.equal(bundle.metadata.kind, "hit3");
 assert.equal(bundle.metadata.dimension, 3);
 assert.equal(bundle.metadata.ruleSchemaVersion, 1);
@@ -265,7 +265,7 @@ assert.throws(() => register(wrongKind), /摘要与 pathLevels 不一致/);
 
 const wrongBoundary = structuredClone(bundle);
 wrongBoundary.metadata.pathLevels[2].constructors[0].sourcePath = parser.parse("loopB3");
-assert.throws(() => register(wrongBoundary), /v7.*不能携带 legacy 冗余字段/);
+assert.throws(() => register(wrongBoundary), /v8.*不能携带 legacy 冗余字段/);
 
 const wrongEndpoint = structuredClone(bundle);
 wrongEndpoint.metadata.pathLevels[2].constructors[0].leftExpression.name = "faceB3";

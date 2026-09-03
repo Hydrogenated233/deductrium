@@ -22,7 +22,7 @@ const bundles = sources.map(source => lowerSandboxHit(parseSandboxHit(source)));
 
 for (let index = 0; index < bundles.length; index++) {
     const metadata = bundles[index].metadata;
-    assert.equal(metadata.version, 7);
+    assert.equal(metadata.version, 8);
     assert.equal(metadata.dimension, index + 1);
     assert.ok(metadata.pathLevels);
     assert.equal(metadata.pathConstructors, undefined);
@@ -34,6 +34,22 @@ const createEngine = () => {
     const engine = new TTCoreEngine();
     engine.configure({ unlockedTypes: creativeSandboxSystemRuleIds });
     return engine;
+};
+
+const downgradeTwoPathEntries = (bundle, levels) => {
+    for (const path of levels[1].constructors) {
+        const conclusion = bundle.auxiliaryTypes.find(([name]) => name === path.name)[1];
+        const left = path.leftExpression;
+        const right = path.rightExpression;
+        assert.equal(left.kind, "atom");
+        assert.equal(right.kind, "atom");
+        path.left = structuredClone(conclusion.nodes[0]);
+        path.right = structuredClone(conclusion.nodes[1]);
+        path.leftPath = left.name;
+        path.rightPath = right.name;
+        delete path.leftExpression;
+        delete path.rightExpression;
+    }
 };
 
 const jsonBundle = JSON.parse(JSON.stringify(bundles[2]));
@@ -48,6 +64,7 @@ assert.equal(configured.check("cellW3 : faceW3A=faceW3B").ok, true);
 const toLegacy = (bundle, version) => {
     const legacy = structuredClone(bundle);
     const levels = legacy.metadata.pathLevels;
+    downgradeTwoPathEntries(bundle, levels);
     for (const path of levels[2].constructors) {
         const conclusion = bundle.auxiliaryTypes.find(([name]) => name === path.name)[1];
         const left = path.leftExpression;
@@ -80,7 +97,7 @@ for (let index = 0; index < bundles.length; index++) {
     const legacy = toLegacy(bundles[index], index + 3);
     engine.core.registerSystemInductive(legacy);
     const metadata = engine.core.getInductiveMetadata(`Wire${index + 1}`);
-    assert.equal(metadata.version, 7);
+    assert.equal(metadata.version, 8);
     assert.equal(metadata.dimension, index + 1);
     assert.ok(metadata.pathLevels);
     assert.equal(metadata.pathConstructors, undefined);
@@ -91,6 +108,7 @@ for (let index = 0; index < bundles.length; index++) {
 for (const bundle of bundles) {
     const v6 = structuredClone(bundle);
     v6.metadata.version = 6;
+    downgradeTwoPathEntries(bundle, v6.metadata.pathLevels);
     for (const path of v6.metadata.pathLevels[2].constructors) {
         const conclusion = bundle.auxiliaryTypes.find(([name]) => name === path.name)[1];
         const left = path.leftExpression;
@@ -113,7 +131,7 @@ for (const bundle of bundles) {
     }
     const engine = createEngine();
     engine.core.registerSystemInductive(v6);
-    assert.equal(engine.core.getInductiveMetadata(bundle.metadata.typeName).version, 7);
+    assert.equal(engine.core.getInductiveMetadata(bundle.metadata.typeName).version, 8);
 }
 
 const isolationEngine = createEngine();
@@ -131,6 +149,7 @@ assert.notEqual(
 );
 
 const v7WithLegacy = structuredClone(bundles[0]);
+v7WithLegacy.metadata.version = 7;
 v7WithLegacy.metadata.pathConstructors = [];
 assert.throws(
     () => createEngine().core.registerSystemInductive(v7WithLegacy),
@@ -147,19 +166,20 @@ assert.throws(
 );
 
 const v7WithoutPathLevels = structuredClone(bundles[0]);
+v7WithoutPathLevels.metadata.version = 7;
 delete v7WithoutPathLevels.metadata.pathLevels;
 assert.throws(
     () => createEngine().core.registerSystemInductive(v7WithoutPathLevels),
     /v7 缺少 canonical pathLevels/
 );
 
-const v7PathWithLegacyField = structuredClone(bundles[2]);
-v7PathWithLegacyField.metadata.pathLevels[2].constructors[0].sourcePath
-    = structuredClone(v7PathWithLegacyField.metadata.pathLevels[0].constructors[0].left);
+const v8PathWithLegacyField = structuredClone(bundles[2]);
+v8PathWithLegacyField.metadata.pathLevels[2].constructors[0].sourcePath
+    = structuredClone(v8PathWithLegacyField.metadata.pathLevels[0].constructors[0].left);
 assert.throws(
-    () => createEngine().core.registerSystemInductive(v7PathWithLegacyField),
-    /v7 三阶路径构造子.*不能携带 legacy 冗余字段/,
-    "v7 path entries must not carry a second, forgeable boundary representation"
+    () => createEngine().core.registerSystemInductive(v8PathWithLegacyField),
+    /v8 三阶路径构造子.*不能携带 legacy 冗余字段/,
+    "v8 path entries must not carry a second, forgeable boundary representation"
 );
 
 const unknownAtom = structuredClone(bundles[2]);
@@ -220,10 +240,11 @@ const compositeSource = "hit LegacyComposite : U | legacyPoint : LegacyComposite
     + "| path3 legacyCell : (legacyFace01▪legacyFace12)=legacyFace02";
 const v6Composite = lowerSandboxHit(parseSandboxHit(compositeSource));
 v6Composite.metadata.version = 6;
+downgradeTwoPathEntries(v6Composite, v6Composite.metadata.pathLevels);
 assert.throws(
     () => createEngine().core.registerSystemInductive(v6Composite),
     /legacy 三阶路径端点 metadata 不完整/,
     "v6 migration must remain direct-atom-only instead of interpreting v7 expression fields"
 );
 
-console.log("HIT metadata v7 wire and v3-v6 migration regression passed");
+console.log("HIT metadata v8 wire and v3-v7 migration regression passed");

@@ -1,4 +1,125 @@
 import { cloneSyntax, collectFreeBondVarIds, contextWithScope, isBinderNode, lookupScopePosition, lookupScope, prependContext, referencesBoundBinder, ScopeCursor, scopePosition, validBondVarId as validId } from "./scoped-syntax.js";
+const solverPrivateMetaPattern = /^\?nbe([0-9]+)$/;
+const publicNumericMetaPattern = /^\?([0-9]+)$/;
+/**
+ * Translate one checker request's private metavariables at the API boundary.
+ * All result fields share one rename table, so a generalized meta keeps the
+ * same public name in its type, term and expected type. User-owned `?N` names
+ * reserve their slots before generated names are allocated.
+ */
+function publicizeNbeSuccess(result, state, schematicInternalNames = []) {
+    const value = result;
+    const astRoots = [
+        value.type,
+        value.term,
+        value.elaboratedTerm,
+        value.expectedTerm,
+        value.leftTerm,
+        value.rightTerm,
+        ...(value.generalizedMetas?.map(meta => meta.expectedType) ?? []),
+        ...(value.sourceMetaConstraints?.map(constraint => constraint.value) ?? [])
+    ].filter((ast) => !!ast);
+    const occupied = new Set();
+    const privateNames = new Set();
+    const collectVisibleName = (name) => {
+        const match = publicNumericMetaPattern.exec(name ?? "");
+        if (match)
+            occupied.add(Number(match[1]));
+    };
+    const isSolverPrivateName = (name) => solverPrivateMetaPattern.test(name)
+        && state.metas.has(name)
+        && !state.sourceMetas.has(name);
+    const collectInternalName = (name) => {
+        if (!name)
+            return;
+        const surface = state.inputMetaSurfaceNames.get(name);
+        if (surface) {
+            collectVisibleName(surface);
+            return;
+        }
+        if (isSolverPrivateName(name))
+            privateNames.add(name);
+        else
+            collectVisibleName(name);
+    };
+    for (const surface of state.inputMetaSurfaceNames.values()) {
+        collectVisibleName(surface);
+    }
+    for (const name of state.sourceMetas.keys())
+        collectVisibleName(name);
+    const scanned = new WeakSet();
+    const stack = [...astRoots];
+    while (stack.length) {
+        const node = stack.pop();
+        if (!node || typeof node !== "object" || scanned.has(node))
+            continue;
+        scanned.add(node);
+        if (node.type === "var")
+            collectInternalName(node.name);
+        for (const child of node.nodes ?? [])
+            stack.push(child);
+        if (node.checked)
+            stack.push(node.checked);
+    }
+    for (const meta of value.generalizedMetas ?? [])
+        collectInternalName(meta.name);
+    for (const constraint of value.sourceMetaConstraints ?? []) {
+        collectVisibleName(constraint.name);
+    }
+    for (const name of schematicInternalNames)
+        collectInternalName(name);
+    if (!schematicInternalNames.length) {
+        for (const name of value.schematicMetaNames ?? [])
+            collectVisibleName(name);
+    }
+    const renames = new Map();
+    let nextPublic = 0;
+    const privateOrder = [...privateNames].sort((left, right) => Number(solverPrivateMetaPattern.exec(left)?.[1] ?? 0)
+        - Number(solverPrivateMetaPattern.exec(right)?.[1] ?? 0));
+    for (const name of privateOrder) {
+        while (occupied.has(nextPublic))
+            nextPublic++;
+        const publicName = `?${nextPublic++}`;
+        occupied.add(Number(publicName.slice(1)));
+        renames.set(name, publicName);
+    }
+    const publicName = (name) => state.inputMetaSurfaceNames.get(name) ?? renames.get(name) ?? name;
+    const renamed = new WeakSet();
+    const renameStack = [...astRoots];
+    while (renameStack.length) {
+        const node = renameStack.pop();
+        if (!node || typeof node !== "object" || renamed.has(node))
+            continue;
+        renamed.add(node);
+        if (node.type === "var") {
+            const originalName = node.name;
+            if (renames.has(originalName))
+                node.nbeGeneratedMeta = true;
+            node.name = publicName(originalName);
+        }
+        for (const child of node.nodes ?? [])
+            renameStack.push(child);
+        if (node.checked)
+            renameStack.push(node.checked);
+    }
+    const output = { ...value };
+    if (value.generalizedMetas?.length) {
+        output.generalizedMetas = value.generalizedMetas.map(meta => ({
+            name: publicName(meta.name),
+            expectedType: meta.expectedType
+        }));
+    }
+    if (value.sourceMetaConstraints?.length) {
+        output.sourceMetaConstraints = value.sourceMetaConstraints.map(constraint => ({
+            name: constraint.name,
+            value: constraint.value
+        }));
+    }
+    if (schematicInternalNames.length) {
+        output.schematicMetaNames = schematicInternalNames.map(publicName);
+    }
+    return output;
+}
 const success = (value) => ({ status: "success", value });
 const invalid = (code) => ({ status: "invalid", code });
 const unsupported = (code) => ({ status: "unsupported", code });
@@ -191,6 +312,17 @@ function prepareAst(ast, scope, state, dropUnboundIds = false, freshenBinders = 
             }
             name = renamed;
         }
+        else if (name?.startsWith("?") && ast.nbeGeneratedMeta
+            && !state.sourceMetas.has(name)) {
+            let renamed = state.generatedInputMetas.get(name);
+            if (!renamed) {
+                renamed = allocateMeta(state);
+                state.generatedInputMetas.set(name, renamed);
+                state.inputMetas.add(renamed);
+                state.generatedSchematicMetas.add(renamed);
+            }
+            name = renamed;
+        }
         else if (name?.startsWith("?") && state.allowNamedSchematicMetas
             && !state.sourceMetas.has(name)) {
             let renamed = state.namedInputMetas.get(name);
@@ -340,6 +472,7 @@ function assignSyntax(target, source) {
     target.nodes = source.nodes?.map(cloneSyntax);
     target.checked = source.checked ? cloneSyntax(source.checked) : undefined;
     target.displayExplicitAt = source.displayExplicitAt;
+    target.nbeGeneratedMeta = source.nbeGeneratedMeta;
 }
 function restoreResolvedSyntax(target, source, state) {
     const checked = target.checked;
@@ -376,7 +509,8 @@ function resolveMetas(ast, state, resolving = new Set()) {
         return {
             type: "var",
             name: ast.name,
-            checked: ast.checked ? resolveMetas(ast.checked, state, resolving) : undefined
+            checked: ast.checked ? resolveMetas(ast.checked, state, resolving) : undefined,
+            nbeGeneratedMeta: ast.nbeGeneratedMeta
         };
     }
     return {
@@ -385,19 +519,22 @@ function resolveMetas(ast, state, resolving = new Set()) {
         bondVarId: ast.bondVarId,
         nodes: ast.nodes?.map(child => resolveMetas(child, state, resolving)),
         checked: ast.checked ? resolveMetas(ast.checked, state, resolving) : undefined,
-        displayExplicitAt: ast.displayExplicitAt
+        displayExplicitAt: ast.displayExplicitAt,
+        nbeGeneratedMeta: ast.nbeGeneratedMeta
     };
 }
 function restoreUnsolvedInputHoles(ast, state) {
     if (isLocalMeta(ast, state)
         && !state.metaSolutions.has(ast.name)
-        && state.inputMetas.has(ast.name)) {
+        && state.inputMetas.has(ast.name)
+        && !state.generatedSchematicMetas.has(ast.name)) {
         return {
             type: "var",
             name: state.inputMetaSurfaceNames.get(ast.name) ?? "_",
             checked: ast.checked
                 ? restoreUnsolvedInputHoles(ast.checked, state)
-                : undefined
+                : undefined,
+            nbeGeneratedMeta: ast.nbeGeneratedMeta
         };
     }
     return {
@@ -408,7 +545,8 @@ function restoreUnsolvedInputHoles(ast, state) {
         checked: ast.checked
             ? restoreUnsolvedInputHoles(ast.checked, state)
             : undefined,
-        displayExplicitAt: ast.displayExplicitAt
+        displayExplicitAt: ast.displayExplicitAt,
+        nbeGeneratedMeta: ast.nbeGeneratedMeta
     };
 }
 function canReturnUnsolvedInputMetas(names, state) {
@@ -417,6 +555,9 @@ function canReturnUnsolvedInputMetas(names, state) {
     return [...names].every(name => {
         if (!state.metaExpectedTypes.has(name))
             return false;
+        if (state.generatedSchematicMetas.has(name)) {
+            return state.allowGeneratedSchematicMetas;
+        }
         if (state.inputMetas.has(name)) {
             return state.inputMetaSurfaceNames.has(name)
                 ? state.allowNamedSchematicMetas
@@ -424,10 +565,6 @@ function canReturnUnsolvedInputMetas(names, state) {
         }
         if (state.allowUnsolvedTermMetas && inputClosure.has(name))
             return true;
-        if (state.generatedSchematicMetas.has(name)) {
-            return state.allowGeneratedSchematicMetas
-                && state.metaExpectedTypes.has(name);
-        }
         return state.allowNamedSchematicMetas && namedClosure.has(name);
     });
 }
@@ -1286,17 +1423,14 @@ export class SemanticNbeTypeChecker {
         const publicType = resolvedTerm && !options.preserveKernelType
             ? compactImplicitAliasSyntax(type, this.kernel)
             : type;
-        return {
+        return publicizeNbeSuccess({
             status: "success",
             type: publicType,
             ...(term ? { term } : {}),
             ...(elaboratedTerm ? { elaboratedTerm } : {}),
             ...(generalizedMetas?.length ? { generalizedMetas } : {}),
-            ...(unresolvedResultMetas.size ? {
-                schematicMetaNames: [...unresolvedResultMetas].map(name => prepared.value.state.inputMetaSurfaceNames.get(name) ?? name)
-            } : {}),
             ...(sourceMetaConstraints.length ? { sourceMetaConstraints } : {})
-        };
+        }, prepared.value.state, [...unresolvedResultMetas]);
     }
     tryCheck(ast, expected, context = [], options = {}) {
         const prepared = this.prepare(ast, context, options);
@@ -1403,17 +1537,15 @@ export class SemanticNbeTypeChecker {
         const publicType = resolvedTerm && !options.preserveKernelType
             ? compactImplicitAliasSyntax(type, this.kernel)
             : type;
-        const schematicMetaNames = [...unresolvedResultMetas].map(name => prepared.value.state.inputMetaSurfaceNames.get(name) ?? name);
-        return {
+        return publicizeNbeSuccess({
             status: "success",
             type: publicType,
             expectedTerm,
             ...(term ? { term } : {}),
             ...(elaboratedTerm ? { elaboratedTerm } : {}),
             ...(generalizedMetas.length ? { generalizedMetas } : {}),
-            ...(schematicMetaNames.length ? { schematicMetaNames } : {}),
             ...(sourceMetaConstraints.length ? { sourceMetaConstraints } : {})
-        };
+        }, prepared.value.state, [...unresolvedResultMetas]);
     }
     /**
      * Check two well-typed terms for definitional equality while elaborating
@@ -1503,8 +1635,7 @@ export class SemanticNbeTypeChecker {
         const publicType = needsTerms && !options.preserveKernelType
             ? compactImplicitAliasSyntax(type, this.kernel)
             : type;
-        const schematicMetaNames = [...unresolvedResultMetas].map(name => state.inputMetaSurfaceNames.get(name) ?? name);
-        return {
+        return publicizeNbeSuccess({
             status: "success",
             type: publicType,
             ...(needsTerms ? {
@@ -1512,9 +1643,8 @@ export class SemanticNbeTypeChecker {
                 rightTerm: compactImplicitAliasSyntax(returnedRight, this.kernel, state)
             } : {}),
             ...(generalizedMetas.length ? { generalizedMetas } : {}),
-            ...(schematicMetaNames.length ? { schematicMetaNames } : {}),
             ...(sourceMetaConstraints.length ? { sourceMetaConstraints } : {})
-        };
+        }, state, [...unresolvedResultMetas]);
     }
     prepare(ast, context, options) {
         if (!ast || typeof ast !== "object" || containsSemanticMetadata(ast)) {
@@ -1530,6 +1660,7 @@ export class SemanticNbeTypeChecker {
             metas: new Set,
             inputMetas: new Set,
             namedInputMetas: new Map,
+            generatedInputMetas: new Map,
             inputMetaSurfaceNames: new Map,
             metaSolutions: new Map,
             metaExpectedTypes: new Map,
@@ -2540,12 +2671,14 @@ export class SemanticNbeTypeChecker {
         if (isLocalMeta(resolved, state) && resolved.name === name)
             return "equal";
         if (isLocalMeta(resolved, state)) {
-            // Keep a user-written schematic meta as the representative when a
-            // fresh implicit-alias meta is unified with it. This preserves the
-            // shared `?x` surface name and makes its inferred type dependencies
-            // reachable from the schematic root.
-            if (state.inputMetaSurfaceNames.has(name)
-                && !state.inputMetaSurfaceNames.has(resolved.name)) {
+            // Prefer stable public metas over anonymous holes when two flex
+            // variables unify. User-written names outrank metas returned by
+            // an earlier NbE request, which in turn outrank fresh implicit
+            // alias holes. This keeps both surface identity and provenance.
+            const representativePriority = (metaName) => state.inputMetaSurfaceNames.has(metaName) ? 2
+                : state.generatedSchematicMetas.has(metaName) ? 1
+                    : 0;
+            if (representativePriority(name) > representativePriority(resolved.name)) {
                 return this.bindMeta(resolved.name, makeVariable(name), context, state, candidateFromSynthesizedType);
             }
             if (occursMeta(name, resolved, state))

@@ -179,7 +179,9 @@ export type AST = {
     type: string, name: string, nodes?: AST[],
     checked?: AST, err?: any, bondVarId?: number, origin?: boolean | AST,
     /** True only for an @-alias occurrence explicitly typed by the user. */
-    displayExplicitAt?: boolean
+    displayExplicitAt?: boolean,
+    /** Non-semantic provenance for a metavariable allocated by the NbE solver. */
+    nbeGeneratedMeta?: true
 };
 export class ASTParser {
     keywords = [":=", "[[", "]]", "->", "~=", "==="];

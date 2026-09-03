@@ -355,43 +355,55 @@ const hit2Metadata = candidate => candidate.metadata.pathLevels[1].constructors;
 
 assert.doesNotThrow(() => createHitEngine().core.registerSystemInductive(cloneHit2()));
 
-for (const [field, wrongPath] of [
+const disguisedCanonicalHit = cloneHit2();
+disguisedCanonicalHit.metadata.kind = "inductive";
+disguisedCanonicalHit.metadata.dimension = 0;
+hit2Metadata(disguisedCanonicalHit)[0].leftExpression = {
+    kind: "atom",
+    name: "missingDisguisedPath",
+    arguments: []
+};
+assert.throws(
+    () => createHitEngine().core.registerSystemInductive(disguisedCanonicalHit),
+    /非 HIT metadata inductive 不能包含路径构造子/,
+    "ordinary-inductive metadata must not bypass canonical HIT path certification"
+);
+
+const disguisedLegacyHit = cloneBundle();
+disguisedLegacyHit.metadata.kind = "inductive";
+disguisedLegacyHit.metadata.dimension = 0;
+assert.throws(
+    () => createEngine().core.registerSystemInductive(disguisedLegacyHit),
+    /非 HIT metadata inductive 不能包含路径构造子/,
+    "ordinary-inductive metadata must not bypass legacy HIT path certification"
+);
+
+for (const [field, legacyValue] of [
+    ["left", parse("loopRightMetadata A z")],
+    ["right", parse("loopLeftMetadata A z")],
     ["leftPath", "loopRightMetadata"],
     ["rightPath", "loopLeftMetadata"]
 ]) {
-    const mismatchedHead = cloneHit2();
-    hit2Metadata(mismatchedHead)[0][field] = wrongPath;
+    const redundantLegacyField = cloneHit2();
+    hit2Metadata(redundantLegacyField)[0][field] = legacyValue;
     assert.throws(
-        () => createHitEngine().core.registerSystemInductive(mismatchedHead),
-        /端点头常量与 [左右]Path metadata 不一致/
+        () => createHitEngine().core.registerSystemInductive(redundantLegacyField),
+        /HIT metadata v8 二阶路径构造子 squareMetadata 不能携带 legacy 冗余字段/
     );
 }
 
 const missingPathArgument = cloneHit2();
-hit2Metadata(missingPathArgument)[0].left = parse("loopLeftMetadata A");
-missingPathArgument.auxiliaryTypes.find(([name]) => name === "squareMetadata")[1]
-    = parse("ΠA:U,Πz:A,(loopLeftMetadata A)=(loopRightMetadata A z)");
+hit2Metadata(missingPathArgument)[0].leftExpression.arguments = [];
 assert.throws(
     () => createHitEngine().core.registerSystemInductive(missingPathArgument),
     /左端点参数数量与一阶路径 loopLeftMetadata telescope 不一致/
 );
 
 const extraPathArgument = cloneHit2();
-hit2Metadata(extraPathArgument)[0].right = parse("loopRightMetadata A z z");
-extraPathArgument.auxiliaryTypes.find(([name]) => name === "squareMetadata")[1]
-    = parse("ΠA:U,Πz:A,(loopLeftMetadata A z)=(loopRightMetadata A z z)");
+hit2Metadata(extraPathArgument)[0].rightExpression.arguments.push(parse("z"));
 assert.throws(
     () => createHitEngine().core.registerSystemInductive(extraPathArgument),
     /右端点参数数量与一阶路径 loopRightMetadata telescope 不一致/
-);
-
-const mismatchedUniformParameter = cloneHit2();
-hit2Metadata(mismatchedUniformParameter)[0].left = parse("loopLeftMetadata True z");
-mismatchedUniformParameter.auxiliaryTypes.find(([name]) => name === "squareMetadata")[1]
-    = parse("ΠA:U,Πz:A,(loopLeftMetadata True z)=(loopRightMetadata A z)");
-assert.throws(
-    () => createHitEngine().core.registerSystemInductive(mismatchedUniformParameter),
-    /左端点未保持统一参数：A/
 );
 
 console.log("Core HIT path-metadata regression passed");

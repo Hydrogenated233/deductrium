@@ -10,7 +10,8 @@ function cloneDefinitionAst(ast) {
         checked: null,
         err: ast.err,
         bondVarId: ast.bondVarId,
-        displayExplicitAt: ast.displayExplicitAt
+        displayExplicitAt: ast.displayExplicitAt,
+        nbeGeneratedMeta: ast.nbeGeneratedMeta
     };
     if (ast.nodes)
         cloned.nodes = ast.nodes.map(cloneDefinitionAst);

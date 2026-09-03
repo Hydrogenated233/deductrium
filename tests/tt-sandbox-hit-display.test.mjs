@@ -44,7 +44,7 @@ const bundle = {
 const cloned = cloneInductiveBundle(bundle);
 assert.equal(cloned.metadata.kind, "hit1");
 assert.equal(cloned.metadata.dimension, 1);
-assert.equal(cloned.metadata.version, 7);
+assert.equal(cloned.metadata.version, 8);
 const clonedPath = cloned.metadata.pathLevels[0].constructors[0];
 assert.notEqual(clonedPath.left,
     bundle.metadata.pathConstructors[0].left);
@@ -104,17 +104,21 @@ const hit2Bundle = {
 const clonedHit2 = cloneInductiveBundle(hit2Bundle);
 assert.equal(clonedHit2.metadata.kind, "hit2");
 assert.equal(clonedHit2.metadata.dimension, 2);
-assert.equal(clonedHit2.metadata.version, 7);
+assert.equal(clonedHit2.metadata.version, 8);
 const clonedTwoPath = clonedHit2.metadata.pathLevels[1].constructors[0];
-assert.equal(clonedTwoPath.leftPath, "loopSquareA");
-assert.equal(clonedTwoPath.rightPath, "loopSquareB");
-assert.notEqual(clonedTwoPath.left,
-    hit2Bundle.metadata.twoPathConstructors[0].left);
-assert.notEqual(clonedTwoPath.left,
-    hit2Bundle.metadata.twoPathConstructors[0].left);
+assert.deepEqual(clonedTwoPath.leftExpression, {
+    kind: "atom",
+    name: "loopSquareA",
+    arguments: []
+});
+assert.deepEqual(clonedTwoPath.rightExpression, {
+    kind: "atom",
+    name: "loopSquareB",
+    arguments: []
+});
 hit2Bundle.metadata.twoPathConstructors[0].left.name = "mutatedLoop";
-clonedTwoPath.right.name = "mutatedLoop";
-assert.equal(clonedTwoPath.left.name, "loopSquareA");
+clonedTwoPath.rightExpression.name = "mutatedLoop";
+assert.equal(clonedTwoPath.leftExpression.name, "loopSquareA");
 assert.equal(hit2Bundle.metadata.twoPathConstructors[0].right.name, "loopSquareB");
 hit2Bundle.metadata.twoPathConstructors[0].left.name = "loopSquareA";
 
@@ -135,7 +139,7 @@ hit3Bundle.metadata.threePathConstructors = [{
 }];
 const clonedHit3 = cloneInductiveBundle(hit3Bundle);
 assert.equal(clonedHit3.metadata.kind, "hit3");
-assert.equal(clonedHit3.metadata.version, 7);
+assert.equal(clonedHit3.metadata.version, 8);
 const clonedThreePath = clonedHit3.metadata.pathLevels[2].constructors[0];
 assert.equal(clonedThreePath.leftExpression.name, "squarePath");
 assert.equal(clonedThreePath.actionComputationName, "ap3_cubePath");

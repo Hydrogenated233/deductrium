@@ -63,27 +63,27 @@ assert.throws(
 );
 
 const bundle = lowerSandboxHit(parsed);
-assert.equal(bundle.metadata.version, 7);
+assert.equal(bundle.metadata.version, 8);
 assert.equal(bundle.metadata.kind, "hit2");
 assert.equal(bundle.metadata.dimension, 2);
 assert.equal(bundle.metadata.typeName, "SurfaceX");
 const twoPathMetadata = bundle.metadata.pathLevels[1].constructors;
 assert.deepEqual(twoPathMetadata.map(path => ({
     name: path.name,
-    leftPath: path.leftPath,
-    rightPath: path.rightPath,
+    leftExpression: path.leftExpression,
+    rightExpression: path.rightExpression,
     computationName: path.computationName,
     strongComputationName: path.strongComputationName
 })), [{
     name: "squareX",
-    leftPath: "loopAX",
-    rightPath: "loopBX",
+    leftExpression: { kind: "atom", name: "loopAX", arguments: [] },
+    rightExpression: { kind: "atom", name: "loopBX", arguments: [] },
     computationName: "apd_squareX",
     strongComputationName: "ap2_squareX"
 }]);
 assert.deepEqual(twoPathMetadata[0].argumentTypes, []);
-assert.equal(twoPathMetadata[0].left.name, "loopAX");
-assert.equal(twoPathMetadata[0].right.name, "loopBX");
+assert.equal(twoPathMetadata[0].leftExpression.name, "loopAX");
+assert.equal(twoPathMetadata[0].rightExpression.name, "loopBX");
 assert.equal(bundle.metadata.twoPathConstructors, undefined);
 
 // The second path is propositional. It must expose computation theorem
@@ -184,7 +184,7 @@ assert.equal(restoredDeclaration.folderId, folder.id);
 assert.ok(restored.check("squareX : loopAX = loopBX").ok);
 assert.equal(restored.bridge().inductives[0].metadata.kind, "hit2");
 assert.equal(restored.bridge().inductives[0].metadata.dimension, 2);
-assert.equal(restored.bridge().inductives[0].metadata.version, 7);
+assert.equal(restored.bridge().inductives[0].metadata.version, 8);
 assert.equal(restored.bridge().inductives[0].metadata.pathLevels[1].constructors[0].name, "squareX");
 
 // Uniform parameters must be threaded through generated path-computation

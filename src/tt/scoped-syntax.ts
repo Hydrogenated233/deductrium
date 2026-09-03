@@ -171,7 +171,8 @@ export function cloneSyntax(ast: AST): AST {
         name: ast.name,
         bondVarId: ast.bondVarId,
         nodes: ast.nodes?.map(cloneSyntax),
-        displayExplicitAt: ast.displayExplicitAt
+        displayExplicitAt: ast.displayExplicitAt,
+        nbeGeneratedMeta: ast.nbeGeneratedMeta
     };
 }
 

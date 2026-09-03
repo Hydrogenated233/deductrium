@@ -3,7 +3,7 @@ import { Assist } from "./assist.js";
 import { AST, ASTParser } from "./astparser.js";
 import { Context, Core } from "./core.js";
 import { TTCoreConfig, TTCoreEngine } from "./engine.js";
-import { compactImplicitAliasesForDisplay, markExplicitAtSyntax, restoreSemanticMetaNamesForDisplay } from "./presentation.js";
+import { compactImplicitAliasesForDisplay, markExplicitAtSyntax } from "./presentation.js";
 
 const parser = new ASTParser();
 
@@ -232,11 +232,11 @@ export class TTAssistEngine {
     }
 
     private presentAst(ast: AST, explicitAtNames: ReadonlySet<string>) {
-        return restoreSemanticMetaNamesForDisplay(compactImplicitAliasesForDisplay(
+        return compactImplicitAliasesForDisplay(
             Core.clone(ast, true),
             this.engine.core.opaque,
             explicitAtNames
-        ));
+        );
     }
 
     private requireAssist() {

@@ -81,6 +81,32 @@ for (const name of [
     "ap3_inverseCompositeP", "apd3_inverseCompositeP"
 ]) assert.equal(parameterized.check(name).ok, true, `${name} must form with uniform parameters`);
 
+const compositeBoundarySource = "hit CompositeBoundary3 : U "
+    + "| baseCB3 : CompositeBoundary3 "
+    + "| pCB3 : baseCB3=baseCB3 "
+    + "| qCB3 : baseCB3=baseCB3 "
+    + "| path2 commCB3 : (pCB3▪qCB3)=(qCB3▪pCB3) "
+    + "| path3 cellCB3 : commCB3=commCB3";
+const compositeBoundaryParsed = parseSandboxHit(compositeBoundarySource);
+const commBoundary = compositeBoundaryParsed.pathLevels[1].constructors[0];
+assert.equal(commBoundary.leftExpression.kind, "compose");
+assert.equal(commBoundary.rightExpression.kind, "compose");
+const compositeBoundaryBundle = lowerSandboxHit(compositeBoundaryParsed);
+assert.equal(compositeBoundaryBundle.metadata.version, 8);
+const compositeBoundary = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+});
+const compositeBoundaryAdded = compositeBoundary.add(compositeBoundarySource);
+assert.equal(compositeBoundaryAdded.ok, true, compositeBoundaryAdded.error);
+for (const name of [
+    "cellCB3",
+    "ap3_cellCB3", "@ap3_cellCB3",
+    "apd3_cellCB3", "@apd3_cellCB3"
+]) {
+    assert.equal(compositeBoundary.check(name).ok, true,
+        `${name} must recursively compute the composite path2 boundary`);
+}
+
 const assist = new TTAssistEngine();
 assist.configure({
     unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))],
@@ -130,6 +156,8 @@ const register = candidate => {
     engine.configure({ unlockedTypes: creativeSandboxSystemRuleIds });
     return engine.core.registerSystemInductive(candidate);
 };
+assert.doesNotThrow(() => register(structuredClone(compositeBoundaryBundle)),
+    "Core must certify path3 over a path2 with composite first-path boundaries");
 const forged = structuredClone(bundle);
 const expression = forged.metadata.pathLevels[2].constructors
     .find(path => path.name === "composeComposite3");

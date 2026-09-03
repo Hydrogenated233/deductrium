@@ -5,6 +5,7 @@ export type TheoremInferenceNode = {
     name?: string;
     nodes?: readonly TheoremInferenceNode[];
     checked?: TheoremInferenceNode | null;
+    nbeGeneratedMeta?: true;
 };
 
 /** Determine whether every legacy inference hole has enough checked metadata. */
@@ -17,7 +18,7 @@ export function theoremInferenceComplete(ast: TheoremInferenceNode | null | unde
     ): boolean => {
         if (!node || seen.has(node)) return true;
         seen.add(node);
-        const isPrivateNbeVariable = node.name?.match(/^\?nbe\d+$/) !== null;
+        const isPrivateNbeVariable = node.nbeGeneratedMeta === true;
         // NbE may materialize a private metavariable for the implicit equality
         // argument of `refl`.  That particular slot is an implementation
         // detail; private metavariables elsewhere still represent unresolved

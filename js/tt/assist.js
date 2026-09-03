@@ -1631,7 +1631,8 @@ export class Assist {
         return this.substituteSemanticMetas(result, metas);
     }
     isPrivateSemanticMeta(ast) {
-        return ast?.type === "var" && !ast.bondVarId && /^\?nbe\d+$/.test(ast.name);
+        return ast?.type === "var" && !ast.bondVarId
+            && ast.nbeGeneratedMeta === true;
     }
     substituteSemanticMetas(ast, metas) {
         if (this.isPrivateSemanticMeta(ast) && metas.has(ast.name)) {
@@ -1641,7 +1642,8 @@ export class Assist {
             type: ast.type,
             name: ast.name,
             bondVarId: ast.bondVarId,
-            displayExplicitAt: ast.displayExplicitAt
+            displayExplicitAt: ast.displayExplicitAt,
+            nbeGeneratedMeta: ast.nbeGeneratedMeta
         };
         if (ast.nodes)
             result.nodes = ast.nodes.map(node => this.substituteSemanticMetas(node, metas));
@@ -1704,7 +1706,8 @@ export class Assist {
             name: ast.name,
             nodes,
             bondVarId: ast.bondVarId,
-            displayExplicitAt: ast.displayExplicitAt
+            displayExplicitAt: ast.displayExplicitAt,
+            nbeGeneratedMeta: ast.nbeGeneratedMeta
         };
     }
     /** Lean-style induction entry point.  `with` names the inductive-step

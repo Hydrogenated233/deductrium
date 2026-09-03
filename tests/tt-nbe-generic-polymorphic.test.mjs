@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 
 import { ASTParser } from "../js/tt/astparser.js";
-import { Core } from "../js/tt/core.js";
 import { TTCoreEngine } from "../js/tt/engine.js";
 import { initTypeSystem } from "../js/tt/initial.js";
-import { restoreSemanticMetaNamesForDisplay } from "../js/tt/presentation.js";
 
 const parser = new ASTParser();
 const engine = new TTCoreEngine();
@@ -45,16 +43,32 @@ const levelIdem = core.semanticTypeChecker.trySynthesize(
     { elaborateMetas: true, allowGeneratedSchematicMetas: true }
 );
 assert.equal(levelIdem.status, "success");
-assert.match(
-    parser.stringify(levelIdem.type),
-    /\?nbe[0-9]+/,
-    "solver-private inference names must remain disjoint from user-written ?N names"
-);
 assert.equal(
-    parser.stringify(restoreSemanticMetaNamesForDisplay(Core.clone(levelIdem.type, true))),
+    parser.stringify(levelIdem.type),
     "((U?0)→(U?0))",
-    "cached polymorphic types must normalize idempotent maxima at the presentation boundary"
+    "the checker API must publicize metas and normalize idempotent maxima"
 );
+
+core.semanticTypeChecker.setConstantSchemeSnapshot("levelIdemCollision", {
+    type: parser.parse("U?0→U(@max ?0 ?0)"),
+    metas: [{ name: "?0", expectedType: parser.parse("U@") }]
+});
+const collision = core.semanticTypeChecker.trySynthesize(
+    parser.parse("λx:?0.levelIdemCollision"),
+    [],
+    {
+        elaborateMetas: true,
+        allowNamedSchematicMetas: true,
+        allowGeneratedSchematicMetas: true
+    }
+);
+assert.equal(collision.status, "success");
+assert.equal(
+    parser.stringify(collision.type),
+    "(Πx:?0,((U?1)→(U?1)))",
+    "generated public metas must avoid a user-owned ?0 name"
+);
+assert.deepEqual(collision.schematicMetaNames, ["?0", "?1"]);
 
 const declaration = engine.registerDefinition(parser.parse("d:=rfl:rfl=rfl"));
 assert.equal(declaration.ok, true, declaration.error ?? "d definition");

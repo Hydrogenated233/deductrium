@@ -5,7 +5,7 @@ export function theoremInferenceComplete(ast) {
         if (!node || seen.has(node))
             return true;
         seen.add(node);
-        const isPrivateNbeVariable = node.name?.match(/^\?nbe\d+$/) !== null;
+        const isPrivateNbeVariable = node.nbeGeneratedMeta === true;
         // NbE may materialize a private metavariable for the implicit equality
         // argument of `refl`.  That particular slot is an implementation
         // detail; private metavariables elsewhere still represent unresolved

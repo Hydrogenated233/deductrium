@@ -3,7 +3,7 @@ import { Assist } from "./assist.js";
 import { ASTParser } from "./astparser.js";
 import { Core } from "./core.js";
 import { TTCoreEngine } from "./engine.js";
-import { compactImplicitAliasesForDisplay, markExplicitAtSyntax, restoreSemanticMetaNamesForDisplay } from "./presentation.js";
+import { compactImplicitAliasesForDisplay, markExplicitAtSyntax } from "./presentation.js";
 const parser = new ASTParser();
 function isProofTargetSort(type) {
     return (type?.type === "apply"
@@ -177,7 +177,7 @@ export class TTAssistEngine {
         };
     }
     presentAst(ast, explicitAtNames) {
-        return restoreSemanticMetaNamesForDisplay(compactImplicitAliasesForDisplay(Core.clone(ast, true), this.engine.core.opaque, explicitAtNames));
+        return compactImplicitAliasesForDisplay(Core.clone(ast, true), this.engine.core.opaque, explicitAtNames);
     }
     requireAssist() {
         if (!this.assist)
