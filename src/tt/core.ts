@@ -440,6 +440,8 @@ export type CoreHitPathConstructorMetadata = {
     argumentNames?: string[];
     left: AST;
     right: AST;
+    /** Common family indices of both point endpoints. Required for indexed hit1. */
+    resultIndices?: AST[];
     computationName?: string;
 };
 
@@ -697,6 +699,42 @@ function migrateLegacyCoreHitThreePathMetadata(
     return { ...common, leftExpression, rightExpression };
 }
 
+function reconstructCoreHitEndpointResultIndices(
+    metadata: CoreSystemInductiveMetadata,
+    endpoint: AST,
+    label: string
+) {
+    const parameterCount = Number(metadata.parameterCount ?? 0);
+    const indexCount = Number(metadata.indexCount ?? 0);
+    const application = generatedApplicationParts(endpoint);
+    const constructorName = generatedFreeConstantName(application.head) ?? "";
+    const constructor = metadata.constructors.find(candidate =>
+        candidate.name === constructorName
+    );
+    if (!constructor) {
+        throw new Error(`${label} 引用了未知点构造子：${constructorName || "<非常量>"}`);
+    }
+    const argumentNames = constructor.argumentNames ?? [];
+    if (argumentNames.length !== constructor.argumentTypes.length
+        || new Set(argumentNames).size !== argumentNames.length) {
+        throw new Error(`${label} 点构造子 ${constructorName} argumentNames 与 telescope 不一致`);
+    }
+    if (application.arguments.length !== parameterCount + argumentNames.length) {
+        throw new Error(`${label} 点构造子 ${constructorName} 参数数量与 metadata 不一致`);
+    }
+    const constructorResultIndices = constructor.resultIndices ?? [];
+    if (constructorResultIndices.length !== indexCount) {
+        throw new Error(`${label} 点构造子 ${constructorName} 返回索引 metadata 不完整`);
+    }
+    const replacements = new Map<string, AST>();
+    argumentNames.forEach((name, index) => {
+        replacements.set(name, application.arguments[parameterCount + index]);
+    });
+    return constructorResultIndices.map(index =>
+        substituteGeneratedFreeNames(index, replacements)
+    );
+}
+
 function normalizeCoreSystemInductiveMetadata(
     metadata: CoreSystemInductiveMetadata
 ): CoreSystemInductiveMetadata {
@@ -730,6 +768,52 @@ function normalizeCoreSystemInductiveMetadata(
         assertCanonicalHitPathLevels(sourceLevels);
     }
 
+    const indexCount = Number(metadata.indexCount ?? 0);
+    const sourcePathConstructors = hitPathConstructorsAt(sourceLevels, 1);
+    const pathConstructors = sourcePathConstructors.map(path => {
+        if (version >= 7) {
+            const allowedFields = new Set([
+                "name",
+                "argumentTypes",
+                "argumentNames",
+                "left",
+                "right",
+                "resultIndices",
+                "computationName"
+            ]);
+            if (Object.keys(path).some(field => !allowedFields.has(field))) {
+                throw new Error(`HIT metadata v7 一阶路径构造子 ${path.name} 包含未知字段`);
+            }
+        }
+        const hasResultIndices = Array.isArray(path.resultIndices);
+        if (indexCount > 0 && version >= 7 && !hasResultIndices) {
+            throw new Error(`indexed hit1 路径构造子 ${path.name} 缺少 resultIndices`);
+        }
+        if (path.resultIndices !== undefined && !hasResultIndices) {
+            throw new Error(`HIT 路径构造子 ${path.name} 的 resultIndices 结构无效`);
+        }
+        let resultIndices = hasResultIndices
+            ? path.resultIndices!.map(index => Core.clone(index))
+            : [];
+        if (resultIndices.length !== indexCount) {
+            if (version >= 7 || resultIndices.length) {
+                throw new Error(`HIT 路径构造子 ${path.name} 的 resultIndices 数量与索引不一致`);
+            }
+            const leftIndices = reconstructCoreHitEndpointResultIndices(
+                metadata, path.left, `legacy HIT 路径构造子 ${path.name} 左端点`
+            );
+            resultIndices = leftIndices;
+        }
+        return {
+            name: path.name,
+            argumentTypes: path.argumentTypes.map(type => Core.clone(type)),
+            argumentNames: path.argumentNames ? [...path.argumentNames] : undefined,
+            left: Core.clone(path.left),
+            right: Core.clone(path.right),
+            resultIndices,
+            computationName: path.computationName
+        };
+    });
     const sourceThreePathConstructors = hitPathConstructorsAt(sourceLevels, 3);
     const twoPathByName = new Map(
         hitPathConstructorsAt(sourceLevels, 2).map(path => [path.name, path] as const)
@@ -760,7 +844,7 @@ function normalizeCoreSystemInductiveMetadata(
         };
     });
     const pathLevels = createHitPathLevels(
-        hitPathConstructorsAt(sourceLevels, 1),
+        pathConstructors,
         hitPathConstructorsAt(sourceLevels, 2),
         threePathConstructors
     );
@@ -801,6 +885,7 @@ export function cloneCoreHitPathMetadata(metadata: CoreSystemInductiveMetadata) 
             argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
             left: Core.clone(ctor.left),
             right: Core.clone(ctor.right),
+            resultIndices: (ctor.resultIndices ?? []).map(index => Core.clone(index)),
             computationName: ctor.computationName
         })),
         hitPathConstructorsAt(sourceLevels, 2).map(ctor => ({
@@ -1166,7 +1251,7 @@ function validateSystemInductiveComputeRules(
                 ...schema.resultIndices.map(index => Core.clone(index))
             );
             if (!sameGeneratedAstAlpha(cursor, expectedResult)) {
-                throw new Error(`点构造子 ${schema.name} 结论与计算规则 schema 不一致`);
+                throw new Error(`点构造子 ${schema.name} 结论索引与计算规则 metadata 不一致`);
             }
 
             const recursiveByIndex = new Map(
@@ -2223,8 +2308,29 @@ export class Core {
                 `归纳类型 metadata 参数/索引数量不一致：${parameterCount}+${indexCount}`
             );
         }
+        if (indexCount > 0 && (bundle.metadata?.kind === "hit2"
+            || bundle.metadata?.kind === "hit3")) {
+            throw new Error("二维和三维 HIT metadata 暂不支持索引");
+        }
         const parameters = familyBinders.slice(0, parameterCount);
         const indices = familyBinders.slice(parameterCount);
+        if (bundle.metadata?.ruleSchemaVersion === 1) {
+            const metadataIndices = bundle.metadata.indices;
+            if (!Array.isArray(metadataIndices) || metadataIndices.length !== indexCount) {
+                throw new Error("归纳类型 metadata 索引 telescope 不完整");
+            }
+            for (let index = 0; index < indices.length; index++) {
+                const actual = indices[index];
+                const expected = metadataIndices[index];
+                if (actual.name !== expected.name
+                    || !sameGeneratedAstAlpha(
+                        actual.type,
+                        this.desugar(Core.clone(expected.type), true)
+                    )) {
+                    throw new Error(`归纳类型 metadata 第 ${index + 1} 个索引与 family telescope 不一致`);
+                }
+            }
+        }
         const constructorTypes = new Map(
             normalizedEntries
                 .filter(([name]) => bundlePointConstructorNames.includes(name))
@@ -2243,7 +2349,6 @@ export class Core {
             || bundle.metadata?.kind === "hit2"
             || bundle.metadata?.kind === "hit3") {
             const metadata = bundle.metadata;
-            if (indexCount !== 0) throw new Error("HIT metadata 暂不支持索引");
 
             const auxiliaryTypes = new Map<string, AST>();
             for (const [name, type] of bundle.auxiliaryTypes ?? []) {
@@ -2254,6 +2359,65 @@ export class Core {
                 pointTypes.set(name, this.desugar(Core.clone(type), true));
             }
             const normalizedMetadataAst = (ast: AST) => this.desugar(Core.clone(ast), true);
+            const requireHitIndexEquality = (
+                left: AST,
+                right: AST,
+                context: Context,
+                label: string
+            ) => {
+                const result = this.semanticKernel.tryEqualResult(
+                    left,
+                    right,
+                    context,
+                    {
+                        maxSteps: Core.semanticTypeAssertionMaxSteps,
+                        deadline: Date.now() + Core.timeout
+                    }
+                );
+                if (result === "equal") return;
+                if (result === "budget-exhausted") {
+                    throw new Error(`${label} 的定义相等检查资源耗尽`);
+                }
+                if (result === "unsupported") {
+                    throw new Error(`${label} 的定义相等检查暂不支持该表达式`);
+                }
+                throw new Error(`${label} 不在同一索引纤维`);
+            };
+            const hitPointResultIndices = (point: AST, label: string) => {
+                const application = generatedApplicationParts(point);
+                const headName = generatedFreeConstantName(application.head) ?? "";
+                const constructor = metadata.constructors.find(entry => entry.name === headName);
+                if (!constructor) {
+                    throw new Error(`${label} 引用了未知点端点：${headName || "<非常量>"}`);
+                }
+                const argumentNames = constructor.argumentNames ?? [];
+                if (metadata.ruleSchemaVersion === 1
+                    && (argumentNames.length !== constructor.argumentTypes.length
+                        || new Set(argumentNames).size !== argumentNames.length)) {
+                    throw new Error(`${label} 点端点 ${headName} argumentNames 与 telescope 不一致`);
+                }
+                if (application.arguments.length !== parameters.length + argumentNames.length) {
+                    throw new Error(`${label} 点端点 ${headName} 参数数量与 metadata 不一致`);
+                }
+                const replacements = new Map<string, AST>();
+                parameters.forEach((parameter, index) => {
+                    const argument = application.arguments[index];
+                    if (!sameGeneratedAstAlpha(argument, wrapVar(parameter.name))) {
+                        throw new Error(`${label} 点端点 ${headName} 未保持统一参数 ${parameter.name}`);
+                    }
+                    replacements.set(parameter.name, argument);
+                });
+                argumentNames.forEach((name, index) => {
+                    replacements.set(name, application.arguments[parameters.length + index]);
+                });
+                const resultIndices = constructor.resultIndices ?? [];
+                if (resultIndices.length !== indexCount) {
+                    throw new Error(`${label} 点端点 ${headName} 返回索引 metadata 不完整`);
+                }
+                return resultIndices.map(index => normalizedMetadataAst(
+                    substituteGeneratedFreeNames(index, replacements)
+                ));
+            };
             const hitBranchValue = (
                 point: AST,
                 branchNames: readonly string[],
@@ -2375,6 +2539,50 @@ export class Core {
                         || new Set(path.argumentNames).size !== path.argumentNames.length)) {
                     throw new Error(`一阶 HIT 路径构造子 ${path.name} argumentNames 与 telescope 不一致`);
                 }
+                const pathResultIndices = path.resultIndices ?? [];
+                if (pathResultIndices.length !== indexCount) {
+                    throw new Error(`一阶 HIT 路径构造子 ${path.name} resultIndices 与索引数量不一致`);
+                }
+                const normalizedLeft = normalizedMetadataAst(path.left);
+                const normalizedRight = normalizedMetadataAst(path.right);
+                const pathIndexContext: Context = [];
+                let nextPathContextId = 1;
+                for (const parameter of parameters) {
+                    pathIndexContext.unshift([
+                        parameter.name,
+                        Core.clone(parameter.type),
+                        nextPathContextId++
+                    ]);
+                }
+                const pathArgumentNames = path.argumentNames ?? [];
+                for (let index = 0; index < pathArgumentNames.length; index++) {
+                    pathIndexContext.unshift([
+                        pathArgumentNames[index],
+                        normalizedMetadataAst(path.argumentTypes[index]),
+                        nextPathContextId++
+                    ]);
+                }
+                const leftResultIndices = hitPointResultIndices(
+                    normalizedLeft, `一阶 HIT 路径构造子 ${path.name} 左端点`
+                );
+                const rightResultIndices = hitPointResultIndices(
+                    normalizedRight, `一阶 HIT 路径构造子 ${path.name} 右端点`
+                );
+                const normalizedResultIndices = pathResultIndices.map(normalizedMetadataAst);
+                for (let index = 0; index < leftResultIndices.length; index++) {
+                    requireHitIndexEquality(
+                        leftResultIndices[index],
+                        rightResultIndices[index],
+                        pathIndexContext,
+                        `一阶 HIT 路径构造子 ${path.name} 第 ${index + 1} 个端点索引`
+                    );
+                    requireHitIndexEquality(
+                        leftResultIndices[index],
+                        normalizedResultIndices[index],
+                        pathIndexContext,
+                        `一阶 HIT 路径构造子 ${path.name} 第 ${index + 1} 个 metadata 索引`
+                    );
+                }
                 const pathType = auxiliaryTypes.get(path.name);
                 if (!pathType) {
                     throw new Error(`一阶 HIT metadata 路径构造子不存在：${path.name}`);
@@ -2385,8 +2593,8 @@ export class Core {
                 ], `一阶 HIT 路径构造子 ${path.name}`);
                 const endpoints = generatedEqualityEndpoints(conclusion);
                 if (!endpoints
-                    || !sameGeneratedAst(endpoints[0], normalizedMetadataAst(path.left))
-                    || !sameGeneratedAst(endpoints[1], normalizedMetadataAst(path.right))) {
+                    || !sameGeneratedAst(endpoints[0], normalizedLeft)
+                    || !sameGeneratedAst(endpoints[1], normalizedRight)) {
                     throw new Error(`一阶 HIT 路径构造子 ${path.name} 端点与 metadata 不一致`);
                 }
 
@@ -2413,6 +2621,257 @@ export class Core {
                     if (!generatedEqualityEndpoints(conclusion)) {
                         throw new Error(`一阶 HIT 路径计算项 ${computationName} 不是等式命题`);
                     }
+                }
+            }
+
+            if (metadata.kind === "hit1" && metadata.ruleSchemaVersion === 1) {
+                type HitTelescopeBinder = { kind: "P" | "->"; name: string; type: AST };
+                const readHitTelescope = (source: AST, label: string) => {
+                    const binders: HitTelescopeBinder[] = [];
+                    let cursor = source;
+                    while ((cursor.type === "P" || cursor.type === "->")
+                        && cursor.nodes?.[0] && cursor.nodes?.[1]) {
+                        binders.push({
+                            kind: cursor.type,
+                            name: cursor.type === "P" ? cursor.name : "",
+                            type: Core.clone(cursor.nodes[0])
+                        });
+                        cursor = cursor.nodes[1];
+                    }
+                    if (!binders.length) throw new Error(`${label} telescope 不完整`);
+                    return { binders, body: cursor };
+                };
+                const wrapHitTelescope = (
+                    binders: readonly HitTelescopeBinder[],
+                    body: AST
+                ) => {
+                    let result = body;
+                    for (let index = binders.length - 1; index >= 0; index--) {
+                        const binder = binders[index];
+                        result = {
+                            type: binder.kind,
+                            name: binder.name,
+                            nodes: [Core.clone(binder.type), result]
+                        };
+                    }
+                    return result;
+                };
+                const hitEquality = (left: AST, right: AST): AST => ({
+                    type: "=",
+                    name: "",
+                    nodes: [left, right]
+                });
+                const hitFiberMotive = (
+                    motiveName: string,
+                    resultIndices: readonly AST[]
+                ) => {
+                    if (!resultIndices.length) return wrapVar(motiveName);
+                    const occupied = new Set([
+                        metadata.typeName,
+                        motiveName,
+                        ...parameters.map(parameter => parameter.name)
+                    ]);
+                    const stack = [...resultIndices];
+                    const seen = new WeakSet<object>();
+                    while (stack.length) {
+                        const node = stack.pop();
+                        if (!node || typeof node !== "object" || seen.has(node)) continue;
+                        seen.add(node);
+                        if (node.name) occupied.add(node.name);
+                        for (const child of node.nodes ?? []) stack.push(child);
+                    }
+                    let valueName = "fiberValue";
+                    while (occupied.has(valueName)) valueName += "_";
+                    const value = wrapVar(valueName);
+                    return {
+                        type: "L",
+                        name: valueName,
+                        nodes: [
+                            wrapApply(
+                                wrapVar(metadata.typeName),
+                                ...parameters.map(parameter => wrapVar(parameter.name)),
+                                ...resultIndices.map(normalizedMetadataAst)
+                            ),
+                            wrapApply(
+                                wrapVar(motiveName),
+                                ...resultIndices.map(normalizedMetadataAst),
+                                value
+                            )
+                        ]
+                    } as AST;
+                };
+                const staticCount = (full: boolean) => (full ? 1 : 0)
+                    + parameters.length + 1 + metadata.constructors.length
+                    + metadataPathEntries.length;
+                const pathMethodOffset = (full: boolean) => (full ? 1 : 0)
+                    + parameters.length + 1 + metadata.constructors.length;
+
+                const validateHit1EliminationTelescope = (
+                    source: AST,
+                    full: boolean,
+                    dependent: boolean,
+                    label: string
+                ) => {
+                    const { binders } = readHitTelescope(source, label);
+                    const expectedCount = staticCount(full) + indexCount + 1;
+                    if (binders.length !== expectedCount) {
+                        throw new Error(`${label} telescope 长度与 indexed hit1 metadata 不一致`);
+                    }
+                    let offset = full ? 1 : 0;
+                    for (let index = 0; index < parameters.length; index++) {
+                        const binder = binders[offset + index];
+                        const parameter = parameters[index];
+                        if (binder.kind !== "P" || binder.name !== parameter.name
+                            || !sameGeneratedAstAlpha(binder.type, parameter.type)) {
+                            throw new Error(`${label} 未保持统一参数 ${parameter.name}`);
+                        }
+                    }
+                    offset += parameters.length;
+                    const motiveName = binders[offset++].name;
+                    const branchNames = binders
+                        .slice(offset, offset + metadata.constructors.length)
+                        .map(binder => binder.name);
+                    offset += metadata.constructors.length;
+                    for (let index = 0; index < metadataPathEntries.length; index++) {
+                        const path = metadataPathEntries[index];
+                        const argumentNames = path.argumentNames ?? [];
+                        const argumentTypes = path.argumentTypes.map(normalizedMetadataAst);
+                        const pathArguments = argumentNames.map(wrapVar);
+                        const pathTerm = wrapApply(
+                            wrapVar(path.name),
+                            ...parameters.map(parameter => wrapVar(parameter.name)),
+                            ...pathArguments
+                        );
+                        const leftBranch = hitBranchValue(
+                            normalizedMetadataAst(path.left),
+                            branchNames,
+                            `${label} ${path.name} 左端点`
+                        );
+                        const rightBranch = hitBranchValue(
+                            normalizedMetadataAst(path.right),
+                            branchNames,
+                            `${label} ${path.name} 右端点`
+                        );
+                        let expectedBody: AST;
+                        if (dependent) {
+                            const motiveAtFiber = hitFiberMotive(
+                                motiveName,
+                                path.resultIndices ?? []
+                            );
+                            expectedBody = hitEquality(
+                                wrapApply(
+                                    wrapVar("trans"),
+                                    motiveAtFiber,
+                                    pathTerm,
+                                    leftBranch
+                                ),
+                                rightBranch
+                            );
+                        } else {
+                            expectedBody = hitEquality(leftBranch, rightBranch);
+                        }
+                        const pathBinders = argumentNames.map((name, argumentIndex) => ({
+                            kind: "P" as const,
+                            name,
+                            type: argumentTypes[argumentIndex]
+                        }));
+                        const expected = normalizedMetadataAst(
+                            wrapHitTelescope(pathBinders, expectedBody)
+                        );
+                        const actual = binders[offset + index]?.type;
+                        if (!actual || !sameGeneratedAstAlpha(actual, expected)) {
+                            throw new Error(`${label} 一阶 coherence ${path.name} 与 metadata 不一致`);
+                        }
+                    }
+                    return binders;
+                };
+
+                const validateHit1Computation = (
+                    path: CoreHitPathConstructorMetadata,
+                    source: AST,
+                    head: string,
+                    full: boolean,
+                    dependent: boolean
+                ) => {
+                    const label = `${full ? "完整" : "公开"}${dependent ? "消去器" : "递归器"}`;
+                    const sourceBinders = validateHit1EliminationTelescope(
+                        source, full, dependent, label
+                    );
+                    const prefix = sourceBinders.slice(0, staticCount(full));
+                    if (prefix.some(binder => binder.kind !== "P" || !binder.name)) {
+                        throw new Error(`${label} 静态 telescope 必须使用具名 Π binder`);
+                    }
+                    const argumentNames = path.argumentNames ?? [];
+                    const pathBinders: HitTelescopeBinder[] = argumentNames.map((name, index) => ({
+                        kind: "P",
+                        name,
+                        type: normalizedMetadataAst(path.argumentTypes[index])
+                    }));
+                    const pathArguments = argumentNames.map(wrapVar);
+                    const pathTerm = wrapApply(
+                        wrapVar(path.name),
+                        ...parameters.map(parameter => wrapVar(parameter.name)),
+                        ...pathArguments
+                    );
+                    const eliminationAtFiber = wrapApply(
+                        wrapVar(head),
+                        ...prefix.map(binder => wrapVar(binder.name)),
+                        ...(path.resultIndices ?? []).map(normalizedMetadataAst)
+                    );
+                    const methodName = prefix[pathMethodOffset(full)
+                        + metadataPathEntries.findIndex(candidate => candidate.name === path.name)]?.name;
+                    if (!methodName) {
+                        throw new Error(`${label} 缺少路径方法 ${path.name}`);
+                    }
+                    const expected = normalizedMetadataAst(wrapHitTelescope(
+                        [...prefix, ...pathBinders],
+                        hitEquality(
+                            wrapApply(
+                                wrapVar(dependent ? "apd" : "ap"),
+                                eliminationAtFiber,
+                                pathTerm
+                            ),
+                            wrapApply(wrapVar(methodName), ...pathArguments)
+                        )
+                    ));
+                    const computationName = `${full ? "@" : ""}${dependent ? "apd" : "ap"}_${path.name}`;
+                    const actual = auxiliaryTypes.get(computationName);
+                    if (!actual || !sameGeneratedAstAlpha(actual, expected)) {
+                        throw new Error(`一阶 HIT 路径计算定理 ${computationName} 与 metadata 不一致`);
+                    }
+                };
+
+                const publicEliminatorType = bundle.eliminator?.[1]
+                    ? normalizedMetadataAst(bundle.eliminator[1])
+                    : undefined;
+                const fullEliminatorType = metadata.fullEliminatorName
+                    ? auxiliaryTypes.get(metadata.fullEliminatorName)
+                    : undefined;
+                const publicRecursorType = bundle.recursor?.[1]
+                    ? normalizedMetadataAst(bundle.recursor[1])
+                    : undefined;
+                const fullRecursorType = metadata.fullRecursorName
+                    ? auxiliaryTypes.get(metadata.fullRecursorName)
+                    : undefined;
+                if (!publicEliminatorType || !fullEliminatorType
+                    || !publicRecursorType || !fullRecursorType
+                    || !metadata.fullEliminatorName || !metadata.fullRecursorName
+                    || !metadata.eliminatorName || !metadata.recursorName) {
+                    throw new Error("一阶 HIT 消去器/递归器槽位不完整");
+                }
+                for (const path of metadataPathEntries) {
+                    validateHit1Computation(
+                        path, publicEliminatorType, metadata.eliminatorName, false, true
+                    );
+                    validateHit1Computation(
+                        path, fullEliminatorType, metadata.fullEliminatorName, true, true
+                    );
+                    validateHit1Computation(
+                        path, publicRecursorType, metadata.recursorName, false, false
+                    );
+                    validateHit1Computation(
+                        path, fullRecursorType, metadata.fullRecursorName, true, false
+                    );
                 }
             }
 

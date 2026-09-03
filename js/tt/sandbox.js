@@ -756,7 +756,14 @@ function elaborateHitEndpoint(endpoint, signatureName, parameters, pointConstruc
     else {
         throw new Error(`路径构造子 ${pathName} 的端点 ${headName} 参数数量错误：需要 ${pointArgumentCount} 个点参数`);
     }
-    return sandboxConstructorTerm(headName, arguments_);
+    const argumentReplacements = new Map();
+    point.argumentAsts.forEach((argument, index) => {
+        argumentReplacements.set(argument.name, arguments_[parameters.length + index]);
+    });
+    return {
+        term: sandboxConstructorTerm(headName, arguments_),
+        resultIndices: point.resultIndices.map(index => substituteSandboxFreeVars(index, argumentReplacements))
+    };
 }
 function substituteSandboxFreeVars(ast, replacements, bound = new Set()) {
     if (!ast)
@@ -1066,8 +1073,9 @@ export function parseSandboxHit(source) {
             };
         })
     };
-    if (ordinary.indices.length)
-        throw new Error("一阶 HIT 第一版暂不支持索引");
+    if (ordinary.indices.length && (twoPathSections.length || threePathSections.length)) {
+        throw new Error("索引 HIT 当前只支持一阶路径，暂不支持 path2/path3");
+    }
     const names = new Set([ordinary.name, ...ordinary.constructors.map(constructor => constructor.name)]);
     const parameterNames = new Set(ordinary.parameters.map(parameter => parameter.name));
     const pathConstructors = [];
@@ -1093,18 +1101,22 @@ export function parseSandboxHit(source) {
         ]);
         const left = elaborateHitEndpoint(body.nodes[0], ordinary.name, ordinary.parameters, ordinary.constructors, path.name, endpointBoundNames);
         const right = elaborateHitEndpoint(body.nodes[1], ordinary.name, ordinary.parameters, ordinary.constructors, path.name, endpointBoundNames);
+        // Keep the left endpoint's indices as canonical metadata.  Syntactic
+        // inequality is not enough to reject the path: Core performs the final
+        // bounded NbE equality check after all ambient definitions are loaded.
         const elaboratedType = sandboxWrapPis(arguments_, {
             type: "=",
             name: "",
-            nodes: [Core.clone(left), Core.clone(right)]
+            nodes: [Core.clone(left.term), Core.clone(right.term)]
         });
         pathConstructors.push({
             name: path.name,
             arguments: arguments_,
             type: elaboratedType,
             typeSource: parser.stringify(elaboratedType),
-            left,
-            right
+            left: left.term,
+            right: right.term,
+            resultIndices: left.resultIndices.map(index => Core.clone(index))
         });
     }
     const twoPathConstructors = [];
@@ -1192,7 +1204,7 @@ export function parseSandboxHit(source) {
     return {
         name: ordinary.name,
         parameters: ordinary.parameters,
-        indices: [],
+        indices: ordinary.indices,
         universe: ordinary.universe,
         universeAst: ordinary.universeAst,
         pointConstructors: ordinary.constructors,
@@ -1280,6 +1292,7 @@ export function lowerSandboxInductive(signature) {
     const metadataConstructors = [];
     const generatedScope = new Set([
         ...signature.parameters.map(parameter => parameter.name),
+        ...signature.indices.map(index => index.name),
         ...signature.constructors.flatMap(constructor => constructor.argumentAsts.map(argument => argument.name))
     ]);
     const motiveName = sandboxFreshName("C", generatedScope);
@@ -1567,6 +1580,27 @@ function sandboxHitBranchValue(endpoint, parameters, pointConstructors, branchNa
         ? sandboxApply(sandboxVar(branchNames[constructorIndex]), ...methodArguments)
         : sandboxVar(branchNames[constructorIndex]);
 }
+function sandboxHitFiberType(signature, resultIndices) {
+    return sandboxApply(sandboxVar(signature.name), ...signature.parameters.map(parameter => sandboxVar(parameter.name)), ...resultIndices.map(index => Core.clone(index)));
+}
+function sandboxHitFiberMotive(signature, motiveName, resultIndices) {
+    if (!resultIndices.length)
+        return sandboxVar(motiveName);
+    const occupied = new Set([
+        signature.name,
+        motiveName,
+        ...signature.parameters.map(parameter => parameter.name)
+    ]);
+    for (const index of resultIndices)
+        collectSandboxAstNames(index, occupied);
+    const valueName = sandboxFreshName("fiberValue", occupied);
+    return sandboxLambda(valueName, sandboxHitFiberType(signature, resultIndices), sandboxApply(sandboxVar(motiveName), ...resultIndices.map(index => Core.clone(index)), sandboxVar(valueName)));
+}
+function sandboxHitHeadAtIndices(head, resultIndices) {
+    return resultIndices.length
+        ? sandboxApply(Core.clone(head), ...resultIndices.map(index => Core.clone(index)))
+        : Core.clone(head);
+}
 function sandboxHitPathMethodValue(endpoint, parameters, pathConstructors, methodNames, owner) {
     const terms = flattenApplication(endpoint);
     const pathName = terms[0]?.type === "var" ? terms[0].name : "";
@@ -1697,6 +1731,8 @@ function sandboxRenameHitPathArguments(path, reserved) {
     }
     collectSandboxAstNames(path.left, occupied);
     collectSandboxAstNames(path.right, occupied);
+    for (const index of path.resultIndices)
+        collectSandboxAstNames(index, occupied);
     const replacements = new Map();
     const arguments_ = [];
     for (const argument of path.arguments) {
@@ -1712,6 +1748,7 @@ function sandboxRenameHitPathArguments(path, reserved) {
     }
     const left = renameFreeInductiveNames(path.left, replacements);
     const right = renameFreeInductiveNames(path.right, replacements);
+    const resultIndices = path.resultIndices.map(index => renameFreeInductiveNames(index, replacements));
     const type = sandboxWrapPis(arguments_, sandboxEquality(Core.clone(left), Core.clone(right)));
     return {
         name: path.name,
@@ -1719,7 +1756,8 @@ function sandboxRenameHitPathArguments(path, reserved) {
         type,
         typeSource: parser.stringify(type),
         left,
-        right
+        right,
+        resultIndices
     };
 }
 function sandboxRenameHitTwoPathArguments(path, reserved) {
@@ -1840,6 +1878,8 @@ function sandboxRenameHitUniformParameters(signature, reserved) {
     };
     for (const parameter of signature.parameters)
         collectBinder(parameter);
+    for (const index of signature.indices)
+        collectBinder(index);
     collectSandboxAstNames(signature.universeAst, occupied);
     for (const constructor of signature.pointConstructors) {
         occupied.add(constructor.name);
@@ -1857,6 +1897,8 @@ function sandboxRenameHitUniformParameters(signature, reserved) {
             collectBinder(argument);
         collectSandboxAstNames(path.left, occupied);
         collectSandboxAstNames(path.right, occupied);
+        for (const index of path.resultIndices)
+            collectSandboxAstNames(index, occupied);
     }
     for (const path of sourceTwoPathConstructors) {
         occupied.add(path.name);
@@ -1923,7 +1965,8 @@ function sandboxRenameHitUniformParameters(signature, reserved) {
             type,
             typeSource: parser.stringify(type),
             left: rename(path.left),
-            right: rename(path.right)
+            right: rename(path.right),
+            resultIndices: path.resultIndices.map(rename)
         };
     });
     const twoPathConstructors = sourceTwoPathConstructors.map(path => {
@@ -1960,6 +2003,7 @@ function sandboxRenameHitUniformParameters(signature, reserved) {
     return {
         ...signature,
         parameters,
+        indices: signature.indices.map(renameBinder),
         universe: parser.stringify(universeAst),
         universeAst,
         pointConstructors,
@@ -1972,12 +2016,14 @@ export function lowerSandboxHit(signature) {
     const inputPathConstructors = hitPathConstructorsAt(signature.pathLevels, 1);
     const inputTwoPathConstructors = hitPathConstructorsAt(signature.pathLevels, 2);
     const inputThreePathConstructors = hitPathConstructorsAt(signature.pathLevels, 3);
-    if (signature.indices.length)
-        throw new Error("一阶 HIT 第一版暂不支持索引");
+    if (signature.indices.length && (inputTwoPathConstructors.length || inputThreePathConstructors.length)) {
+        throw new Error("索引 HIT 当前只支持一阶路径，暂不支持 path2/path3");
+    }
     if (!inputPathConstructors.length)
         throw new Error("一阶 HIT 至少需要一个一阶路径构造子");
     const uniformParameterReserved = new Set([
         signature.name,
+        ...signature.indices.map(index => index.name),
         ...signature.pointConstructors.map(constructor => constructor.name),
         ...inputPathConstructors.flatMap(path => [
             path.name,
@@ -2048,7 +2094,7 @@ export function lowerSandboxHit(signature) {
     const ordinary = {
         name: signature.name,
         parameters: signature.parameters,
-        indices: [],
+        indices: signature.indices,
         universe: signature.universe,
         universeAst: signature.universeAst,
         constructors: signature.pointConstructors
@@ -2070,6 +2116,7 @@ export function lowerSandboxHit(signature) {
     const reserved = new Set([
         ...uniformParameterReserved,
         ...signature.parameters.map(parameter => parameter.name),
+        ...signature.indices.map(index => index.name),
         motiveName,
         motiveUniverseName,
         ...branchNames,
@@ -2120,9 +2167,10 @@ export function lowerSandboxHit(signature) {
         const path = pathConstructors[index];
         const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
         const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
+        const fiberMotive = sandboxHitFiberMotive(signature, motiveName, path.resultIndices);
         const leftBranch = sandboxHitBranchValue(path.left, signature.parameters, signature.pointConstructors, branchNames);
         const rightBranch = sandboxHitBranchValue(path.right, signature.parameters, signature.pointConstructors, branchNames);
-        const dependentType = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("trans"), sandboxVar(motiveName), pathTerm, leftBranch), rightBranch));
+        const dependentType = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("trans"), fiberMotive, pathTerm, leftBranch), rightBranch));
         dependentPathBinders.push({
             name: pathMethodNames[index],
             type: dependentType,
@@ -2343,10 +2391,10 @@ export function lowerSandboxHit(signature) {
         const path = pathConstructors[index];
         const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
         const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
-        const dependentHead = sandboxApply(sandboxVar(`ind_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)));
-        const fullDependentHead = sandboxApply(sandboxVar(`@ind_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name)));
-        const recursorHead = sandboxApply(sandboxVar(`rec_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)));
-        const fullRecursorHead = sandboxApply(sandboxVar(`@rec_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name)));
+        const dependentHead = sandboxHitHeadAtIndices(sandboxApply(sandboxVar(`ind_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name))), path.resultIndices);
+        const fullDependentHead = sandboxHitHeadAtIndices(sandboxApply(sandboxVar(`@ind_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...branchNames.map(name => sandboxVar(name)), ...pathMethodNames.map(name => sandboxVar(name)), ...dependentTwoPathMethodNames.map(name => sandboxVar(name)), ...dependentThreePathMethodNames.map(name => sandboxVar(name))), path.resultIndices);
+        const recursorHead = sandboxHitHeadAtIndices(sandboxApply(sandboxVar(`rec_${signature.name}`), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name))), path.resultIndices);
+        const fullRecursorHead = sandboxHitHeadAtIndices(sandboxApply(sandboxVar(`@rec_${signature.name}`), sandboxVar(motiveUniverseName), ...parameterVars, sandboxVar(motiveName), ...recursorBranchNames.map(name => sandboxVar(name)), ...recursorPathMethodNames.map(name => sandboxVar(name)), ...recursorTwoPathMethodNames.map(name => sandboxVar(name)), ...recursorThreePathMethodNames.map(name => sandboxVar(name))), path.resultIndices);
         const pathMethodValue = sandboxApply(sandboxVar(pathMethodNames[index]), ...pathArguments);
         const recursorPathMethodValue = sandboxApply(sandboxVar(recursorPathMethodNames[index]), ...pathArguments);
         const publicApdBody = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("apd"), dependentHead, pathTerm), pathMethodValue));
@@ -2715,6 +2763,7 @@ export function lowerSandboxHit(signature) {
         argumentNames: path.arguments.map(argument => argument.name),
         left: Core.clone(path.left),
         right: Core.clone(path.right),
+        resultIndices: path.resultIndices.map(index => Core.clone(index)),
         computationName: `apd_${path.name}`
     }));
     const metadataTwoPathConstructors = twoPathConstructors.map(path => ({
@@ -2758,8 +2807,11 @@ export function lowerSandboxHit(signature) {
             ruleSchemaVersion: 1,
             typeName: signature.name,
             parameterCount: signature.parameters.length,
-            indexCount: 0,
-            indices: [],
+            indexCount: signature.indices.length,
+            indices: signature.indices.map(index => ({
+                name: index.name,
+                type: Core.clone(index.type)
+            })),
             eliminatorName: `ind_${signature.name}`,
             fullEliminatorName: `@ind_${signature.name}`,
             recursorName: `rec_${signature.name}`,

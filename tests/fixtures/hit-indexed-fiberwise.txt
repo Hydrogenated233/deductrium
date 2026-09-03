@@ -1,0 +1,4 @@
+hit FiberLoop [n : nat] : U
+| baseF : Πn:nat,FiberLoop n
+| stepF : Πn:nat,FiberLoop n→FiberLoop (succ n)
+| loopF : Πn:nat,baseF n=baseF n

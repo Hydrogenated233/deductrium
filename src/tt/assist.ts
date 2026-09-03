@@ -1505,6 +1505,35 @@ export class Assist {
         }
         return names;
     }
+
+    private restoreDynamicRecursiveBinderNames(
+        names: string[],
+        constructor: CoreSystemInductiveMetadata["constructors"][number] | undefined
+    ) {
+        if (!constructor?.recursiveArguments?.length) return names;
+        const recursiveArguments = new Map(
+            constructor.recursiveArguments.map(argument => [argument.index, argument] as const)
+        );
+        let binderIndex = 0;
+        for (let argumentIndex = 0;
+            argumentIndex < constructor.argumentTypes.length;
+            argumentIndex++) {
+            binderIndex++;
+            if (!recursiveArguments.has(argumentIndex)) continue;
+            if (!names[binderIndex]) {
+                // Normalization may turn an unused recursive Pi binder into an
+                // anonymous arrow; metadata still identifies the IH slot.
+                const argumentName = constructor.argumentNames?.[argumentIndex]
+                    || `a${argumentIndex}`;
+                const generated = /^a(\d+)_(\d+)$/.exec(argumentName);
+                names[binderIndex] = generated
+                    ? `ih${generated[1]}_${generated[2]}`
+                    : `${argumentName}_ih`;
+            }
+            binderIndex++;
+        }
+        return names;
+    }
     /**
      * Specialize a previously inferred eliminator type without asking the
      * semantic checker to synthesize the whole eliminator application again.
@@ -1875,7 +1904,14 @@ export class Assist {
             gast.checked = gtype;
             const indFnParamType = indFnParams[i + ctorOffset];
             const indFnParamName = indFnParamNames[i + ctorOffset];
-            const holeParams = this.flattenParamNames(indFnParamType);
+            const indexedHitConstructor = dynamicInductive?.kind === "hit1"
+                && dynamicInductive.indexArguments.length
+                ? dynamicInductive.constructors[i]
+                : undefined;
+            const holeParams = this.restoreDynamicRecursiveBinderNames(
+                this.flattenParamNames(indFnParamType),
+                indexedHitConstructor
+            );
             holeParams.push(...condsNames);
             introNums.push(holeParams);
             // mark depend

@@ -33,6 +33,13 @@
 - 沙盒验证放入独立 Worker 或进程，避免阻塞地图和普通证明助手。
 - 存档格式必须带版本号，并允许后续迁移。
 
+### 正式 HIT 维度边界
+
+- 面向用户的正式 HIT 能力只覆盖一至三维；三维是产品功能上限，而不是当前实现暂时停留的版本号。
+- 内部路径构造子统一保存在连续、canonical 的 `pathLevels` 中。当前有效层级固定为 1、2、3；该结构用于避免逐维扩展时重复改写存储格式，不代表已经实现任意维 lowering。
+- 四维只允许作为 fixture、线性预检和声明数、源码字符、节点、步骤、超时资源限制的测试输入。`path4` 不进入正式 parser/lowerer、Core 注册、可信桥接或派生存档数据。
+- 在具备通用 dependent transport、逐维端点语言和计算规则独立认证前，文档、UI 和发布说明都不得宣称任意维 HIT 支持。
+
 ### 计算规则的用户边界
 
 当前版本没有把 `pattern => result` 作为沙盒输入语法。内核中的
@@ -157,6 +164,15 @@ hit Circle2 : U
 | loop2 : base2 = base2
 ```
 
+阶段 2 的索引归纳完成后，一阶 HIT 也允许声明同一索引纤维内的路径。例如：
+
+```text
+hit FiberLoop [n : nat] : U
+| baseF : Πn:nat,FiberLoop n
+| stepF : Πn:nat,FiberLoop n→FiberLoop (succ n)
+| loopF : Πn:nat,baseF n=baseF n
+```
+
 ### 实现内容
 
 - 在归纳类型签名中区分点构造子和路径构造子。
@@ -169,6 +185,10 @@ hit Circle2 : U
 - 支持证明助手对自定义 HIT 使用 `cases`、`destruct` 和 `induction`。
 - 支持 `rw`、`apd` 和路径计算定理使用新构造子。
 - 对计算规则设置展开预算，避免路径归约造成无限展开。
+- indexed hit1 复用普通索引归纳的 family、点构造子、递归子项索引和点 iota 骨架，但为每条路径独立推导所在纤维。左右端点必须形成同一 `H indices` 中的普通等式。
+- indexed hit1 的依赖 coherence 使用纤维特化的 motive `λx:H indices,C indices x`；生成的 `apd_`/`ap_` 命题也必须先把消去器或递归器特化到该纤维，不能把仍等待索引参数的函数直接传给 `apd`/`ap`。
+- Core 从 family、点构造子 `resultIndices`、路径端点和消去器 telescope 独立重建索引与 coherence，不信任 Sandbox 提供的派生索引或计算命题。
+- 本轮 indexed HIT 仅支持同纤维一阶路径。不同索引纤维之间的路径、indexed `path2`/`path3`、依赖于索引路径的 transport，以及函数型递归点参数出现在路径端点中的情形均明确拒绝。
 
 ### 验收标准
 
@@ -176,6 +196,9 @@ hit Circle2 : U
 - 点构造子和路径构造子可以在后续定理中使用。
 - 归纳器会生成正确的点分支和路径一致性目标。
 - `apd` 计算定理能够通过类型检查。
+- `FiberLoop` 一类 indexed hit1 能保留点构造子的返回索引、递归子项索引和归纳假设，并生成可形成的 `ind_`、`rec_`、`apd_`、`ap_` 类型。
+- 证明助手对 `x : FiberLoop n` 执行 `induction x` 时会生成与构造子结果索引一致的点分支和路径 coherence 分支。
+- Core 会拒绝伪造的点结果索引、递归子项索引、路径纤维或 indexed coherence 类型；跨纤维路径与 indexed 高阶路径给出明确的不支持错误。
 - 错误的路径端点、绑定变量或 Universe 层级会被拒绝。
 - 路径规律不会未经检查地进入定义相等系统。
 
@@ -197,7 +220,7 @@ hit Circle2 : U
 - 对归纳签名进行维度和依赖关系分析，并把维度能力写入版本化元数据。
 - 检查计算规则是否终止、线性且不存在危险重叠。
 - 对无法证明安全的规则仅注册为命题定理，不注册为定义计算规则。
-- 为复杂 HIT 增加独立的节点、步骤、时间和内存预算。
+- 为复杂 HIT 增加独立的声明数、源码字符、节点、步骤和超时预算；当前不提供浏览器 heap 硬限制。
 - 将耗时编译和验证任务放入沙盒专用 Worker 或独立进程。
 - 支持取消、重启和恢复被中断的沙盒验证。
 - 在存档中保存声明、信任标记、生成规则、版本信息和验证缓存。
@@ -206,6 +229,7 @@ hit Circle2 : U
 
 ### 当前实现状态（2026-09-03）
 
+- 一阶 HIT 已支持同纤维 indexed family：点构造子沿用结构化 `resultIndices` 和递归子项索引，路径 lowering 会把 motive、消去器和递归器特化到端点所在纤维。不同纤维端点、indexed `path2`/`path3`、跨索引 dependent path 和函数型递归端点仍明确拒绝。
 - 二维 HIT 已完成结构解析、消去器 lowering、命题计算规则和 Core schema 认证。
 - 三维 `path3` 已支持原子二阶路径端点、使用 `▪` 的组合端点和 `inveq` 逆端点；统一参数、局部参数、递归组合边界和点边界都会被检查。三维是面向用户的最高维度，`path4` 及更高维仍明确拒绝。
 - 三维声明已生成真正的 dependent/recursor coherence binder 和点 iota 参数。HIT writer 使用 metadata v7：只传输连续的 `pathLevels` 和结构化三阶表达式端点；Core 会把旧 v3-v5 分栏 metadata 及 v6 canonical/原子端点 metadata 一次性迁移为 v7，并重建验证三阶端点、统一参数及共享低维边界。
@@ -293,6 +317,7 @@ type SandboxDeclaration =
 - 分别测试阶段 2 第一版的非索引归纳和第二版的索引归纳、索引保持及生成器失效。
 - 测试构造子计算规则和定义相等。
 - 测试一阶及高阶路径端点检查。
+- 测试 same-fiber indexed hit1 的端点索引、递归点 iota、`apd_`/`ap_` 形成、证明助手归纳、Worker 重建，以及跨纤维和 indexed 高阶路径拒绝。
 - 先测试二维 HIT 和二维 coherence，再测试三维 dependent/action 计算；四维只测试明确拒绝、资源上限和 fixture 形状。
 - 测试 Worker 配置、取消、重启和顺序一致性。
 - 测试存档往返和旧版本迁移。
