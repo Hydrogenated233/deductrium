@@ -134,9 +134,10 @@ new axioms. The system provides checked `hit_ap2_comp`, `hit_ap2_inv`,
 `hit_apd2_comp`, and `hit_apd2_inv` definitions. Non-indexed second-path
 endpoints support atoms, composition, and inverse end to end. Indexed HITs
 support same-fiber `path2` atoms, composition, and inverse, plus same-fiber
-atomic, composite, and inverse `path3`; Core checks their indices and shared
-lower-dimensional boundaries with NbE. Restricted indexed `refl path1`
-endpoints and cross-fiber dependent paths remain explicit boundaries.
+atomic, composite, inverse, and restricted `refl path1` `path3`; Core checks
+their indices and shared lower-dimensional boundaries with NbE. A `refl` leaf
+must name a declared first-path constructor of the current HIT; cross-fiber
+dependent paths remain explicit boundaries.
 
 ## Type-theory Proof Pages / 类型论证明页
 

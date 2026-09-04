@@ -95,8 +95,8 @@ forgedInverse.leftExpression = {
 };
 assert.throws(
     () => register(forgedRefl),
-    /索引 HIT 三阶路径构造子.*refl 二阶路径端点/,
-    "Core must reject forged nested indexed path3 refl metadata"
+    /起始二阶边界.*(?:不在同一索引纤维|不一致)|三维 HIT.*(?:expression|表达式|metadata).*不一致/,
+    "Core must recheck the boundary of forged nested indexed path3 refl metadata"
 );
 
 console.log("Core indexed path3 expression boundary regression passed");

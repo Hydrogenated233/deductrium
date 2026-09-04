@@ -2717,16 +2717,6 @@ export class Core {
                     }
                 }
             }
-            const hasTwoPathRefl = (expression) => {
-                if (!expression)
-                    return false;
-                if (expression.kind === "refl")
-                    return true;
-                if (expression.kind === "compose") {
-                    return hasTwoPathRefl(expression.left) || hasTwoPathRefl(expression.right);
-                }
-                return expression.kind === "inverse" && hasTwoPathRefl(expression.value);
-            };
             const evaluateTwoPathExpression = (expression, owner, side, indexContext = [], state = { nodes: 0, ancestors: new WeakSet() }, depth = 0) => {
                 const label = `三维 HIT 三阶路径构造子 ${owner} ${side}端点`;
                 if (!expression || typeof expression !== "object") {
@@ -2882,10 +2872,6 @@ export class Core {
                     ...path.argumentTypes.map(normalizedMetadataAst)
                 ], `三维 HIT 三阶路径构造子 ${path.name}`);
                 const pathIndexContext = hitPathIndexContext(path.argumentNames, path.argumentTypes);
-                if (indexCount > 0 && (hasTwoPathRefl(path.leftExpression)
-                    || hasTwoPathRefl(path.rightExpression))) {
-                    throw new Error(`索引 HIT 三阶路径构造子 ${path.name} 暂不支持 refl 二阶路径端点`);
-                }
                 const leftEndpoint = evaluateTwoPathExpression(path.leftExpression, path.name, "左", pathIndexContext);
                 const rightEndpoint = evaluateTwoPathExpression(path.rightExpression, path.name, "右", pathIndexContext);
                 const pathResultIndices = path.resultIndices ?? [];

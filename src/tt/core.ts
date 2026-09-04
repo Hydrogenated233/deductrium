@@ -3640,14 +3640,6 @@ export class Core {
                     targetPath: AST;
                     resultIndices: AST[];
                 };
-            const hasTwoPathRefl = (expression: CoreHitTwoPathExpression | undefined): boolean => {
-                if (!expression) return false;
-                if (expression.kind === "refl") return true;
-                if (expression.kind === "compose") {
-                    return hasTwoPathRefl(expression.left) || hasTwoPathRefl(expression.right);
-                }
-                return expression.kind === "inverse" && hasTwoPathRefl(expression.value);
-            };
             const evaluateTwoPathExpression = (
                 expression: CoreHitTwoPathExpression | undefined,
                 owner: string,
@@ -3883,12 +3875,6 @@ export class Core {
                     path.argumentNames,
                     path.argumentTypes
                 );
-                if (indexCount > 0 && (hasTwoPathRefl(path.leftExpression)
-                    || hasTwoPathRefl(path.rightExpression))) {
-                    throw new Error(
-                        `索引 HIT 三阶路径构造子 ${path.name} 暂不支持 refl 二阶路径端点`
-                    );
-                }
                 const leftEndpoint = evaluateTwoPathExpression(
                     path.leftExpression, path.name, "左", pathIndexContext
                 );

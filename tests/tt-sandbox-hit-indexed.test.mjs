@@ -463,17 +463,48 @@ assert.doesNotThrow(
     "indexed path3 inverse endpoints must be certifiable"
 );
 
-assert.throws(
-    () => parseSandboxHit(
-        "hit IndexedHit3Refl [n:nat] : U "
-        + "| point3r : Πn:nat,IndexedHit3Refl n "
-        + "| loop3r : Πn:nat,point3r n=point3r n "
-        + "| path2 face3r : Πn:nat,loop3r n=loop3r n "
-        + "| path3 cell3r : Πn:nat,(refl (loop3r n))=face3r n"
-    ),
-    /索引 HIT 三阶路径构造子.*refl 二阶路径端点/,
-    "indexed path3 refl endpoints must remain outside the supported slice"
+const indexedPath3ReflSource =
+    "hit IndexedHit3Refl [n:nat] : U "
+    + "| point3r : Πn:nat,IndexedHit3Refl n "
+    + "| loop3r : Πn:nat,point3r n=point3r n "
+    + "| path2 face3r : Πn:nat,loop3r n=loop3r n "
+    + "| path3 cell3r : Πn:nat,(refl (loop3r n))=face3r n";
+const indexedPath3ReflBundle = lowerSandboxHit(parseSandboxHit(indexedPath3ReflSource));
+assert.equal(
+    indexedPath3ReflBundle.metadata.pathLevels[2].constructors[0].leftExpression.kind,
+    "refl",
+    "indexed path3 refl metadata must survive lowering"
 );
+assert.doesNotThrow(
+    () => register(structuredClone(indexedPath3ReflBundle)),
+    "indexed path3 refl endpoints must be certifiable"
+);
+const indexedPath3ReflSandbox = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+});
+const indexedPath3ReflAdded = indexedPath3ReflSandbox.add(indexedPath3ReflSource);
+assert.equal(indexedPath3ReflAdded.ok, true, indexedPath3ReflAdded.error);
+for (const name of ["cell3r", "apd3_cell3r", "ap3_cell3r"]) {
+    assert.equal(
+        indexedPath3ReflSandbox.check(name).ok,
+        true,
+        `the indexed path3 refl sandbox bridge must expose ${name}`
+    );
+}
+const indexedPath3ReflWorker = new SandboxWorkerSession();
+const indexedPath3ReflLoaded = indexedPath3ReflWorker.handle({
+    id: 31,
+    kind: "load",
+    save: indexedPath3ReflSandbox.toJSON(),
+    options: { systemRuleIds: creativeSandboxSystemRuleIds }
+});
+assert.equal(indexedPath3ReflLoaded.ok, true, indexedPath3ReflLoaded.error);
+assert.equal(indexedPath3ReflWorker.handle({
+    id: 32,
+    kind: "check",
+    source: "apd3_cell3r",
+    options: { systemRuleIds: creativeSandboxSystemRuleIds }
+}).ok, true, "the restored indexed path3 refl bridge must retain apd3 exports");
 
 for (const [label, source] of [
     [
@@ -493,22 +524,22 @@ for (const [label, source] of [
         + "| path3 cell3ri : Πn:nat,inveq (refl (loop3ri n))=face3ri n"
     ]
 ]) {
-    assert.throws(
-        () => parseSandboxHit(source),
-        /索引 HIT 三阶路径构造子.*refl 二阶路径端点/,
-        `indexed path3 ${label} must not bypass the refl boundary`
+    const reflExpressionBundle = lowerSandboxHit(parseSandboxHit(source));
+    assert.doesNotThrow(
+        () => register(structuredClone(reflExpressionBundle)),
+        `indexed path3 ${label} must recursively certify refl leaves`
     );
 }
 
 const forgedIndexedPath3Refl = structuredClone(indexedPath3Signature);
 forgedIndexedPath3Refl.pathLevels[2].constructors[0].leftExpression = {
     kind: "inverse",
-    value: { kind: "refl", pathName: "loop30", arguments: [parser.parse("n")] }
+    value: { kind: "refl", pathName: "point3", arguments: [parser.parse("n")] }
 };
 assert.throws(
     () => lowerSandboxHit(forgedIndexedPath3Refl),
-    /索引 HIT 三阶路径构造子.*refl 二阶路径端点/,
-    "structured indexed path3 input must not bypass the recursive refl boundary"
+    /refl 端点必须引用.*一阶路径构造子|未知的三维 HIT refl 一阶路径端点/,
+    "structured indexed path3 input must restrict refl to declared one-path constructors"
 );
 
 const indexedPath3Sandbox = new SandboxEnvironment({

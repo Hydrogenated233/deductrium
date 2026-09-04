@@ -1468,24 +1468,6 @@ type ElaboratedHitTwoPathExpression = {
     resultIndices: AST[];
 };
 
-/**
- * Indexed third-path lowering currently has computation witnesses for atom,
- * composition, and inverse endpoints.  A `refl` endpoint needs a separate
- * indexed transport audit, so reject it recursively rather than allowing a
- * nested `compose`/`inverse` to bypass the feature boundary.
- */
-function sandboxHitTwoPathExpressionContainsRefl(
-    expression: SandboxHitTwoPathExpression
-): boolean {
-    if (expression.kind === "refl") return true;
-    if (expression.kind === "compose") {
-        return sandboxHitTwoPathExpressionContainsRefl(expression.left)
-            || sandboxHitTwoPathExpressionContainsRefl(expression.right);
-    }
-    return expression.kind === "inverse"
-        && sandboxHitTwoPathExpressionContainsRefl(expression.value);
-}
-
 const SANDBOX_HIT_TWO_PATH_EXPRESSION_MAX_DEPTH = 128;
 const SANDBOX_HIT_TWO_PATH_EXPRESSION_MAX_NODES = 4_096;
 
@@ -1973,12 +1955,6 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
                 throw new Error(`三阶路径构造子 ${path3.name} 的一阶路径边界不一致`);
             }
         } else {
-            if (sandboxHitTwoPathExpressionContainsRefl(left.expression)
-                || sandboxHitTwoPathExpressionContainsRefl(right.expression)) {
-                throw new Error(
-                    `索引 HIT 三阶路径构造子 ${path3.name} 暂不支持 refl 二阶路径端点`
-                );
-            }
             if (left.resultIndices.length !== ordinary.indices.length
                 || right.resultIndices.length !== ordinary.indices.length) {
                 throw new Error(`索引 HIT 三阶路径构造子 ${path3.name} 的端点索引纤维不一致`);
@@ -3522,12 +3498,6 @@ function assertSandboxHitOnePathMetadata(signature: SandboxHitDeclaration) {
         );
     }
     for (const path of hitPathConstructorsAt(signature.pathLevels, 3)) {
-        if (indexCount > 0 && (sandboxHitTwoPathExpressionContainsRefl(path.leftExpression)
-            || sandboxHitTwoPathExpressionContainsRefl(path.rightExpression))) {
-            throw new Error(
-                `索引 HIT 三阶路径构造子 ${path.name} 暂不支持 refl 二阶路径端点`
-            );
-        }
         assertAstArray(
             path.resultIndices,
             indexCount,
