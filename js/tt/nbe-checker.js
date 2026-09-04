@@ -280,9 +280,17 @@ function alignScopeSyntax(ast, sourceScope, targetScope) {
 function reserveBondVarIds(ast, state) {
     if (!ast || typeof ast !== "object")
         return;
-    reserveBondVarId(ast.bondVarId, state);
-    for (const child of ast.nodes ?? [])
-        reserveBondVarIds(child, state);
+    const pending = [ast];
+    const visited = new WeakSet();
+    while (pending.length) {
+        const current = pending.pop();
+        if (!current || typeof current !== "object" || visited.has(current))
+            continue;
+        visited.add(current);
+        reserveBondVarId(current.bondVarId, state);
+        for (const child of current.nodes ?? [])
+            pending.push(child);
+    }
 }
 function prepareAst(ast, scope, state, dropUnboundIds = false, freshenBinders = false, metaRenames) {
     if (ast.type === "var") {
@@ -490,10 +498,21 @@ function containsSemanticMetadata(ast) {
 function containsForeignMetavariable(ast, state) {
     if (!ast || typeof ast !== "object")
         return false;
-    if (ast.type === "var" && (ast.name === "_"
-        || (ast.name?.startsWith("?") && !state.metas.has(ast.name))))
-        return true;
-    return (ast.nodes ?? []).some(child => containsForeignMetavariable(child, state));
+    const pending = [ast];
+    const visited = new WeakSet();
+    while (pending.length) {
+        const current = pending.pop();
+        if (!current || typeof current !== "object" || visited.has(current))
+            continue;
+        visited.add(current);
+        if (current.type === "var" && (current.name === "_"
+            || (current.name?.startsWith("?") && !state.metas.has(current.name)))) {
+            return true;
+        }
+        for (const child of current.nodes ?? [])
+            pending.push(child);
+    }
+    return false;
 }
 function resolveMetas(ast, state, resolving = new Set()) {
     if (isLocalMeta(ast, state)) {
@@ -802,9 +821,19 @@ function collectGeneralizedMetas(type, term, state) {
 function containsLocalMeta(ast, state) {
     if (!ast || typeof ast !== "object")
         return false;
-    if (isLocalMeta(ast, state))
-        return true;
-    return (ast.nodes ?? []).some(child => containsLocalMeta(child, state));
+    const pending = [ast];
+    const visited = new WeakSet();
+    while (pending.length) {
+        const current = pending.pop();
+        if (!current || typeof current !== "object" || visited.has(current))
+            continue;
+        visited.add(current);
+        if (isLocalMeta(current, state))
+            return true;
+        for (const child of current.nodes ?? [])
+            pending.push(child);
+    }
+    return false;
 }
 function collectSourceMetaConstraints(state) {
     const constraints = [];

@@ -133,8 +133,10 @@ Composite third-path endpoints require transparent lower-dimensional laws, not
 new axioms. The system provides checked `hit_ap2_comp`, `hit_ap2_inv`,
 `hit_apd2_comp`, and `hit_apd2_inv` definitions. Non-indexed second-path
 endpoints support atoms, composition, and inverse end to end. Indexed HITs
-currently support only same-fiber atomic `path2`; indexed composition, inverse,
-and `path3` remain explicit boundaries.
+support same-fiber atomic `path2` and same-fiber atomic `path3`; Core checks
+their indices and shared lower-dimensional boundaries with NbE. Indexed
+composition/inverse `path2`, composite/inverse/refl indexed `path3`, and
+cross-fiber dependent paths remain explicit boundaries.
 
 ## Type-theory Proof Pages / 类型论证明页
 

@@ -373,6 +373,8 @@ export type SandboxHitThreePathConstructor = {
     /** Shared point boundary, retained for recursive Core validation. */
     sourcePoint: AST;
     targetPoint: AST;
+    /** Common family indices of both second-path endpoint expressions. */
+    resultIndices: AST[];
 };
 
 /** Structured higher-inductive signature (parameterized and non-indexed). */
@@ -1462,6 +1464,8 @@ type ElaboratedHitTwoPathExpression = {
     targetPath: AST;
     sourcePoint: AST;
     targetPoint: AST;
+    /** Family indices of the second-path endpoints. */
+    resultIndices: AST[];
 };
 
 const SANDBOX_HIT_TWO_PATH_EXPRESSION_MAX_DEPTH = 128;
@@ -1502,13 +1506,19 @@ function elaborateHitThreePathEndpoint(
         if (!sameSandboxAst(left.targetPoint, right.sourcePoint)) {
             throw new Error(`三阶路径构造子 ${pathName} 的二阶路径组合点边界不一致`);
         }
+        if (left.resultIndices.length !== right.resultIndices.length
+            || left.resultIndices.some((index, position) =>
+                !sameSandboxAst(index, right.resultIndices[position]))) {
+            throw new Error(`三阶路径构造子 ${pathName} 的二阶路径组合索引纤维不一致`);
+        }
         return {
             expression: { kind: "compose", left: left.expression, right: right.expression },
             term: sandboxCompose(left.term, right.term),
             sourcePath: left.sourcePath,
             targetPath: right.targetPath,
             sourcePoint: left.sourcePoint,
-            targetPoint: right.targetPoint
+            targetPoint: right.targetPoint,
+            resultIndices: left.resultIndices.map(index => Core.clone(index))
         };
     }
     const inverseTerms = flattenApplication(endpoint);
@@ -1525,7 +1535,8 @@ function elaborateHitThreePathEndpoint(
             sourcePath: value.targetPath,
             targetPath: value.sourcePath,
             sourcePoint: value.targetPoint,
-            targetPoint: value.sourcePoint
+            targetPoint: value.sourcePoint,
+            resultIndices: value.resultIndices.map(index => Core.clone(index))
         };
     }
     const terms = flattenApplication(endpoint);
@@ -1587,7 +1598,10 @@ function elaborateHitThreePathEndpoint(
             sourcePath: Core.clone(firstPathTerm),
             targetPath: Core.clone(firstPathTerm),
             sourcePoint: substituteSandboxFreeVars(firstPath.left, argumentReplacements),
-            targetPoint: substituteSandboxFreeVars(firstPath.right, argumentReplacements)
+            targetPoint: substituteSandboxFreeVars(firstPath.right, argumentReplacements),
+            resultIndices: firstPath.resultIndices.map(index =>
+                substituteSandboxFreeVars(index, argumentReplacements)
+            )
         };
     }
     const headName = terms[0]?.type === "var" ? terms[0].name : "";
@@ -1638,7 +1652,10 @@ function elaborateHitThreePathEndpoint(
         sourcePath: substituteSandboxFreeVars(twoPath.left, argumentReplacements),
         targetPath: substituteSandboxFreeVars(twoPath.right, argumentReplacements),
         sourcePoint: substituteSandboxFreeVars(twoPath.leftPoint, argumentReplacements),
-        targetPoint: substituteSandboxFreeVars(twoPath.rightPoint, argumentReplacements)
+        targetPoint: substituteSandboxFreeVars(twoPath.rightPoint, argumentReplacements),
+        resultIndices: twoPath.resultIndices.map(index =>
+            substituteSandboxFreeVars(index, argumentReplacements)
+        )
     };
 }
 
@@ -1796,9 +1813,6 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
             };
         })
     };
-    if (ordinary.indices.length && threePathSections.length) {
-        throw new Error("索引 HIT 当前只支持一阶和原子 path2，暂不支持 path3");
-    }
     const names = new Set([ordinary.name, ...ordinary.constructors.map(constructor => constructor.name)]);
     const parameterNames = new Set(ordinary.parameters.map(parameter => parameter.name));
     const pathConstructors: SandboxHitPathConstructor[] = [];
@@ -1936,13 +1950,25 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
             body.nodes[1], ordinary.name, ordinary.parameters,
             pathConstructors, twoPathConstructors, path3.name, endpointBoundNames
         );
-        if (!sameSandboxAst(left.sourcePath, right.sourcePath)
-            || !sameSandboxAst(left.targetPath, right.targetPath)) {
-            throw new Error(`三阶路径构造子 ${path3.name} 的二阶路径边界不一致`);
-        }
-        if (!sameSandboxAst(left.sourcePoint, right.sourcePoint)
-            || !sameSandboxAst(left.targetPoint, right.targetPoint)) {
-            throw new Error(`三阶路径构造子 ${path3.name} 的一阶路径边界不一致`);
+        if (!ordinary.indices.length) {
+            if (!sameSandboxAst(left.sourcePath, right.sourcePath)
+                || !sameSandboxAst(left.targetPath, right.targetPath)) {
+                throw new Error(`三阶路径构造子 ${path3.name} 的二阶路径边界不一致`);
+            }
+            if (!sameSandboxAst(left.sourcePoint, right.sourcePoint)
+                || !sameSandboxAst(left.targetPoint, right.targetPoint)) {
+                throw new Error(`三阶路径构造子 ${path3.name} 的一阶路径边界不一致`);
+            }
+        } else {
+            if (left.expression.kind !== "atom" || right.expression.kind !== "atom") {
+                throw new Error(
+                    `索引 HIT 三阶路径构造子 ${path3.name} 目前只支持原子二阶路径端点`
+                );
+            }
+            if (left.resultIndices.length !== ordinary.indices.length
+                || right.resultIndices.length !== ordinary.indices.length) {
+                throw new Error(`索引 HIT 三阶路径构造子 ${path3.name} 的端点索引纤维不一致`);
+            }
         }
         const elaboratedType = sandboxWrapPis(arguments_, sandboxEquality(
             Core.clone(left.term), Core.clone(right.term)
@@ -1961,7 +1987,8 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
             sourcePath: left.sourcePath,
             targetPath: left.targetPath,
             sourcePoint: left.sourcePoint,
-            targetPoint: left.targetPoint
+            targetPoint: left.targetPoint,
+            resultIndices: left.resultIndices.map(index => Core.clone(index))
         });
     }
     return {
@@ -2981,7 +3008,8 @@ function sandboxHitPathData(
     pathConstructors: readonly SandboxHitPathConstructor[],
     motiveName: string,
     branchNames: readonly string[],
-    owner: string
+    owner: string,
+    motive: AST = sandboxVar(motiveName)
 ) {
     const terms = flattenApplication(endpoint);
     const pathName = terms[0]?.type === "var" ? terms[0].name : "";
@@ -3004,7 +3032,7 @@ function sandboxHitPathData(
         path.right, parameters, pointConstructors, branchNames
     );
     const type = sandboxEquality(
-        sandboxApply(sandboxVar("trans"), sandboxVar(motiveName), pathTerm, leftBranch),
+        sandboxApply(sandboxVar("trans"), Core.clone(motive), pathTerm, leftBranch),
         rightBranch
     );
     return { path, pathIndex, arguments_, pathTerm, type };
@@ -3184,7 +3212,8 @@ function sandboxRenameHitThreePathArguments(
         path.sourcePath,
         path.targetPath,
         path.sourcePoint,
-        path.targetPoint
+        path.targetPoint,
+        ...path.resultIndices
     ]) collectSandboxAstNames(ast, occupied);
     const replacements = new Map<string, string>();
     const arguments_: SandboxInductiveBinder[] = [];
@@ -3213,7 +3242,8 @@ function sandboxRenameHitThreePathArguments(
         sourcePath: rename(path.sourcePath),
         targetPath: rename(path.targetPath),
         sourcePoint: rename(path.sourcePoint),
-        targetPoint: rename(path.targetPoint)
+        targetPoint: rename(path.targetPoint),
+        resultIndices: path.resultIndices.map(rename)
     };
 }
 
@@ -3267,6 +3297,7 @@ function sandboxRenameHitUniformParameters(
         collectSandboxAstNames(path.targetPath, occupied);
         collectSandboxAstNames(path.sourcePoint, occupied);
         collectSandboxAstNames(path.targetPoint, occupied);
+        for (const index of path.resultIndices) collectSandboxAstNames(index, occupied);
     }
 
     const replacements = new Map<string, string>();
@@ -3346,7 +3377,8 @@ function sandboxRenameHitUniformParameters(
             sourcePath: rename(path.sourcePath),
             targetPath: rename(path.targetPath),
             sourcePoint: rename(path.sourcePoint),
-            targetPoint: rename(path.targetPoint)
+            targetPoint: rename(path.targetPoint),
+            resultIndices: path.resultIndices.map(rename)
         };
     });
     const universeAst = rename(signature.universeAst);
@@ -3482,6 +3514,19 @@ function assertSandboxHitOnePathMetadata(signature: SandboxHitDeclaration) {
             `HIT 二阶路径构造子 ${path.name} resultIndices`
         );
     }
+    for (const path of hitPathConstructorsAt(signature.pathLevels, 3)) {
+        if (indexCount > 0 && (path.leftExpression.kind !== "atom"
+            || path.rightExpression.kind !== "atom")) {
+            throw new Error(
+                `索引 HIT 三阶路径构造子 ${path.name} 目前只支持原子二阶路径端点`
+            );
+        }
+        assertAstArray(
+            path.resultIndices,
+            indexCount,
+            `HIT 三阶路径构造子 ${path.name} resultIndices`
+        );
+    }
 }
 
 /** Lower a HIT while keeping path computation propositional. */
@@ -3491,9 +3536,6 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
     const inputTwoPathConstructors = hitPathConstructorsAt(signature.pathLevels, 2);
     const inputThreePathConstructors = hitPathConstructorsAt(signature.pathLevels, 3);
     assertSandboxHitOnePathMetadata(signature);
-    if (signature.indices.length && inputThreePathConstructors.length) {
-        throw new Error("索引 HIT 当前只支持一阶和原子 path2，暂不支持 path3");
-    }
     if (!inputPathConstructors.length) throw new Error("一阶 HIT 至少需要一个一阶路径构造子");
     const uniformParameterReserved = new Set([
         signature.name,
@@ -3956,6 +3998,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         const path = threePathConstructors[index];
         const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
         const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
+        const fiberMotive = sandboxHitFiberMotive(signature, motiveName, path.resultIndices);
         const sourceValue = sandboxHitBranchValue(
             path.sourcePoint, signature.parameters, signature.pointConstructors, branchNames
         );
@@ -3995,7 +4038,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 sandboxCompose(
                     sandboxApply(
                         sandboxVar("trans2"),
-                        sandboxVar(motiveName),
+                        Core.clone(fiberMotive),
                         pathValue,
                         endpointValue
                     ),
@@ -4320,18 +4363,20 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         expression: SandboxHitOnePathExpression,
         head: AST,
         full: boolean,
-        owner: string
+        owner: string,
+        motive: AST = sandboxVar(motiveName),
+        domainType: AST = hitType
     ): SharedDependentOnePathComputation => {
         if (expression.kind === "compose") {
             const left = makeSharedDependentOnePathComputation(
-                expression.left, head, full, owner
+                expression.left, head, full, owner, motive, domainType
             );
             const right = makeSharedDependentOnePathComputation(
-                expression.right, head, full, owner
+                expression.right, head, full, owner, motive, domainType
             );
             const method = sandboxApply(
                 sandboxVar("hit_dep1_comp"),
-                sandboxVar(motiveName),
+                Core.clone(motive),
                 Core.clone(left.sourceValue),
                 Core.clone(left.targetValue),
                 Core.clone(right.targetValue),
@@ -4347,7 +4392,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 targetValue: right.targetValue,
                 type: sandboxEquality(
                     sandboxApply(
-                        sandboxVar("trans"), sandboxVar(motiveName),
+                        sandboxVar("trans"), Core.clone(motive),
                         Core.clone(term), Core.clone(left.sourceValue)
                     ),
                     Core.clone(right.targetValue)
@@ -4357,13 +4402,13 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                     sandboxVar("@hit_apd1_corrected_comp"),
                     Core.clone(hitUniverseLevel),
                     full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                    Core.clone(hitType),
+                    Core.clone(domainType),
                     Core.clone(left.sourcePoint),
                     Core.clone(left.targetPoint),
                     Core.clone(right.targetPoint),
                     Core.clone(left.term),
                     Core.clone(right.term),
-                    sandboxVar(motiveName),
+                    Core.clone(motive),
                     Core.clone(head),
                     Core.clone(left.method),
                     Core.clone(right.method),
@@ -4374,12 +4419,12 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         }
         if (expression.kind === "inverse") {
             const value = makeSharedDependentOnePathComputation(
-                expression.value, head, full, owner
+                expression.value, head, full, owner, motive, domainType
             );
             const term = sandboxApply(sandboxVar("inveq"), value.term);
             const method = sandboxApply(
                 sandboxVar("hit_dep1_inv"),
-                sandboxVar(motiveName),
+                Core.clone(motive),
                 Core.clone(value.sourceValue),
                 Core.clone(value.targetValue),
                 Core.clone(value.method)
@@ -4392,7 +4437,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 targetValue: value.sourceValue,
                 type: sandboxEquality(
                     sandboxApply(
-                        sandboxVar("trans"), sandboxVar(motiveName),
+                        sandboxVar("trans"), Core.clone(motive),
                         Core.clone(term), Core.clone(value.targetValue)
                     ),
                     Core.clone(value.sourceValue)
@@ -4402,11 +4447,11 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                     sandboxVar("@hit_apd1_corrected_inv"),
                     Core.clone(hitUniverseLevel),
                     full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                    Core.clone(hitType),
+                    Core.clone(domainType),
                     Core.clone(value.sourcePoint),
                     Core.clone(value.targetPoint),
                     Core.clone(value.term),
-                    sandboxVar(motiveName),
+                    Core.clone(motive),
                     Core.clone(head),
                     Core.clone(value.method),
                     Core.clone(value.computation)
@@ -4438,7 +4483,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             targetValue,
             type: sandboxEquality(
                 sandboxApply(
-                    sandboxVar("trans"), sandboxVar(motiveName),
+                    sandboxVar("trans"), Core.clone(motive),
                     Core.clone(data.term), Core.clone(sourceValue)
                 ),
                 Core.clone(targetValue)
@@ -4468,14 +4513,15 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         expression: SandboxHitOnePathExpression,
         head: AST,
         full: boolean,
-        owner: string
+        owner: string,
+        domainType: AST = hitType
     ): SharedRecursorOnePathComputation => {
         if (expression.kind === "compose") {
             const left = makeSharedRecursorOnePathComputation(
-                expression.left, head, full, owner
+                expression.left, head, full, owner, domainType
             );
             const right = makeSharedRecursorOnePathComputation(
-                expression.right, head, full, owner
+                expression.right, head, full, owner, domainType
             );
             const method = sandboxCompose(left.method, right.method);
             return {
@@ -4487,7 +4533,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                     sandboxVar("@hit_ap1_corrected_comp"),
                     Core.clone(hitUniverseLevel),
                     full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                    Core.clone(hitType),
+                    Core.clone(domainType),
                     sandboxVar(motiveName),
                     Core.clone(left.sourcePoint),
                     Core.clone(left.targetPoint),
@@ -4504,7 +4550,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         }
         if (expression.kind === "inverse") {
             const value = makeSharedRecursorOnePathComputation(
-                expression.value, head, full, owner
+                expression.value, head, full, owner, domainType
             );
             const method = sandboxApply(sandboxVar("inveq"), value.method);
             return {
@@ -4516,7 +4562,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                     sandboxVar("@hit_ap1_corrected_inv"),
                     Core.clone(hitUniverseLevel),
                     full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                    Core.clone(hitType),
+                    Core.clone(domainType),
                     sandboxVar(motiveName),
                     Core.clone(value.sourcePoint),
                     Core.clone(value.targetPoint),
@@ -4654,7 +4700,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                     type: sandboxEquality(
                         sandboxApply(
                             sandboxVar("trans"),
-                            sandboxVar(motiveName),
+                            Core.clone(fiberMotive),
                             Core.clone(term),
                             Core.clone(left.sourceValue)
                         ),
@@ -4699,7 +4745,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                     type: sandboxEquality(
                         sandboxApply(
                             sandboxVar("trans"),
-                            sandboxVar(motiveName),
+                            Core.clone(fiberMotive),
                             Core.clone(term),
                             Core.clone(value.targetValue)
                         ),
@@ -5111,7 +5157,9 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         const path = threePathConstructors[index];
         const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
         const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
-        const dependentHead = sandboxApply(
+        const fiberMotive = sandboxHitFiberMotive(signature, motiveName, path.resultIndices);
+        const fiberHitType = sandboxHitFiberType(signature, path.resultIndices);
+        const dependentHead = sandboxHitHeadAtIndices(sandboxApply(
             sandboxVar(`ind_${signature.name}`),
             ...parameterVars,
             sandboxVar(motiveName),
@@ -5119,8 +5167,8 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             ...pathMethodNames.map(name => sandboxVar(name)),
             ...dependentTwoPathMethodNames.map(name => sandboxVar(name)),
             ...dependentThreePathMethodNames.map(name => sandboxVar(name))
-        );
-        const fullDependentHead = sandboxApply(
+        ), path.resultIndices);
+        const fullDependentHead = sandboxHitHeadAtIndices(sandboxApply(
             sandboxVar(`@ind_${signature.name}`),
             sandboxVar(motiveUniverseName),
             ...parameterVars,
@@ -5129,8 +5177,8 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             ...pathMethodNames.map(name => sandboxVar(name)),
             ...dependentTwoPathMethodNames.map(name => sandboxVar(name)),
             ...dependentThreePathMethodNames.map(name => sandboxVar(name))
-        );
-        const recursorHead = sandboxApply(
+        ), path.resultIndices);
+        const recursorHead = sandboxHitHeadAtIndices(sandboxApply(
             sandboxVar(`rec_${signature.name}`),
             ...parameterVars,
             sandboxVar(motiveName),
@@ -5138,8 +5186,8 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             ...recursorPathMethodNames.map(name => sandboxVar(name)),
             ...recursorTwoPathMethodNames.map(name => sandboxVar(name)),
             ...recursorThreePathMethodNames.map(name => sandboxVar(name))
-        );
-        const fullRecursorHead = sandboxApply(
+        ), path.resultIndices);
+        const fullRecursorHead = sandboxHitHeadAtIndices(sandboxApply(
             sandboxVar(`@rec_${signature.name}`),
             sandboxVar(motiveUniverseName),
             ...parameterVars,
@@ -5148,7 +5196,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             ...recursorPathMethodNames.map(name => sandboxVar(name)),
             ...recursorTwoPathMethodNames.map(name => sandboxVar(name)),
             ...recursorThreePathMethodNames.map(name => sandboxVar(name))
-        );
+        ), path.resultIndices);
         const methodValue = sandboxApply(
             sandboxVar(recursorThreePathMethodNames[index]),
             ...pathArguments
@@ -5170,28 +5218,32 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             twoPathConstructors, path.name
         );
         const sourcePath = makeSharedDependentOnePathComputation(
-            onePathBoundary.source, dependentHead, false, path.name
+            onePathBoundary.source, dependentHead, false, path.name,
+            fiberMotive, fiberHitType
         );
         const targetPath = makeSharedDependentOnePathComputation(
-            onePathBoundary.target, dependentHead, false, path.name
+            onePathBoundary.target, dependentHead, false, path.name,
+            fiberMotive, fiberHitType
         );
         const sourcePathFull = makeSharedDependentOnePathComputation(
-            onePathBoundary.source, fullDependentHead, true, path.name
+            onePathBoundary.source, fullDependentHead, true, path.name,
+            fiberMotive, fiberHitType
         );
         const targetPathFull = makeSharedDependentOnePathComputation(
-            onePathBoundary.target, fullDependentHead, true, path.name
+            onePathBoundary.target, fullDependentHead, true, path.name,
+            fiberMotive, fiberHitType
         );
         const sourceRecursorPath = makeSharedRecursorOnePathComputation(
-            onePathBoundary.source, recursorHead, false, path.name
+            onePathBoundary.source, recursorHead, false, path.name, fiberHitType
         );
         const targetRecursorPath = makeSharedRecursorOnePathComputation(
-            onePathBoundary.target, recursorHead, false, path.name
+            onePathBoundary.target, recursorHead, false, path.name, fiberHitType
         );
         const sourceRecursorPathFull = makeSharedRecursorOnePathComputation(
-            onePathBoundary.source, fullRecursorHead, true, path.name
+            onePathBoundary.source, fullRecursorHead, true, path.name, fiberHitType
         );
         const targetRecursorPathFull = makeSharedRecursorOnePathComputation(
-            onePathBoundary.target, fullRecursorHead, true, path.name
+            onePathBoundary.target, fullRecursorHead, true, path.name, fiberHitType
         );
         const sourceDependentMethod = sourcePath.method;
         const targetDependentMethod = targetPath.method;
@@ -5225,7 +5277,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 const right = makeDependentTwoPathComputation(expression.right, head, full);
                 const method = sandboxApply(
                     sandboxVar("hit_dep2_comp"),
-                    sandboxVar(motiveName),
+                    Core.clone(fiberMotive),
                     Core.clone(endpointValue),
                     Core.clone(targetEndpointValue),
                     Core.clone(left.sourceMethod),
@@ -5249,7 +5301,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                         sandboxVar("@hit_apd2_corrected_comp"),
                         Core.clone(hitUniverseLevel),
                         full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                        Core.clone(hitType),
+                        Core.clone(fiberHitType),
                         Core.clone(path.sourcePoint),
                         Core.clone(path.targetPoint),
                         Core.clone(left.sourcePath),
@@ -5276,7 +5328,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 const value = makeDependentTwoPathComputation(expression.value, head, full);
                 const method = sandboxApply(
                     sandboxVar("hit_dep2_inv"),
-                    sandboxVar(motiveName),
+                    Core.clone(fiberMotive),
                     Core.clone(endpointValue),
                     Core.clone(targetEndpointValue),
                     Core.clone(value.sourceMethod),
@@ -5297,12 +5349,12 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                         sandboxVar("@hit_apd2_corrected_inv"),
                         Core.clone(hitUniverseLevel),
                         full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                        Core.clone(hitType),
+                        Core.clone(fiberHitType),
                         Core.clone(path.sourcePoint),
                         Core.clone(path.targetPoint),
                         Core.clone(value.sourcePath),
                         Core.clone(value.targetPath),
-                        sandboxVar(motiveName),
+                        Core.clone(fiberMotive),
                         Core.clone(head),
                         Core.clone(value.sourceMethod),
                         Core.clone(value.targetMethod),
@@ -5326,7 +5378,9 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                     },
                     head,
                     full,
-                    path.name
+                    path.name,
+                    fiberMotive,
+                    fiberHitType
                 );
                 const sourceMethod = sourceData.method;
                 const sourceComputation = sourceData.computation;
@@ -5344,11 +5398,11 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                         sandboxVar("@hit_apd2_corrected_refl"),
                         Core.clone(hitUniverseLevel),
                         full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                        Core.clone(hitType),
+                        Core.clone(fiberHitType),
                         Core.clone(path.sourcePoint),
                         Core.clone(path.targetPoint),
                         Core.clone(data.pathTerm),
-                        sandboxVar(motiveName),
+                        Core.clone(fiberMotive),
                         Core.clone(head),
                         Core.clone(sourceMethod),
                         Core.clone(sourceComputation)
@@ -5370,10 +5424,12 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 atom.rightExpression, mapArgument
             );
             const sourceData = makeSharedDependentOnePathComputation(
-                atomSourceExpression, head, full, path.name
+                atomSourceExpression, head, full, path.name,
+                fiberMotive, fiberHitType
             );
             const targetData = makeSharedDependentOnePathComputation(
-                atomTargetExpression, head, full, path.name
+                atomTargetExpression, head, full, path.name,
+                fiberMotive, fiberHitType
             );
             const method = sandboxApply(
                 sandboxVar(dependentTwoPathMethodNames[pathIndex]),
@@ -5442,7 +5498,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             sandboxCompose(
                 sandboxApply(
                     sandboxVar("trans2"),
-                    sandboxVar(motiveName),
+                    Core.clone(fiberMotive),
                     twoPathValue,
                     Core.clone(endpointValue)
                 ),
@@ -5458,7 +5514,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             sandboxCompose(
                 sandboxApply(
                     sandboxVar("trans2"),
-                    sandboxVar(motiveName),
+                    Core.clone(fiberMotive),
                     twoPathValue,
                     Core.clone(endpointValue)
                 ),
@@ -5481,7 +5537,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 sandboxCompose(
                     sandboxApply(
                         sandboxVar("trans2"),
-                        sandboxVar(motiveName),
+                        Core.clone(fiberMotive),
                         Core.clone(twoPathValue),
                         Core.clone(endpointValue)
                     ),
@@ -5648,7 +5704,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                         sandboxVar("@hit_ap2_corrected_comp"),
                         Core.clone(hitUniverseLevel),
                         full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                        Core.clone(hitType),
+                        Core.clone(fiberHitType),
                         sandboxVar(motiveName),
                         Core.clone(path.sourcePoint),
                         Core.clone(path.targetPoint),
@@ -5686,7 +5742,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                         sandboxVar("@hit_ap2_corrected_inv"),
                         Core.clone(hitUniverseLevel),
                         full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                        Core.clone(hitType),
+                        Core.clone(fiberHitType),
                         sandboxVar(motiveName),
                         Core.clone(path.sourcePoint),
                         Core.clone(path.targetPoint),
@@ -5718,7 +5774,8 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                     pathConstructors,
                     motiveName,
                     recursorBranchNames,
-                    path.name
+                    path.name,
+                    fiberMotive
                 );
                 const sourceComputation = makeRecursorPathComputation(sourcePathData, full);
                 const corrected = sandboxApply(sandboxVar("refl"), sourceMethod);
@@ -5735,7 +5792,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                         sandboxVar("@hit_ap2_corrected_refl"),
                         Core.clone(hitUniverseLevel),
                         full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
-                        Core.clone(hitType),
+                        Core.clone(fiberHitType),
                         sandboxVar(motiveName),
                         Core.clone(path.sourcePoint),
                         Core.clone(path.targetPoint),
@@ -5765,10 +5822,10 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 twoPathConstructors, path.name
             );
             const sourceData = makeSharedRecursorOnePathComputation(
-                boundary.source, head, full, path.name
+                boundary.source, head, full, path.name, fiberHitType
             );
             const targetData = makeSharedRecursorOnePathComputation(
-                boundary.target, head, full, path.name
+                boundary.target, head, full, path.name, fiberHitType
             );
             return {
                 term: sandboxHitTwoPathExpressionTerm(
@@ -5984,6 +6041,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         argumentNames: path.arguments.map(argument => argument.name),
         leftExpression: structuredClone(path.leftExpression),
         rightExpression: structuredClone(path.rightExpression),
+        resultIndices: path.resultIndices.map(index => Core.clone(index)),
         computationName: `apd3_${path.name}`,
         actionComputationName: `ap3_${path.name}`
     }));

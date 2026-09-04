@@ -515,7 +515,7 @@ function migrateLegacyCoreHitTwoPathMetadata(path, parameterCount) {
     const leftExpression = legacyCoreHitOnePathExpression(path.left, path.leftPath, parameterCount, `${label} 左端点`);
     const rightExpression = legacyCoreHitOnePathExpression(path.right, path.rightPath, parameterCount, `${label} 右端点`);
     const { left: _left, right: _right, leftPath: _leftPath, rightPath: _rightPath, ...common } = path;
-    return { ...common, leftExpression, rightExpression };
+    return { ...common, resultIndices: [], leftExpression, rightExpression };
 }
 function legacyCoreHitTwoPathExpression(endpoint, expectedName, parameterCount, label) {
     if (!endpoint || !expectedName) {
@@ -576,7 +576,7 @@ function migrateLegacyCoreHitThreePathMetadata(path, twoPathByName, parameterCou
         throw new Error(`${label} 的 legacy 边界 metadata 不一致`);
     }
     const { left: _left, right: _right, leftTwoPath: _leftTwoPath, rightTwoPath: _rightTwoPath, sourcePath: _sourcePath, targetPath: _targetPath, ...common } = path;
-    return { ...common, leftExpression, rightExpression };
+    return { ...common, resultIndices: [], leftExpression, rightExpression };
 }
 function reconstructCoreHitEndpointResultIndices(metadata, endpoint, label) {
     const parameterCount = Number(metadata.parameterCount ?? 0);
@@ -755,8 +755,22 @@ function normalizeCoreSystemInductiveMetadata(metadata) {
         if (!path.leftExpression || !path.rightExpression) {
             throw new Error(`HIT metadata v${version} 三阶路径构造子 ${path.name} 缺少表达式端点`);
         }
+        const hasResultIndices = Array.isArray(path.resultIndices);
+        if (path.resultIndices !== undefined && !hasResultIndices) {
+            throw new Error(`HIT metadata v${version} 三阶路径构造子 ${path.name} 的 resultIndices 结构无效`);
+        }
+        const resultIndices = hasResultIndices
+            ? path.resultIndices.map(index => Core.clone(index))
+            : [];
+        if (indexCount > 0 && resultIndices.length !== indexCount) {
+            throw new Error(`indexed HIT 三阶路径构造子 ${path.name} 的 resultIndices 数量与索引不一致`);
+        }
+        if (resultIndices.length && resultIndices.length !== indexCount) {
+            throw new Error(`HIT 三阶路径构造子 ${path.name} 的 resultIndices 数量与索引不一致`);
+        }
         return {
             ...path,
+            resultIndices,
             leftExpression: cloneCoreHitTwoPathExpression(path.leftExpression, `三阶路径构造子 ${path.name} 左端点`),
             rightExpression: cloneCoreHitTwoPathExpression(path.rightExpression, `三阶路径构造子 ${path.name} 右端点`)
         };
@@ -804,6 +818,7 @@ export function cloneCoreHitPathMetadata(metadata) {
         name: ctor.name,
         argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
         argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
+        resultIndices: (ctor.resultIndices ?? []).map(index => Core.clone(index)),
         leftExpression: cloneCoreHitTwoPathExpression(ctor.leftExpression, `三阶路径构造子 ${ctor.name} 左端点`),
         rightExpression: cloneCoreHitTwoPathExpression(ctor.rightExpression, `三阶路径构造子 ${ctor.name} 右端点`),
         computationName: ctor.computationName,
@@ -2034,9 +2049,6 @@ export class Core {
             || parameterCount + indexCount !== familyBinders.length) {
             throw new Error(`归纳类型 metadata 参数/索引数量不一致：${parameterCount}+${indexCount}`);
         }
-        if (indexCount > 0 && bundle.metadata?.kind === "hit3") {
-            throw new Error("索引 HIT 当前只支持一阶和原子 path2，暂不支持 path3");
-        }
         const parameters = familyBinders.slice(0, parameterCount);
         const indices = familyBinders.slice(parameterCount);
         if (bundle.metadata?.ruleSchemaVersion === 1) {
@@ -2727,6 +2739,7 @@ export class Core {
                         argumentNames.forEach((name, index) => {
                             replacements.set(name, arguments_[index]);
                         });
+                        const resultIndices = (referencedPath.resultIndices ?? []).map(index => substituteGeneratedFreeNames(normalizedMetadataAst(index), replacements));
                         if (!referencedPath.leftExpression || !referencedPath.rightExpression) {
                             throw new Error(`${label}引用的二阶路径缺少已认证端点：${expression.name}`);
                         }
@@ -2740,7 +2753,8 @@ export class Core {
                             sourceExpression,
                             targetExpression,
                             sourcePath: Core.clone(sourceExpression.term),
-                            targetPath: Core.clone(targetExpression.term)
+                            targetPath: Core.clone(targetExpression.term),
+                            resultIndices
                         };
                     }
                     if (expression.kind === "refl") {
@@ -2758,6 +2772,10 @@ export class Core {
                                 + `需要 ${argumentNames.length} 个，实际 ${expression.arguments.length} 个`);
                         }
                         const arguments_ = expression.arguments.map(normalizedMetadataAst);
+                        const replacements = new Map();
+                        argumentNames.forEach((name, index) => {
+                            replacements.set(name, arguments_[index]);
+                        });
                         const pathTerm = wrapApply(wrapVar(expression.pathName), ...parameters.map(parameter => wrapVar(parameter.name)), ...arguments_.map(argument => Core.clone(argument)));
                         const evaluated = validateTwoPathEndpoint(owner, `${side}端点的反身一阶路径`, pathTerm, expression.pathName);
                         return {
@@ -2768,7 +2786,8 @@ export class Core {
                             sourceExpression: evaluated,
                             targetExpression: evaluated,
                             sourcePath: Core.clone(pathTerm),
-                            targetPath: Core.clone(pathTerm)
+                            targetPath: Core.clone(pathTerm),
+                            resultIndices: (referencedPath.resultIndices ?? []).map(index => substituteGeneratedFreeNames(normalizedMetadataAst(index), replacements))
                         };
                     }
                     if (expression.kind === "compose") {
@@ -2785,7 +2804,8 @@ export class Core {
                             sourceExpression: left.sourceExpression,
                             targetExpression: right.targetExpression,
                             sourcePath: Core.clone(left.sourcePath),
-                            targetPath: Core.clone(right.targetPath)
+                            targetPath: Core.clone(right.targetPath),
+                            resultIndices: left.resultIndices.map(index => Core.clone(index))
                         };
                     }
                     if (expression.kind === "inverse") {
@@ -2797,7 +2817,8 @@ export class Core {
                             sourceExpression: value.targetExpression,
                             targetExpression: value.sourceExpression,
                             sourcePath: Core.clone(value.targetPath),
-                            targetPath: Core.clone(value.sourcePath)
+                            targetPath: Core.clone(value.sourcePath),
+                            resultIndices: value.resultIndices.map(index => Core.clone(index))
                         };
                     }
                     throw new Error(`${label}表达式 kind 无效`);
@@ -2829,14 +2850,52 @@ export class Core {
                 ], `三维 HIT 三阶路径构造子 ${path.name}`);
                 const leftEndpoint = evaluateTwoPathExpression(path.leftExpression, path.name, "左");
                 const rightEndpoint = evaluateTwoPathExpression(path.rightExpression, path.name, "右");
+                const pathResultIndices = path.resultIndices ?? [];
+                if (pathResultIndices.length !== indexCount) {
+                    throw new Error(`三维 HIT 三阶路径构造子 ${path.name} resultIndices 与索引数量不一致`);
+                }
+                if (indexCount > 0) {
+                    if (path.leftExpression?.kind !== "atom"
+                        || path.rightExpression?.kind !== "atom") {
+                        throw new Error(`索引 HIT 三阶路径构造子 ${path.name} 目前只支持原子二阶路径端点`);
+                    }
+                    if (leftEndpoint.resultIndices.length !== indexCount
+                        || rightEndpoint.resultIndices.length !== indexCount) {
+                        throw new Error(`索引 HIT 三阶路径构造子 ${path.name} 的端点索引纤维不完整`);
+                    }
+                    const pathIndexContext = [];
+                    let nextPathContextId = 1;
+                    for (const parameter of parameters) {
+                        pathIndexContext.unshift([
+                            parameter.name,
+                            Core.clone(parameter.type),
+                            nextPathContextId++
+                        ]);
+                    }
+                    const argumentNames = path.argumentNames ?? [];
+                    for (let index = 0; index < argumentNames.length; index++) {
+                        pathIndexContext.unshift([
+                            argumentNames[index],
+                            normalizedMetadataAst(path.argumentTypes[index]),
+                            nextPathContextId++
+                        ]);
+                    }
+                    for (let index = 0; index < indexCount; index++) {
+                        requireHitIndexEquality(leftEndpoint.resultIndices[index], rightEndpoint.resultIndices[index], pathIndexContext, `三维 HIT 三阶路径构造子 ${path.name} 第 ${index + 1} 个端点索引`);
+                        requireHitIndexEquality(leftEndpoint.resultIndices[index], normalizedMetadataAst(pathResultIndices[index]), pathIndexContext, `三维 HIT 三阶路径构造子 ${path.name} 第 ${index + 1} 个 metadata 索引`);
+                    }
+                    requireHitIndexEquality(leftEndpoint.sourcePath, rightEndpoint.sourcePath, pathIndexContext, `三维 HIT 三阶路径构造子 ${path.name} 的起始二阶边界`);
+                    requireHitIndexEquality(leftEndpoint.targetPath, rightEndpoint.targetPath, pathIndexContext, `三维 HIT 三阶路径构造子 ${path.name} 的终止二阶边界`);
+                }
                 const endpoints = generatedEqualityEndpoints(conclusion);
                 if (!endpoints
                     || !sameGeneratedAst(endpoints[0], leftEndpoint.term)
                     || !sameGeneratedAst(endpoints[1], rightEndpoint.term)) {
                     throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 端点与 metadata 不一致`);
                 }
-                if (!sameGeneratedAstAlpha(leftEndpoint.sourcePath, rightEndpoint.sourcePath)
-                    || !sameGeneratedAstAlpha(leftEndpoint.targetPath, rightEndpoint.targetPath)) {
+                if (indexCount === 0
+                    && (!sameGeneratedAstAlpha(leftEndpoint.sourcePath, rightEndpoint.sourcePath)
+                        || !sameGeneratedAstAlpha(leftEndpoint.targetPath, rightEndpoint.targetPath))) {
                     throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 的二阶路径边界不一致`);
                 }
                 evaluatedThreePathEndpoints.set(path.name, {
@@ -3263,13 +3322,13 @@ export class Core {
                         .slice(offset, offset + threePathEntries.length)
                         .map(binder => binder.name);
                     offset += threePathEntries.length;
-                    if (recursorBinders.length !== offset + 1) {
+                    if (recursorBinders.length !== offset + indexCount + 1) {
                         throw new Error("三维 HIT 递归器 telescope 与 action metadata 不一致");
                     }
                     const prefixBinders = recursorBinders.slice(0, offset);
                     const prefixValues = prefixBinders.map(binder => wrapVar(binder.name));
                     let familyUniverse = normalizedMetadataAst(bundle.type[1]);
-                    for (let index = 0; index < parameters.length; index++) {
+                    for (let index = 0; index < parameters.length + indexCount; index++) {
                         if (familyUniverse.type !== "P" || !familyUniverse.nodes?.[1]) {
                             throw new Error(`三维 HIT ${metadata.typeName} 的 Universe telescope 不完整`);
                         }
@@ -3285,7 +3344,7 @@ export class Core {
                     const motiveUniverseLevel = full
                         ? Core.clone(prefixValues[0])
                         : wrapVar("@0");
-                    const hitType = wrapApply(wrapVar(metadata.typeName), ...parameters.map(parameter => wrapVar(parameter.name)));
+                    const hitType = wrapApply(wrapVar(metadata.typeName), ...parameters.map(parameter => wrapVar(parameter.name)), ...(path.resultIndices ?? []).map(normalizedMetadataAst));
                     const endpointData = evaluatedThreePathEndpoints.get(path.name);
                     if (!endpointData) {
                         throw new Error(`${computationName} 缺少已认证的表达式端点`);
@@ -3305,7 +3364,7 @@ export class Core {
                         ...prefixBinders.map(binder => binder.name),
                         ...argumentNames
                     ]);
-                    const recursorHead = wrapApply(wrapVar(recursorName), ...prefixValues.map(value => Core.clone(value)));
+                    const recursorHead = wrapApply(wrapVar(recursorName), ...prefixValues.map(value => Core.clone(value)), ...(path.resultIndices ?? []).map(normalizedMetadataAst));
                     const pathComputation = (endpoint) => {
                         if (endpoint.kind === "atom") {
                             return wrapApply(wrapVar(`${full ? "@" : ""}ap_${endpoint.path.name}`), ...prefixValues.map(value => Core.clone(value)), ...endpoint.arguments.map(argument => Core.clone(argument)));
@@ -3435,13 +3494,13 @@ export class Core {
                         .slice(offset, offset + threePathEntries.length)
                         .map(binder => binder.name);
                     offset += threePathEntries.length;
-                    if (eliminatorBinders.length !== offset + 1) {
+                    if (eliminatorBinders.length !== offset + indexCount + 1) {
                         throw new Error("三维 HIT 消去器 telescope 与 dependent 计算 metadata 不一致");
                     }
                     const prefixBinders = eliminatorBinders.slice(0, offset);
                     const prefixValues = prefixBinders.map(binder => wrapVar(binder.name));
                     let familyUniverse = normalizedMetadataAst(bundle.type[1]);
-                    for (let index = 0; index < parameters.length; index++) {
+                    for (let index = 0; index < parameters.length + indexCount; index++) {
                         if (familyUniverse.type !== "P" || !familyUniverse.nodes?.[1]) {
                             throw new Error(`三维 HIT ${metadata.typeName} 的 Universe telescope 不完整`);
                         }
@@ -3457,7 +3516,7 @@ export class Core {
                     const motiveUniverseLevel = full
                         ? Core.clone(prefixValues[0])
                         : wrapVar("@0");
-                    const hitType = wrapApply(wrapVar(metadata.typeName), ...parameters.map(parameter => wrapVar(parameter.name)));
+                    const hitType = wrapApply(wrapVar(metadata.typeName), ...parameters.map(parameter => wrapVar(parameter.name)), ...(path.resultIndices ?? []).map(normalizedMetadataAst));
                     const argumentNames = path.argumentNames ?? [];
                     const argumentValues = argumentNames.map(wrapVar);
                     const localBinders = argumentNames.map((name, index) => ({
@@ -3465,7 +3524,8 @@ export class Core {
                         type: normalizedMetadataAst(path.argumentTypes[index])
                     }));
                     const pathTerm = wrapApply(wrapVar(path.name), ...parameters.map(parameter => wrapVar(parameter.name)), ...argumentValues.map(argument => Core.clone(argument)));
-                    const dependentHead = wrapApply(wrapVar(eliminatorName), ...prefixValues.map(value => Core.clone(value)));
+                    const dependentHead = wrapApply(wrapVar(eliminatorName), ...prefixValues.map(value => Core.clone(value)), ...(path.resultIndices ?? []).map(normalizedMetadataAst));
+                    const motiveAtFiber = twoPathFiberMotive(motiveName, path.resultIndices ?? []);
                     const pointBranchValue = (endpoint) => hitBranchValue(endpoint, branchNames, computationName);
                     const pathData = (endpoint) => {
                         const pathTermValue = Core.clone(endpoint.term);
@@ -3473,7 +3533,7 @@ export class Core {
                         const rightBranch = pointBranchValue(endpoint.targetPoint);
                         return {
                             pathTerm: pathTermValue,
-                            type: strongEquality(wrapApply(wrapVar("trans"), wrapVar(motiveName), Core.clone(pathTermValue), leftBranch), rightBranch),
+                            type: strongEquality(wrapApply(wrapVar("trans"), Core.clone(motiveAtFiber), Core.clone(pathTermValue), leftBranch), rightBranch),
                             sourcePoint: Core.clone(endpoint.sourcePoint),
                             targetPoint: Core.clone(endpoint.targetPoint),
                             sourceValue: leftBranch,
@@ -3625,9 +3685,9 @@ export class Core {
                     const methodName = freshName("dependentTwoPathMethod");
                     const targetValueName = freshName("dependentTargetPathValue");
                     const correctedValueName = freshName("dependentCorrectedValue");
-                    const rawFamily = (twoPathValue) => strongEquality(Core.clone(sourceMethod), strongCompose(wrapApply(wrapVar("trans2"), wrapVar(motiveName), twoPathValue, Core.clone(endpointValue)), Core.clone(targetMethod)));
-                    const actualFamily = (twoPathValue) => strongEquality(wrapApply(wrapVar("apd"), Core.clone(dependentHead), Core.clone(sourcePath)), strongCompose(wrapApply(wrapVar("trans2"), wrapVar(motiveName), twoPathValue, Core.clone(endpointValue)), wrapApply(wrapVar("apd"), Core.clone(dependentHead), Core.clone(targetPath))));
-                    const correction = strongLambda(twoPathName, Core.clone(twoPathDomain), strongLambda(methodName, rawFamily(wrapVar(twoPathName)), strongCompose(strongCompose(Core.clone(sourceComputation), wrapVar(methodName)), wrapApply(wrapVar("inveq"), wrapApply(wrapVar("ap"), strongLambda(targetValueName, Core.clone(targetPathData.type), strongCompose(wrapApply(wrapVar("trans2"), wrapVar(motiveName), wrapVar(twoPathName), Core.clone(endpointValue)), wrapVar(targetValueName))), Core.clone(targetComputation))))));
+                    const rawFamily = (twoPathValue) => strongEquality(Core.clone(sourceMethod), strongCompose(wrapApply(wrapVar("trans2"), Core.clone(motiveAtFiber), twoPathValue, Core.clone(endpointValue)), Core.clone(targetMethod)));
+                    const actualFamily = (twoPathValue) => strongEquality(wrapApply(wrapVar("apd"), Core.clone(dependentHead), Core.clone(sourcePath)), strongCompose(wrapApply(wrapVar("trans2"), Core.clone(motiveAtFiber), twoPathValue, Core.clone(endpointValue)), wrapApply(wrapVar("apd"), Core.clone(dependentHead), Core.clone(targetPath))));
+                    const correction = strongLambda(twoPathName, Core.clone(twoPathDomain), strongLambda(methodName, rawFamily(wrapVar(twoPathName)), strongCompose(strongCompose(Core.clone(sourceComputation), wrapVar(methodName)), wrapApply(wrapVar("inveq"), wrapApply(wrapVar("ap"), strongLambda(targetValueName, Core.clone(targetPathData.type), strongCompose(wrapApply(wrapVar("trans2"), Core.clone(motiveAtFiber), wrapVar(twoPathName), Core.clone(endpointValue)), wrapVar(targetValueName))), Core.clone(targetComputation))))));
                     const mappedMethod = wrapApply(wrapVar("hit_map_transport"), correction, Core.clone(leftTwoPath), Core.clone(rightTwoPath), Core.clone(pathTerm), Core.clone(leftMethod), Core.clone(rightMethod), Core.clone(methodValue));
                     const actualFamilyLambda = strongLambda(twoPathName, Core.clone(twoPathDomain), actualFamily(wrapVar(twoPathName)));
                     const transportedComputation = wrapApply(wrapVar("ap"), strongLambda(correctedValueName, actualFamily(Core.clone(leftTwoPath)), wrapApply(wrapVar("trans"), Core.clone(actualFamilyLambda), Core.clone(pathTerm), wrapVar(correctedValueName))), Core.clone(leftComputation));
@@ -3677,6 +3737,39 @@ export class Core {
                     name,
                     nodes: [type, body]
                 });
+                const threePathFiberMotive = (motiveName, resultIndices) => {
+                    if (!resultIndices.length)
+                        return wrapVar(motiveName);
+                    const occupied = new Set([
+                        metadata.typeName,
+                        motiveName,
+                        ...parameters.map(parameter => parameter.name)
+                    ]);
+                    const stack = [...resultIndices];
+                    const seen = new WeakSet();
+                    while (stack.length) {
+                        const node = stack.pop();
+                        if (!node || typeof node !== "object" || seen.has(node))
+                            continue;
+                        seen.add(node);
+                        if (node.name)
+                            occupied.add(node.name);
+                        for (const child of node.nodes ?? [])
+                            stack.push(child);
+                    }
+                    let valueName = "fiberValue";
+                    while (occupied.has(valueName))
+                        valueName += "_";
+                    const value = wrapVar(valueName);
+                    return {
+                        type: "L",
+                        name: valueName,
+                        nodes: [
+                            wrapApply(wrapVar(metadata.typeName), ...parameters.map(parameter => wrapVar(parameter.name)), ...resultIndices.map(normalizedMetadataAst)),
+                            wrapApply(wrapVar(motiveName), ...resultIndices.map(normalizedMetadataAst), value)
+                        ]
+                    };
+                };
                 const surfaceWrapPis = (names, types, body) => {
                     let result = body;
                     for (let index = names.length - 1; index >= 0; index--) {
@@ -3701,6 +3794,7 @@ export class Core {
                         + pathEntries.length
                         + twoPathEntries.length
                         + threePathEntries.length
+                        + indexCount
                         + 1;
                     if (binders.length !== expectedCount) {
                         throw new Error(`${label} telescope 长度与三维 metadata 不一致`);
@@ -3793,6 +3887,7 @@ export class Core {
                             };
                             const leftMethod = dependentExpressionMethod(endpointData.left).proof;
                             const rightMethod = dependentExpressionMethod(endpointData.right).proof;
+                            const motiveAtFiber = threePathFiberMotive(motiveName, path.resultIndices ?? []);
                             const occupied = new Set([
                                 ...binders.slice(0, offset).map(binder => binder.name),
                                 ...argumentNames
@@ -3801,7 +3896,7 @@ export class Core {
                             while (occupied.has(pathValueName))
                                 pathValueName += "_";
                             const pathValue = wrapVar(pathValueName);
-                            const family = surfaceLambda(pathValueName, surfaceEquality(Core.clone(sourcePath), Core.clone(targetPath)), surfaceEquality(sourceMethod, surfaceCompose(wrapApply(wrapVar("trans2"), wrapVar(motiveName), pathValue, pointValue), targetMethod)));
+                            const family = surfaceLambda(pathValueName, surfaceEquality(Core.clone(sourcePath), Core.clone(targetPath)), surfaceEquality(sourceMethod, surfaceCompose(wrapApply(wrapVar("trans2"), motiveAtFiber, pathValue, pointValue), targetMethod)));
                             const pathTerm = wrapApply(wrapVar(path.name), ...parameters.map(parameter => wrapVar(parameter.name)), ...argumentNames.map(wrapVar));
                             expectedBody = surfaceEquality(wrapApply(wrapVar("trans"), family, pathTerm, leftMethod), rightMethod);
                         }

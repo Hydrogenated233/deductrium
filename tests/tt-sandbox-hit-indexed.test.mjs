@@ -321,23 +321,211 @@ for (const unsupported of [
 }
 
 const indexedPath3Source =
-    "hit IndexedHit3 [n : nat] : U | p3 : Πn:nat,IndexedHit3 n "
-    + "| l3 : Πn:nat,p3 n=p3 n | path2 s3 : Πn:nat,l3 n=l3 n "
-    + "| path3 c3 : Πn:nat,s3 n=s3 n";
-assert.throws(
-    () => parseSandboxHit(indexedPath3Source),
-    /索引.*(?:path3|三维)|(?:path3|三维).*索引/i,
-    "indexed path3 must remain an explicit unsupported boundary"
+    "hit IndexedHit3 [n : nat] : U "
+    + "| point3 : Πn:nat,IndexedHit3 n "
+    + "| loop30 : Πn:nat,point3 n=point3 n "
+    + "| loop31 : Πn:nat,point3 n=point3 n "
+    + "| path2 face30 : Πn:nat,loop30 n=loop31 n "
+    + "| path2 face31 : Πn:nat,loop30 n=loop31 n "
+    + "| path3 cell3 : Πn:nat,face30 n=face31 n";
+const indexedPath3Signature = parseSandboxHit(indexedPath3Source);
+const indexedPath3 = indexedPath3Signature.pathLevels[2].constructors[0];
+assert.equal(indexedPath3.leftExpression.kind, "atom");
+assert.equal(indexedPath3.rightExpression.kind, "atom");
+assert.equal(indexedPath3.resultIndices.length, 1);
+assert.equal(
+    parser.stringify(indexedPath3.resultIndices[0]),
+    indexedPath3.arguments[0].name,
+    "same-fiber indexed path3 must retain its common index"
 );
 
-// Keep a separate lowerer guard: structured callers can bypass the source parser.
-const forgedIndexedPath3 = parseSandboxHit(indexedTwoPathSource);
-forgedIndexedPath3.pathLevels[2].constructors.push({});
-assert.throws(
-    () => lowerSandboxHit(forgedIndexedPath3),
-    /索引.*(?:path3|三维)|(?:path3|三维).*索引/i,
-    "the lowerer must reject indexed path3 from structured input"
+const indexedPath3Bundle = lowerSandboxHit(indexedPath3Signature);
+assert.equal(indexedPath3Bundle.metadata.kind, "hit3");
+assert.equal(indexedPath3Bundle.metadata.indexCount, 1);
+const indexedPath3Metadata = indexedPath3Bundle.metadata.pathLevels[2].constructors[0];
+assert.equal(indexedPath3Metadata.leftExpression.kind, "atom");
+assert.equal(indexedPath3Metadata.rightExpression.kind, "atom");
+assert.deepEqual(
+    indexedPath3Metadata.resultIndices.map(index => parser.stringify(index)),
+    [indexedPath3Metadata.argumentNames[0]],
+    "lowering must retain canonical indexed path3 result metadata"
 );
+for (const name of [
+    "cell3", "apd3_cell3", "@apd3_cell3", "ap3_cell3", "@ap3_cell3"
+]) {
+    assert.ok(
+        new Map(indexedPath3Bundle.auxiliaryTypes).has(name),
+        `indexed path3 must export ${name}`
+    );
+}
+assert.doesNotThrow(
+    () => register(structuredClone(indexedPath3Bundle)),
+    "same-fiber atomic indexed path3 must pass Core certification"
+);
+
+// A definitionally equal index cannot be rejected merely because one endpoint
+// contains a beta redex.  The parser must carry that semantic equality through
+// lowering and Core certification instead of requiring spelling equality.
+const betaIndexedPath3 = lowerSandboxHit(parseSandboxHit(
+    "hit IndexedHit3Beta [n:nat] : U "
+    + "| point3b : Πn:nat,IndexedHit3Beta n "
+    + "| loop3b0 : Πn:nat,point3b n=point3b n "
+    + "| loop3b1 : Πn:nat,point3b n=point3b n "
+    + "| path2 face3b0 : Πn:nat,loop3b0 n=loop3b1 n "
+    + "| path2 face3b1 : Πn:nat,loop3b0 n=loop3b1 n "
+    + "| path3 cell3b : Πn:nat,face3b0 ((λx:nat.x) n)=face3b1 n"
+));
+assert.doesNotThrow(
+    () => register(betaIndexedPath3),
+    "definitionally equal indexed path3 fibers must not be rejected syntactically"
+);
+
+// Parsed source always fills these arrays, but lowerSandboxHit is also a
+// structured-input boundary for restored saves and bridge callers.
+const missingIndexedPath3Indices = structuredClone(indexedPath3Signature);
+delete missingIndexedPath3Indices.pathLevels[2].constructors[0].resultIndices;
+assert.throws(
+    () => lowerSandboxHit(missingIndexedPath3Indices),
+    /三阶路径构造子.*resultIndices.*索引数量不一致/,
+    "the lowerer must reject missing indexed path3 result metadata"
+);
+
+const forgedIndexedPath3Indices = structuredClone(indexedPath3Bundle);
+const forgedIndexedPath3Metadata = forgedIndexedPath3Indices.metadata.pathLevels[2].constructors[0];
+forgedIndexedPath3Metadata.resultIndices = [parser.parse(
+    `succ ${forgedIndexedPath3Metadata.argumentNames[0]}`
+)];
+assert.throws(
+    () => register(forgedIndexedPath3Indices),
+    /索引|metadata|纤维/i,
+    "Core must reconstruct indexed path3 fibers instead of trusting forged metadata"
+);
+
+const missingIndexedPath3Metadata = structuredClone(indexedPath3Bundle);
+delete missingIndexedPath3Metadata.metadata.pathLevels[2].constructors[0].resultIndices;
+assert.throws(
+    () => register(missingIndexedPath3Metadata),
+    /resultIndices|索引|metadata/i,
+    "Core must reject missing indexed path3 metadata from a forged bridge"
+);
+
+const crossFiberIndexedPath3 = lowerSandboxHit(parseSandboxHit(
+    "hit IndexedHit3Cross [n:nat] : U "
+    + "| point3c : Πn:nat,IndexedHit3Cross n "
+    + "| loop3c0 : Πn:nat,point3c n=point3c n "
+    + "| loop3c1 : Πn:nat,point3c (succ n)=point3c (succ n) "
+    + "| path2 face3c0 : Πn:nat,loop3c0 n=loop3c0 n "
+    + "| path2 face3c1 : Πn:nat,loop3c1 n=loop3c1 n "
+    + "| path3 cell3c : Πn:nat,face3c0 n=face3c1 n"
+));
+assert.throws(
+    () => register(crossFiberIndexedPath3),
+    /端点索引|索引.*纤维|纤维.*不一致|metadata.*索引/i,
+    "an indexed path3 must not bridge genuinely different fibers"
+);
+
+for (const [label, unsupported] of [
+    [
+        "composition",
+        "hit IndexedHit3Compose [n:nat] : U "
+        + "| point3d : Πn:nat,IndexedHit3Compose n "
+        + "| loop3d : Πn:nat,point3d n=point3d n "
+        + "| path2 face3d : Πn:nat,loop3d n=loop3d n "
+        + "| path3 cell3d : Πn:nat,(face3d n▪face3d n)=face3d n"
+    ],
+    [
+        "inverse",
+        "hit IndexedHit3Inverse [n:nat] : U "
+        + "| point3e : Πn:nat,IndexedHit3Inverse n "
+        + "| loop3e : Πn:nat,point3e n=point3e n "
+        + "| path2 face3e : Πn:nat,loop3e n=loop3e n "
+        + "| path3 cell3e : Πn:nat,inveq (face3e n)=face3e n"
+    ],
+    [
+        "refl",
+        "hit IndexedHit3Refl [n:nat] : U "
+        + "| point3r : Πn:nat,IndexedHit3Refl n "
+        + "| loop3r : Πn:nat,point3r n=point3r n "
+        + "| path2 face3r : Πn:nat,loop3r n=loop3r n "
+        + "| path3 cell3r : Πn:nat,(refl (loop3r n))=face3r n"
+    ]
+]) {
+    assert.throws(
+        () => parseSandboxHit(unsupported),
+        /索引 HIT 三阶路径构造子.*原子二阶路径端点/,
+        `indexed path3 ${label} endpoints must remain outside the atomic slice`
+    );
+}
+
+const indexedPath3Sandbox = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+});
+const indexedPath3Added = indexedPath3Sandbox.add(indexedPath3Source);
+assert.equal(indexedPath3Added.ok, true, indexedPath3Added.error);
+for (const name of [
+    "cell3", "apd3_cell3", "@apd3_cell3", "ap3_cell3", "@ap3_cell3"
+]) {
+    assert.equal(
+        indexedPath3Sandbox.check(name).ok,
+        true,
+        `the indexed path3 sandbox bridge must expose ${name}`
+    );
+}
+const indexedPath3Save = indexedPath3Sandbox.toJSON();
+assert.equal(Object.hasOwn(indexedPath3Save.declarations[0], "hit"), false);
+const indexedPath3Worker = new SandboxWorkerSession();
+const indexedPath3Loaded = indexedPath3Worker.handle({
+    id: 3,
+    kind: "load",
+    save: indexedPath3Save,
+    options: { systemRuleIds: creativeSandboxSystemRuleIds }
+});
+assert.equal(indexedPath3Loaded.ok, true, indexedPath3Loaded.error);
+assert.equal(indexedPath3Loaded.bridge.inductives[0].metadata.kind, "hit3");
+assert.equal(
+    indexedPath3Loaded.bridge.inductives[0].metadata.pathLevels[2].constructors[0]
+        .resultIndices.length,
+    1,
+    "the worker/save bridge must preserve indexed path3 result metadata"
+);
+assert.equal(indexedPath3Worker.handle({
+    id: 4,
+    kind: "check",
+    source: "apd3_cell3",
+    options: { systemRuleIds: creativeSandboxSystemRuleIds }
+}).ok, true, "the restored indexed path3 bridge must retain apd3 exports");
+
+const indexedPath3Assist = new TTAssistEngine();
+indexedPath3Assist.configure({
+    unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))],
+    trustedInductives: [indexedPath3Bundle],
+    inferDisplayMode: "_",
+    timeout: 60_000,
+    language: "zh"
+});
+let indexedPath3Snapshot = indexedPath3Assist.start(
+    parser.stringify(indexedPath3Bundle.eliminator[1]),
+    assistOptions
+);
+for (const command of [
+    "intro C", "intro c0",
+    "intro p0", "intro p1",
+    "intro p2_0", "intro p2_1", "intro p3_0",
+    "intro n", "intro x", "induction x"
+]) indexedPath3Snapshot = indexedPath3Assist.apply(command);
+assert.equal(indexedPath3Snapshot.goals.length, 6,
+    "indexed hit3 induction must expose point, path, path2, and path3 branches");
+for (const method of ["c0", "p0", "p1", "p2_0", "p2_1", "p3_0"]) {
+    const branchIndexName = indexedPath3Snapshot.goals[0]?.context.find(([name, type]) =>
+        name !== "n" && parser.stringify(type) === "nat"
+    )?.[0];
+    assert.ok(branchIndexName,
+        `indexed hit3 ${method} branch must expose its local fiber index`);
+    indexedPath3Snapshot = indexedPath3Assist.apply(`exact ${method} ${branchIndexName}`);
+}
+assert.equal(indexedPath3Snapshot.goals.length, 0,
+    "proof-assistant induction must discharge the indexed path3 coherence branch");
+assert.match(indexedPath3Assist.qed().proof, /ind_IndexedHit3/);
 
 const indexedTwoPathSandbox = new SandboxEnvironment({
     systemRuleIds: creativeSandboxSystemRuleIds
@@ -425,4 +613,4 @@ assert.throws(
     "the lowerer must reject missing indexed path result metadata"
 );
 
-console.log("sandbox indexed fiberwise hit1/path2 regression passed");
+console.log("sandbox indexed fiberwise hit1/path2/path3 regression passed");

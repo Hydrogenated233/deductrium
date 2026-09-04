@@ -188,7 +188,7 @@ hit FiberLoop [n : nat] : U
 - indexed hit1 复用普通索引归纳的 family、点构造子、递归子项索引和点 iota 骨架，但为每条路径独立推导所在纤维。左右端点必须形成同一 `H indices` 中的普通等式。
 - indexed hit1 的依赖 coherence 使用纤维特化的 motive `λx:H indices,C indices x`；生成的 `apd_`/`ap_` 命题也必须先把消去器或递归器特化到该纤维，不能把仍等待索引参数的函数直接传给 `apd`/`ap`。
 - Core 从 family、点构造子 `resultIndices`、路径端点和消去器 telescope 独立重建索引与 coherence，不信任 Sandbox 提供的派生索引或计算命题。
-- indexed HIT 支持同纤维一阶路径和同纤维原子 `path2`。`path2` 两端必须是原子一阶路径表达式，索引与点边界由 Core 使用 NbE 定义相等独立认证；组合/逆 `path2`、indexed `path3`、跨索引 dependent path，以及函数型递归点参数出现在路径端点中的情形仍明确拒绝。
+- indexed HIT 支持同纤维一阶路径、同纤维原子 `path2` 和同纤维原子 `path3`。`path2` 两端必须是原子一阶路径表达式；`path3` 两端必须是位于同一索引纤维的原子 `path2` 表达式。索引、点边界与二阶共享边界由 Core 使用 NbE 定义相等独立认证；组合/逆 `path2`、组合/逆/反身 indexed `path3`、跨索引 dependent path，以及函数型递归点参数出现在路径端点中的情形仍明确拒绝。
 
 ### 验收标准
 
@@ -198,7 +198,7 @@ hit FiberLoop [n : nat] : U
 - `apd` 计算定理能够通过类型检查。
 - `FiberLoop` 一类 indexed hit1 能保留点构造子的返回索引、递归子项索引和归纳假设，并生成可形成的 `ind_`、`rec_`、`apd_`、`ap_` 类型。
 - 证明助手对 `x : FiberLoop n` 执行 `induction x` 时会生成与构造子结果索引一致的点分支和路径 coherence 分支。
-- Core 会拒绝伪造的点结果索引、递归子项索引、路径纤维或 indexed coherence 类型；跨纤维路径与 indexed 高阶路径给出明确的不支持错误。
+- Core 会拒绝伪造的点结果索引、递归子项索引、路径纤维或 indexed coherence 类型；跨纤维路径和超出同纤维原子 `path3` 范围的 indexed 高阶路径给出明确的不支持错误。
 - 错误的路径端点、绑定变量或 Universe 层级会被拒绝。
 - 路径规律不会未经检查地进入定义相等系统。
 
@@ -229,7 +229,7 @@ hit FiberLoop [n : nat] : U
 
 ### 当前实现状态（2026-09-04）
 
-- 一阶 HIT 已支持同纤维 indexed family：点构造子沿用结构化 `resultIndices` 和递归子项索引，路径 lowering 会把 motive、消去器和递归器特化到端点所在纤维。indexed 原子 `path2` 也已贯通 parser、lowerer、Core 独立认证、Worker/bridge 和证明助手分支；Core 会以 NbE 验证定义相等的索引与点边界。组合/逆 indexed `path2`、indexed `path3`、跨索引 dependent path 和函数型递归端点仍明确拒绝。
+- 一阶 HIT 已支持同纤维 indexed family：点构造子沿用结构化 `resultIndices` 和递归子项索引，路径 lowering 会把 motive、消去器和递归器特化到端点所在纤维。indexed 原子 `path2` 与 indexed 原子 `path3` 已贯通 parser、lowerer、Core 独立认证、Worker/bridge 和证明助手分支；Core 会以 NbE 验证定义相等的索引、点边界及三阶路径共享的二阶边界。组合/逆 indexed `path2`、组合/逆/反身 indexed `path3`、跨索引 dependent path 和函数型递归端点仍明确拒绝。
 - 二维 HIT 已完成结构解析、消去器 lowering、命题计算规则和 Core schema 认证。
 - 三维 `path3` 已支持原子二阶路径端点、使用 `▪` 的组合端点和 `inveq` 逆端点；统一参数、局部参数、递归组合边界和点边界都会被检查。三维是面向用户的最高维度，`path4` 及更高维仍明确拒绝。
 - 三维端点已支持受限的反身形式 `refl loop`：它只能引用当前 HIT 已声明的一阶路径构造子，并由 Core 重新注入统一参数、检查局部 telescope 和重建二阶边界。它不是任意二阶路径 AST，也不会放开 `refl face` 或四维端点。
@@ -320,7 +320,7 @@ type SandboxDeclaration =
 - 分别测试阶段 2 第一版的非索引归纳和第二版的索引归纳、索引保持及生成器失效。
 - 测试构造子计算规则和定义相等。
 - 测试一阶及高阶路径端点检查。
-- 测试 same-fiber indexed hit1 的端点索引、递归点 iota、`apd_`/`ap_` 形成、证明助手归纳、Worker 重建，以及跨纤维和 indexed 高阶路径拒绝。
+- 测试 same-fiber indexed hit1/path2/path3 的端点索引、递归点 iota、`apd_`/`ap_`/`apd3_`/`ap3_` 形成、证明助手归纳、Worker 重建，以及跨纤维和超出原子 slice 的 indexed 高阶路径拒绝。
 - 先测试二维 HIT 和二维 coherence，再测试三维 dependent/action 计算；四维只测试明确拒绝、资源上限和 fixture 形状。
 - 测试 Worker 配置、取消、重启和顺序一致性。
 - 测试存档往返和旧版本迁移。
