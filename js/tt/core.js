@@ -2717,7 +2717,17 @@ export class Core {
                     }
                 }
             }
-            const evaluateTwoPathExpression = (expression, owner, side, state = { nodes: 0, ancestors: new WeakSet() }, depth = 0) => {
+            const hasTwoPathRefl = (expression) => {
+                if (!expression)
+                    return false;
+                if (expression.kind === "refl")
+                    return true;
+                if (expression.kind === "compose") {
+                    return hasTwoPathRefl(expression.left) || hasTwoPathRefl(expression.right);
+                }
+                return expression.kind === "inverse" && hasTwoPathRefl(expression.value);
+            };
+            const evaluateTwoPathExpression = (expression, owner, side, indexContext = [], state = { nodes: 0, ancestors: new WeakSet() }, depth = 0) => {
                 const label = `三维 HIT 三阶路径构造子 ${owner} ${side}端点`;
                 if (!expression || typeof expression !== "object") {
                     throw new Error(`${label}缺少二阶路径表达式`);
@@ -2756,8 +2766,8 @@ export class Core {
                         if (!referencedPath.leftExpression || !referencedPath.rightExpression) {
                             throw new Error(`${label}引用的二阶路径缺少已认证端点：${expression.name}`);
                         }
-                        const sourceExpression = evaluateOnePathExpression(mapCoreHitOnePathExpression(referencedPath.leftExpression, ast => substituteGeneratedFreeNames(ast, replacements)), owner, `${side}端点的来源`);
-                        const targetExpression = evaluateOnePathExpression(mapCoreHitOnePathExpression(referencedPath.rightExpression, ast => substituteGeneratedFreeNames(ast, replacements)), owner, `${side}端点的目标`);
+                        const sourceExpression = evaluateOnePathExpression(mapCoreHitOnePathExpression(referencedPath.leftExpression, ast => substituteGeneratedFreeNames(ast, replacements)), owner, `${side}端点的来源`, indexContext);
+                        const targetExpression = evaluateOnePathExpression(mapCoreHitOnePathExpression(referencedPath.rightExpression, ast => substituteGeneratedFreeNames(ast, replacements)), owner, `${side}端点的目标`, indexContext);
                         return {
                             kind: "atom",
                             path: referencedPath,
@@ -2804,9 +2814,19 @@ export class Core {
                         };
                     }
                     if (expression.kind === "compose") {
-                        const left = evaluateTwoPathExpression(expression.left, owner, side, state, depth + 1);
-                        const right = evaluateTwoPathExpression(expression.right, owner, side, state, depth + 1);
-                        if (!sameGeneratedAstAlpha(left.targetPath, right.sourcePath)) {
+                        const left = evaluateTwoPathExpression(expression.left, owner, side, indexContext, state, depth + 1);
+                        const right = evaluateTwoPathExpression(expression.right, owner, side, indexContext, state, depth + 1);
+                        if (indexCount > 0) {
+                            if (left.resultIndices.length !== indexCount
+                                || right.resultIndices.length !== indexCount) {
+                                throw new Error(`${label}组合项的索引纤维不完整`);
+                            }
+                            for (let index = 0; index < indexCount; index++) {
+                                requireHitIndexEquality(left.resultIndices[index], right.resultIndices[index], indexContext, `${label}组合项第 ${index + 1} 个索引`);
+                            }
+                            requireHitIndexEquality(left.targetPath, right.sourcePath, indexContext, `${label}组合项的中间一阶路径边界`);
+                        }
+                        else if (!sameGeneratedAstAlpha(left.targetPath, right.sourcePath)) {
                             throw new Error(`${label}组合项的中间一阶路径边界不一致`);
                         }
                         return {
@@ -2822,7 +2842,7 @@ export class Core {
                         };
                     }
                     if (expression.kind === "inverse") {
-                        const value = evaluateTwoPathExpression(expression.value, owner, side, state, depth + 1);
+                        const value = evaluateTwoPathExpression(expression.value, owner, side, indexContext, state, depth + 1);
                         return {
                             kind: "inverse",
                             value,
@@ -2861,37 +2881,21 @@ export class Core {
                     ...parameters.map(parameter => parameter.type),
                     ...path.argumentTypes.map(normalizedMetadataAst)
                 ], `三维 HIT 三阶路径构造子 ${path.name}`);
-                const leftEndpoint = evaluateTwoPathExpression(path.leftExpression, path.name, "左");
-                const rightEndpoint = evaluateTwoPathExpression(path.rightExpression, path.name, "右");
+                const pathIndexContext = hitPathIndexContext(path.argumentNames, path.argumentTypes);
+                if (indexCount > 0 && (hasTwoPathRefl(path.leftExpression)
+                    || hasTwoPathRefl(path.rightExpression))) {
+                    throw new Error(`索引 HIT 三阶路径构造子 ${path.name} 暂不支持 refl 二阶路径端点`);
+                }
+                const leftEndpoint = evaluateTwoPathExpression(path.leftExpression, path.name, "左", pathIndexContext);
+                const rightEndpoint = evaluateTwoPathExpression(path.rightExpression, path.name, "右", pathIndexContext);
                 const pathResultIndices = path.resultIndices ?? [];
                 if (pathResultIndices.length !== indexCount) {
                     throw new Error(`三维 HIT 三阶路径构造子 ${path.name} resultIndices 与索引数量不一致`);
                 }
                 if (indexCount > 0) {
-                    if (path.leftExpression?.kind !== "atom"
-                        || path.rightExpression?.kind !== "atom") {
-                        throw new Error(`索引 HIT 三阶路径构造子 ${path.name} 目前只支持原子二阶路径端点`);
-                    }
                     if (leftEndpoint.resultIndices.length !== indexCount
                         || rightEndpoint.resultIndices.length !== indexCount) {
                         throw new Error(`索引 HIT 三阶路径构造子 ${path.name} 的端点索引纤维不完整`);
-                    }
-                    const pathIndexContext = [];
-                    let nextPathContextId = 1;
-                    for (const parameter of parameters) {
-                        pathIndexContext.unshift([
-                            parameter.name,
-                            Core.clone(parameter.type),
-                            nextPathContextId++
-                        ]);
-                    }
-                    const argumentNames = path.argumentNames ?? [];
-                    for (let index = 0; index < argumentNames.length; index++) {
-                        pathIndexContext.unshift([
-                            argumentNames[index],
-                            normalizedMetadataAst(path.argumentTypes[index]),
-                            nextPathContextId++
-                        ]);
                     }
                     for (let index = 0; index < indexCount; index++) {
                         requireHitIndexEquality(leftEndpoint.resultIndices[index], rightEndpoint.resultIndices[index], pathIndexContext, `三维 HIT 三阶路径构造子 ${path.name} 第 ${index + 1} 个端点索引`);
@@ -3553,7 +3557,7 @@ export class Core {
                             targetPoint: Core.clone(endpoint.targetPoint),
                             sourceValue: leftBranch,
                             targetValue: rightBranch,
-                            method: onePathDependentMethodValue(endpoint, wrapVar(motiveName), branchNames, pathMethodNames, computationName)
+                            method: onePathDependentMethodValue(endpoint, motiveAtFiber, branchNames, pathMethodNames, computationName)
                         };
                     };
                     const endpointData = evaluatedThreePathEndpoints.get(path.name);
@@ -3575,9 +3579,9 @@ export class Core {
                             return wrapApply(wrapVar(`${full ? "@" : ""}apd_${endpoint.path.name}`), ...prefixValues.map(value => Core.clone(value)), ...endpoint.arguments.map(argument => Core.clone(argument)));
                         }
                         if (endpoint.kind === "compose") {
-                            return wrapApply(wrapVar("@hit_apd1_corrected_comp"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(endpoint.left.sourcePoint), Core.clone(endpoint.left.targetPoint), Core.clone(endpoint.right.targetPoint), Core.clone(endpoint.left.term), Core.clone(endpoint.right.term), wrapVar(motiveName), Core.clone(dependentHead), onePathDependentMethodValue(endpoint.left, wrapVar(motiveName), branchNames, pathMethodNames, computationName), onePathDependentMethodValue(endpoint.right, wrapVar(motiveName), branchNames, pathMethodNames, computationName), pathComputation(endpoint.left), pathComputation(endpoint.right));
+                            return wrapApply(wrapVar("@hit_apd1_corrected_comp"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(endpoint.left.sourcePoint), Core.clone(endpoint.left.targetPoint), Core.clone(endpoint.right.targetPoint), Core.clone(endpoint.left.term), Core.clone(endpoint.right.term), Core.clone(motiveAtFiber), Core.clone(dependentHead), onePathDependentMethodValue(endpoint.left, motiveAtFiber, branchNames, pathMethodNames, computationName), onePathDependentMethodValue(endpoint.right, motiveAtFiber, branchNames, pathMethodNames, computationName), pathComputation(endpoint.left), pathComputation(endpoint.right));
                         }
-                        return wrapApply(wrapVar("@hit_apd1_corrected_inv"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(endpoint.value.sourcePoint), Core.clone(endpoint.value.targetPoint), Core.clone(endpoint.value.term), wrapVar(motiveName), Core.clone(dependentHead), onePathDependentMethodValue(endpoint.value, wrapVar(motiveName), branchNames, pathMethodNames, computationName), pathComputation(endpoint.value));
+                        return wrapApply(wrapVar("@hit_apd1_corrected_inv"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(endpoint.value.sourcePoint), Core.clone(endpoint.value.targetPoint), Core.clone(endpoint.value.term), Core.clone(motiveAtFiber), Core.clone(dependentHead), onePathDependentMethodValue(endpoint.value, motiveAtFiber, branchNames, pathMethodNames, computationName), pathComputation(endpoint.value));
                     };
                     const sourceComputation = pathComputation(sourcePathExpression);
                     const targetComputation = pathComputation(targetPathExpression);
@@ -3588,13 +3592,13 @@ export class Core {
                                 throw new Error(`${computationName} 引用了未知二阶路径：${expression.path.name}`);
                             }
                             return {
-                                sourceMethod: onePathDependentMethodValue(expression.sourceExpression, wrapVar(motiveName), branchNames, pathMethodNames, computationName),
-                                targetMethod: onePathDependentMethodValue(expression.targetExpression, wrapVar(motiveName), branchNames, pathMethodNames, computationName),
+                                sourceMethod: onePathDependentMethodValue(expression.sourceExpression, motiveAtFiber, branchNames, pathMethodNames, computationName),
+                                targetMethod: onePathDependentMethodValue(expression.targetExpression, motiveAtFiber, branchNames, pathMethodNames, computationName),
                                 proof: wrapApply(wrapVar(twoPathMethodNames[endpointIndex]), ...expression.arguments.map(argument => Core.clone(argument)))
                             };
                         }
                         if (expression.kind === "refl") {
-                            const sourceMethod = onePathDependentMethodValue(expression.sourceExpression, wrapVar(motiveName), branchNames, pathMethodNames, computationName);
+                            const sourceMethod = onePathDependentMethodValue(expression.sourceExpression, motiveAtFiber, branchNames, pathMethodNames, computationName);
                             return {
                                 sourceMethod,
                                 targetMethod: Core.clone(sourceMethod),
@@ -3607,14 +3611,14 @@ export class Core {
                             return {
                                 sourceMethod: left.sourceMethod,
                                 targetMethod: right.targetMethod,
-                                proof: wrapApply(wrapVar("hit_dep2_comp"), wrapVar(motiveName), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.proof), Core.clone(right.proof))
+                                proof: wrapApply(wrapVar("hit_dep2_comp"), Core.clone(motiveAtFiber), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.proof), Core.clone(right.proof))
                             };
                         }
                         const value = dependentExpressionMethod(expression.value);
                         return {
                             sourceMethod: value.targetMethod,
                             targetMethod: value.sourceMethod,
-                            proof: wrapApply(wrapVar("hit_dep2_inv"), wrapVar(motiveName), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.proof))
+                            proof: wrapApply(wrapVar("hit_dep2_inv"), Core.clone(motiveAtFiber), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.proof))
                         };
                     };
                     const dependentExpressionComputation = (expression) => {
@@ -3632,7 +3636,7 @@ export class Core {
                             };
                         }
                         if (expression.kind === "refl") {
-                            const sourceMethod = onePathDependentMethodValue(expression.sourceExpression, wrapVar(motiveName), branchNames, pathMethodNames, computationName);
+                            const sourceMethod = onePathDependentMethodValue(expression.sourceExpression, motiveAtFiber, branchNames, pathMethodNames, computationName);
                             const sourceComputation = pathComputation(expression.sourceExpression);
                             return {
                                 sourcePath: Core.clone(expression.sourcePath),
@@ -3642,13 +3646,13 @@ export class Core {
                                 method: wrapApply(wrapVar("refl"), Core.clone(sourceMethod)),
                                 sourceComputation,
                                 targetComputation: Core.clone(sourceComputation),
-                                proof: wrapApply(wrapVar("@hit_apd2_corrected_refl"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(sourcePathData.sourcePoint), Core.clone(sourcePathData.targetPoint), Core.clone(expression.sourcePath), wrapVar(motiveName), Core.clone(dependentHead), Core.clone(sourceMethod), Core.clone(sourceComputation))
+                                proof: wrapApply(wrapVar("@hit_apd2_corrected_refl"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(sourcePathData.sourcePoint), Core.clone(sourcePathData.targetPoint), Core.clone(expression.sourcePath), Core.clone(motiveAtFiber), Core.clone(dependentHead), Core.clone(sourceMethod), Core.clone(sourceComputation))
                             };
                         }
                         if (expression.kind === "compose") {
                             const left = dependentExpressionComputation(expression.left);
                             const right = dependentExpressionComputation(expression.right);
-                            const method = wrapApply(wrapVar("hit_dep2_comp"), wrapVar(motiveName), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.method), Core.clone(right.method));
+                            const method = wrapApply(wrapVar("hit_dep2_comp"), Core.clone(motiveAtFiber), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.method), Core.clone(right.method));
                             return {
                                 sourcePath: left.sourcePath,
                                 targetPath: right.targetPath,
@@ -3657,11 +3661,11 @@ export class Core {
                                 method,
                                 sourceComputation: left.sourceComputation,
                                 targetComputation: right.targetComputation,
-                                proof: wrapApply(wrapVar("@hit_apd2_corrected_comp"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(sourcePathData.sourcePoint), Core.clone(sourcePathData.targetPoint), Core.clone(left.sourcePath), Core.clone(left.targetPath), Core.clone(right.targetPath), wrapVar(motiveName), Core.clone(dependentHead), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.sourceComputation), Core.clone(left.targetComputation), Core.clone(right.targetComputation), Core.clone(left.method), Core.clone(right.method), Core.clone(left.proof), Core.clone(right.proof))
+                                proof: wrapApply(wrapVar("@hit_apd2_corrected_comp"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(sourcePathData.sourcePoint), Core.clone(sourcePathData.targetPoint), Core.clone(left.sourcePath), Core.clone(left.targetPath), Core.clone(right.targetPath), Core.clone(motiveAtFiber), Core.clone(dependentHead), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.sourceComputation), Core.clone(left.targetComputation), Core.clone(right.targetComputation), Core.clone(left.method), Core.clone(right.method), Core.clone(left.proof), Core.clone(right.proof))
                             };
                         }
                         const value = dependentExpressionComputation(expression.value);
-                        const method = wrapApply(wrapVar("hit_dep2_inv"), wrapVar(motiveName), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.method));
+                        const method = wrapApply(wrapVar("hit_dep2_inv"), Core.clone(motiveAtFiber), Core.clone(sourceValue), Core.clone(targetValue), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.method));
                         return {
                             sourcePath: value.targetPath,
                             targetPath: value.sourcePath,
@@ -3670,7 +3674,7 @@ export class Core {
                             method,
                             sourceComputation: value.targetComputation,
                             targetComputation: value.sourceComputation,
-                            proof: wrapApply(wrapVar("@hit_apd2_corrected_inv"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(sourcePathData.sourcePoint), Core.clone(sourcePathData.targetPoint), Core.clone(value.sourcePath), Core.clone(value.targetPath), wrapVar(motiveName), Core.clone(dependentHead), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.sourceComputation), Core.clone(value.targetComputation), Core.clone(value.method), Core.clone(value.proof))
+                            proof: wrapApply(wrapVar("@hit_apd2_corrected_inv"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(hitType), Core.clone(sourcePathData.sourcePoint), Core.clone(sourcePathData.targetPoint), Core.clone(value.sourcePath), Core.clone(value.targetPath), Core.clone(motiveAtFiber), Core.clone(dependentHead), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.sourceComputation), Core.clone(value.targetComputation), Core.clone(value.method), Core.clone(value.proof))
                         };
                     };
                     const leftExpressionMethod = dependentExpressionMethod(endpointData.left);
@@ -3837,6 +3841,7 @@ export class Core {
                         if (!endpointData) {
                             throw new Error(`${label} ${path.name} 缺少已认证的表达式端点`);
                         }
+                        const motiveAtFiber = threePathFiberMotive(motiveName, path.resultIndices ?? []);
                         const recursorExpressionMethod = (expression) => {
                             if (expression.kind === "atom") {
                                 const endpointIndex = twoPathEntries.findIndex(entry => entry.name === expression.path.name);
@@ -3859,8 +3864,8 @@ export class Core {
                             const targetPathExpression = endpointData.left.targetExpression;
                             const sourcePath = Core.clone(endpointData.left.sourcePath);
                             const targetPath = Core.clone(endpointData.left.targetPath);
-                            const sourceMethod = onePathDependentMethodValue(sourcePathExpression, wrapVar(motiveName), branchNames, pathMethodNames, `${label} ${path.name}`);
-                            const targetMethod = onePathDependentMethodValue(targetPathExpression, wrapVar(motiveName), branchNames, pathMethodNames, `${label} ${path.name}`);
+                            const sourceMethod = onePathDependentMethodValue(sourcePathExpression, motiveAtFiber, branchNames, pathMethodNames, `${label} ${path.name}`);
+                            const targetMethod = onePathDependentMethodValue(targetPathExpression, motiveAtFiber, branchNames, pathMethodNames, `${label} ${path.name}`);
                             const pointValue = branchValue(sourcePathExpression.sourcePoint, branchNames, `${label} ${path.name}`);
                             const targetPointValue = branchValue(sourcePathExpression.targetPoint, branchNames, `${label} ${path.name}`);
                             const dependentExpressionMethod = (expression) => {
@@ -3871,13 +3876,13 @@ export class Core {
                                             + expression.path.name);
                                     }
                                     return {
-                                        sourceMethod: onePathDependentMethodValue(expression.sourceExpression, wrapVar(motiveName), branchNames, pathMethodNames, `${label} ${path.name}`),
-                                        targetMethod: onePathDependentMethodValue(expression.targetExpression, wrapVar(motiveName), branchNames, pathMethodNames, `${label} ${path.name}`),
+                                        sourceMethod: onePathDependentMethodValue(expression.sourceExpression, motiveAtFiber, branchNames, pathMethodNames, `${label} ${path.name}`),
+                                        targetMethod: onePathDependentMethodValue(expression.targetExpression, motiveAtFiber, branchNames, pathMethodNames, `${label} ${path.name}`),
                                         proof: wrapApply(wrapVar(twoPathMethodNames[endpointIndex]), ...expression.arguments.map(argument => Core.clone(argument)))
                                     };
                                 }
                                 if (expression.kind === "refl") {
-                                    const sourceMethod = onePathDependentMethodValue(expression.sourceExpression, wrapVar(motiveName), branchNames, pathMethodNames, `${label} ${path.name}`);
+                                    const sourceMethod = onePathDependentMethodValue(expression.sourceExpression, motiveAtFiber, branchNames, pathMethodNames, `${label} ${path.name}`);
                                     return {
                                         sourceMethod,
                                         targetMethod: Core.clone(sourceMethod),
@@ -3890,19 +3895,18 @@ export class Core {
                                     return {
                                         sourceMethod: left.sourceMethod,
                                         targetMethod: right.targetMethod,
-                                        proof: wrapApply(wrapVar("hit_dep2_comp"), wrapVar(motiveName), Core.clone(pointValue), Core.clone(targetPointValue), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.proof), Core.clone(right.proof))
+                                        proof: wrapApply(wrapVar("hit_dep2_comp"), Core.clone(motiveAtFiber), Core.clone(pointValue), Core.clone(targetPointValue), Core.clone(left.sourceMethod), Core.clone(left.targetMethod), Core.clone(right.targetMethod), Core.clone(expression.left.term), Core.clone(expression.right.term), Core.clone(left.proof), Core.clone(right.proof))
                                     };
                                 }
                                 const value = dependentExpressionMethod(expression.value);
                                 return {
                                     sourceMethod: value.targetMethod,
                                     targetMethod: value.sourceMethod,
-                                    proof: wrapApply(wrapVar("hit_dep2_inv"), wrapVar(motiveName), Core.clone(pointValue), Core.clone(targetPointValue), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.proof))
+                                    proof: wrapApply(wrapVar("hit_dep2_inv"), Core.clone(motiveAtFiber), Core.clone(pointValue), Core.clone(targetPointValue), Core.clone(value.sourceMethod), Core.clone(value.targetMethod), Core.clone(expression.value.term), Core.clone(value.proof))
                                 };
                             };
                             const leftMethod = dependentExpressionMethod(endpointData.left).proof;
                             const rightMethod = dependentExpressionMethod(endpointData.right).proof;
-                            const motiveAtFiber = threePathFiberMotive(motiveName, path.resultIndices ?? []);
                             const occupied = new Set([
                                 ...binders.slice(0, offset).map(binder => binder.name),
                                 ...argumentNames

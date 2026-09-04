@@ -178,6 +178,7 @@ const tests = [
     "./tt-sandbox-hit-recursive-point.test.mjs",
     "./tt-sandbox-hit-indexed.test.mjs",
     "./tt-core-hit-indexed-path2-expression.test.mjs",
+    "./tt-core-hit-indexed-path3-expression.test.mjs",
     "./tt-sandbox-hit2.test.mjs",
     "./tt-sandbox-hit2-expression.test.mjs",
     "./tt-sandbox-hit3.test.mjs",
