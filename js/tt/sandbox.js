@@ -86,6 +86,20 @@ export function sandboxValidationSemanticsKey(save) {
         declarations: sandboxValidationSignatures(save)
     });
 }
+function sandboxHitOnePathExpressionIncludesRefl(expression, depth = 0) {
+    if (depth > SANDBOX_HIT_ONE_PATH_EXPRESSION_MAX_DEPTH) {
+        throw new Error("二维 HIT 一阶路径表达式嵌套过深");
+    }
+    if (expression.kind === "atom")
+        return false;
+    if (expression.kind === "refl")
+        return true;
+    if (expression.kind === "inverse") {
+        return sandboxHitOnePathExpressionIncludesRefl(expression.value, depth + 1);
+    }
+    return sandboxHitOnePathExpressionIncludesRefl(expression.left, depth + 1)
+        || sandboxHitOnePathExpressionIncludesRefl(expression.right, depth + 1);
+}
 export function sandboxHitPathLevels(signature) {
     return hitPathLevelsFromCanonicalOrLegacy(signature);
 }
@@ -837,6 +851,39 @@ function elaborateHitTwoPathEndpoint(endpoint, signatureName, parameters, pointC
             sourcePoint: value.targetPoint,
             targetPoint: value.sourcePoint,
             resultIndices: value.resultIndices.map(index => Core.clone(index))
+        };
+    }
+    const reflTerms = flattenApplication(endpoint);
+    if (reflTerms.length === 2
+        && reflTerms[0]?.type === "var"
+        && reflTerms[0].name === "refl") {
+        if (boundNames.has("refl")) {
+            throw new Error(`二阶路径构造子 ${pathName} 的 refl 端点 refl 被局部参数遮蔽`);
+        }
+        const pointTerms = flattenApplication(reflTerms[1]);
+        const pointName = pointTerms[0]?.type === "var" ? pointTerms[0].name : "";
+        if (boundNames.has(pointName)) {
+            throw new Error(`二阶路径构造子 ${pathName} 的 refl 端点 ${pointName} 被局部参数遮蔽`);
+        }
+        const point = pointConstructors.find(candidate => candidate.name === pointName);
+        if (!point) {
+            throw new Error(`二阶路径构造子 ${pathName} 的 refl 端点必须由 ${signatureName} 的点构造子形成`);
+        }
+        const localArguments = pointTerms.slice(1);
+        if (localArguments.length !== point.argumentAsts.length) {
+            throw new Error(`二阶路径构造子 ${pathName} 的 refl 端点 ${pointName} 参数数量错误：`
+                + `需要 ${point.argumentAsts.length} 个点参数`);
+        }
+        const pointData = elaborateHitEndpoint(reflTerms[1], signatureName, parameters, pointConstructors, pathName, boundNames, budget, depth + 1);
+        const pointArguments = flattenApplication(pointData.term)
+            .slice(1 + parameters.length)
+            .map(argument => Core.clone(argument));
+        return {
+            expression: { kind: "refl", pointName, arguments: pointArguments },
+            term: sandboxApply(sandboxVar("refl"), pointData.term),
+            sourcePoint: Core.clone(pointData.term),
+            targetPoint: Core.clone(pointData.term),
+            resultIndices: pointData.resultIndices.map(index => Core.clone(index))
         };
     }
     const terms = flattenApplication(endpoint);
@@ -1751,10 +1798,34 @@ function sandboxHitPathMethodValue(endpoint, parameters, pathConstructors, metho
     const arguments_ = terms.slice(1 + parameters.length).map(argument => Core.clone(argument));
     return sandboxApply(sandboxVar(methodNames[pathIndex]), ...arguments_);
 }
-function sandboxHitOnePathExpressionData(expression, parameters, pathConstructors, owner) {
+function sandboxHitReflPointExpressionData(expression, parameters, pointConstructors, owner) {
+    if (typeof expression.pointName !== "string" || !expression.pointName
+        || !Array.isArray(expression.arguments)) {
+        throw new Error(`二维 HIT refl 点端点 ${owner} metadata 结构无效`);
+    }
+    const pointIndex = pointConstructors.findIndex(point => point.name === expression.pointName);
+    if (pointIndex < 0) {
+        throw new Error(`未知的二维 HIT refl 点端点：${expression.pointName || owner}`);
+    }
+    const point = pointConstructors[pointIndex];
+    if (expression.arguments.length !== point.argumentAsts.length) {
+        throw new Error(`二维 HIT refl 点端点 ${expression.pointName} 的参数数量与 metadata 不一致`);
+    }
+    const arguments_ = expression.arguments.map(argument => Core.clone(argument));
+    return {
+        point,
+        pointIndex,
+        arguments_,
+        pointTerm: sandboxConstructorTerm(point.name, [
+            ...parameters.map(parameter => sandboxVar(parameter.name)),
+            ...arguments_
+        ])
+    };
+}
+function sandboxHitOnePathExpressionData(expression, parameters, pointConstructors, pathConstructors, owner) {
     if (expression.kind === "compose") {
-        const left = sandboxHitOnePathExpressionData(expression.left, parameters, pathConstructors, owner);
-        const right = sandboxHitOnePathExpressionData(expression.right, parameters, pathConstructors, owner);
+        const left = sandboxHitOnePathExpressionData(expression.left, parameters, pointConstructors, pathConstructors, owner);
+        const right = sandboxHitOnePathExpressionData(expression.right, parameters, pointConstructors, pathConstructors, owner);
         if (!sameSandboxAst(left.targetPoint, right.sourcePoint)) {
             throw new Error(`二维 HIT 一阶路径表达式 ${owner} 的组合中间点边界不一致`);
         }
@@ -1765,11 +1836,21 @@ function sandboxHitOnePathExpressionData(expression, parameters, pathConstructor
         };
     }
     if (expression.kind === "inverse") {
-        const value = sandboxHitOnePathExpressionData(expression.value, parameters, pathConstructors, owner);
+        const value = sandboxHitOnePathExpressionData(expression.value, parameters, pointConstructors, pathConstructors, owner);
         return {
             term: sandboxApply(sandboxVar("inveq"), value.term),
             sourcePoint: value.targetPoint,
             targetPoint: value.sourcePoint
+        };
+    }
+    if (expression.kind === "refl") {
+        const data = sandboxHitReflPointExpressionData(expression, parameters, pointConstructors, owner);
+        return {
+            term: sandboxApply(sandboxVar("refl"), data.pointTerm),
+            sourcePoint: Core.clone(data.pointTerm),
+            targetPoint: Core.clone(data.pointTerm),
+            pointIndex: data.pointIndex,
+            arguments_: data.arguments_
         };
     }
     const pathIndex = pathConstructors.findIndex(path => path.name === expression.name);
@@ -1794,14 +1875,19 @@ function sandboxHitOnePathExpressionData(expression, parameters, pathConstructor
         arguments_
     };
 }
-function sandboxHitOnePathExpressionMethodValue(expression, parameters, pathConstructors, methodNames, owner) {
+function sandboxHitOnePathExpressionMethodValue(expression, parameters, pointConstructors, pathConstructors, pointMethodNames, methodNames, owner) {
     if (expression.kind === "compose") {
-        return sandboxCompose(sandboxHitOnePathExpressionMethodValue(expression.left, parameters, pathConstructors, methodNames, owner), sandboxHitOnePathExpressionMethodValue(expression.right, parameters, pathConstructors, methodNames, owner));
+        return sandboxCompose(sandboxHitOnePathExpressionMethodValue(expression.left, parameters, pointConstructors, pathConstructors, pointMethodNames, methodNames, owner), sandboxHitOnePathExpressionMethodValue(expression.right, parameters, pointConstructors, pathConstructors, pointMethodNames, methodNames, owner));
     }
     if (expression.kind === "inverse") {
-        return sandboxApply(sandboxVar("inveq"), sandboxHitOnePathExpressionMethodValue(expression.value, parameters, pathConstructors, methodNames, owner));
+        return sandboxApply(sandboxVar("inveq"), sandboxHitOnePathExpressionMethodValue(expression.value, parameters, pointConstructors, pathConstructors, pointMethodNames, methodNames, owner));
     }
-    const data = sandboxHitOnePathExpressionData(expression, parameters, pathConstructors, owner);
+    if (expression.kind === "refl") {
+        const data = sandboxHitReflPointExpressionData(expression, parameters, pointConstructors, owner);
+        const pointValue = sandboxHitBranchValue(data.pointTerm, parameters, pointConstructors, pointMethodNames);
+        return sandboxApply(sandboxVar("refl"), pointValue);
+    }
+    const data = sandboxHitOnePathExpressionData(expression, parameters, pointConstructors, pathConstructors, owner);
     if (data.pathIndex === undefined || !data.arguments_) {
         throw new Error(`二维 HIT 一阶路径端点 ${owner} 缺少原子路径数据`);
     }
@@ -2076,6 +2162,13 @@ function sandboxMapHitOnePathExpression(expression, mapAst) {
         return {
             kind: "atom",
             name: expression.name,
+            arguments: expression.arguments.map(mapAst)
+        };
+    }
+    if (expression.kind === "refl") {
+        return {
+            kind: "refl",
+            pointName: expression.pointName,
             arguments: expression.arguments.map(mapAst)
         };
     }
@@ -2570,6 +2663,8 @@ export function lowerSandboxHit(signature) {
     if (!hitUniverseLevel) {
         throw new Error(`HIT ${signature.name} 的 Universe 缺少显式层级`);
     }
+    const explicitDependentOnePathCompose = (domainType, motiveUniverseLevel, motive, left, right) => sandboxApply(sandboxVar("@hit_dep1_comp"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(domainType), Core.clone(left.sourcePoint), Core.clone(left.targetPoint), Core.clone(right.targetPoint), Core.clone(left.term), Core.clone(right.term), Core.clone(motive), Core.clone(left.sourceValue), Core.clone(left.targetValue), Core.clone(right.targetValue), Core.clone(left.method), Core.clone(right.method));
+    const explicitDependentOnePathInverse = (domainType, motiveUniverseLevel, motive, value) => sandboxApply(sandboxVar("@hit_dep1_inv"), Core.clone(hitUniverseLevel), Core.clone(motiveUniverseLevel), Core.clone(domainType), Core.clone(value.sourcePoint), Core.clone(value.targetPoint), Core.clone(value.term), Core.clone(motive), Core.clone(value.sourceValue), Core.clone(value.targetValue), Core.clone(value.method));
     const dependentPathBinders = [];
     const recursorPathBinders = [];
     for (let index = 0; index < pathConstructors.length; index++) {
@@ -2594,10 +2689,10 @@ export function lowerSandboxHit(signature) {
             typeSource: parser.stringify(recursorType)
         });
     }
-    const dependentOnePathExpressionMethod = (expression, owner, motive = sandboxVar(motiveName)) => {
+    const dependentOnePathExpressionMethod = (expression, owner, motive = sandboxVar(motiveName), domainType = hitType, motiveUniverseLevel = sandboxVar("@0")) => {
         if (expression.kind === "compose") {
-            const left = dependentOnePathExpressionMethod(expression.left, owner, motive);
-            const right = dependentOnePathExpressionMethod(expression.right, owner, motive);
+            const left = dependentOnePathExpressionMethod(expression.left, owner, motive, domainType, motiveUniverseLevel);
+            const right = dependentOnePathExpressionMethod(expression.right, owner, motive, domainType, motiveUniverseLevel);
             if (!sameSandboxAst(left.targetPoint, right.sourcePoint)) {
                 throw new Error(`二维 HIT 一阶路径表达式 ${owner} 的组合中间点边界不一致`);
             }
@@ -2607,21 +2702,37 @@ export function lowerSandboxHit(signature) {
                 targetPoint: right.targetPoint,
                 sourceValue: left.sourceValue,
                 targetValue: right.targetValue,
-                method: sandboxApply(sandboxVar("hit_dep1_comp"), Core.clone(motive), left.sourceValue, left.targetValue, right.targetValue, left.method, right.method)
+                method: sandboxHitOnePathExpressionIncludesRefl(expression)
+                    ? explicitDependentOnePathCompose(domainType, motiveUniverseLevel, motive, left, right)
+                    : sandboxApply(sandboxVar("hit_dep1_comp"), Core.clone(motive), left.sourceValue, left.targetValue, right.targetValue, left.method, right.method)
             };
         }
         if (expression.kind === "inverse") {
-            const value = dependentOnePathExpressionMethod(expression.value, owner, motive);
+            const value = dependentOnePathExpressionMethod(expression.value, owner, motive, domainType, motiveUniverseLevel);
             return {
                 term: sandboxApply(sandboxVar("inveq"), value.term),
                 sourcePoint: value.targetPoint,
                 targetPoint: value.sourcePoint,
                 sourceValue: value.targetValue,
                 targetValue: value.sourceValue,
-                method: sandboxApply(sandboxVar("hit_dep1_inv"), Core.clone(motive), value.sourceValue, value.targetValue, value.method)
+                method: sandboxHitOnePathExpressionIncludesRefl(expression)
+                    ? explicitDependentOnePathInverse(domainType, motiveUniverseLevel, motive, value)
+                    : sandboxApply(sandboxVar("hit_dep1_inv"), Core.clone(motive), value.sourceValue, value.targetValue, value.method)
             };
         }
-        const data = sandboxHitOnePathExpressionData(expression, signature.parameters, pathConstructors, owner);
+        if (expression.kind === "refl") {
+            const data = sandboxHitReflPointExpressionData(expression, signature.parameters, signature.pointConstructors, owner);
+            const pointValue = sandboxHitBranchValue(data.pointTerm, signature.parameters, signature.pointConstructors, branchNames);
+            return {
+                term: sandboxApply(sandboxVar("refl"), data.pointTerm),
+                sourcePoint: Core.clone(data.pointTerm),
+                targetPoint: Core.clone(data.pointTerm),
+                sourceValue: Core.clone(pointValue),
+                targetValue: Core.clone(pointValue),
+                method: sandboxApply(sandboxVar("refl"), pointValue)
+            };
+        }
+        const data = sandboxHitOnePathExpressionData(expression, signature.parameters, signature.pointConstructors, pathConstructors, owner);
         if (data.pathIndex === undefined || !data.arguments_) {
             throw new Error(`二维 HIT 一阶路径端点 ${owner} 缺少原子路径数据`);
         }
@@ -2637,13 +2748,17 @@ export function lowerSandboxHit(signature) {
         };
     };
     const dependentTwoPathBinders = [];
+    const fullDependentTwoPathBinders = [];
     const recursorTwoPathBinders = [];
     for (let index = 0; index < twoPathConstructors.length; index++) {
         const path = twoPathConstructors[index];
         const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
         const fiberMotive = sandboxHitFiberMotive(signature, motiveName, path.resultIndices);
-        const leftDependent = dependentOnePathExpressionMethod(path.leftExpression, path.name, fiberMotive);
-        const rightDependent = dependentOnePathExpressionMethod(path.rightExpression, path.name, fiberMotive);
+        const fiberHitType = sandboxHitFiberType(signature, path.resultIndices);
+        const leftDependent = dependentOnePathExpressionMethod(path.leftExpression, path.name, fiberMotive, fiberHitType);
+        const rightDependent = dependentOnePathExpressionMethod(path.rightExpression, path.name, fiberMotive, fiberHitType);
+        const fullLeftDependent = dependentOnePathExpressionMethod(path.leftExpression, path.name, fiberMotive, fiberHitType, sandboxVar(motiveUniverseName));
+        const fullRightDependent = dependentOnePathExpressionMethod(path.rightExpression, path.name, fiberMotive, fiberHitType, sandboxVar(motiveUniverseName));
         const leftMethod = leftDependent.method;
         const rightMethod = rightDependent.method;
         const endpointValue = leftDependent.sourceValue;
@@ -2664,8 +2779,25 @@ export function lowerSandboxHit(signature) {
             type: dependentType,
             typeSource: parser.stringify(dependentType)
         });
-        const leftRecursorMethod = sandboxHitOnePathExpressionMethodValue(path.leftExpression, signature.parameters, pathConstructors, recursorPathMethodNames, path.name);
-        const rightRecursorMethod = sandboxHitOnePathExpressionMethodValue(path.rightExpression, signature.parameters, pathConstructors, recursorPathMethodNames, path.name);
+        const fullTransportedRightMethod = {
+            type: "*",
+            name: "",
+            nodes: [
+                sandboxApply(sandboxVar("trans2"), fiberMotive, sandboxConstructorTerm(path.name, [
+                    ...parameterVars,
+                    ...pathArguments
+                ]), fullLeftDependent.sourceValue),
+                fullRightDependent.method
+            ]
+        };
+        const fullDependentType = sandboxWrapPis(path.arguments, sandboxEquality(fullLeftDependent.method, fullTransportedRightMethod));
+        fullDependentTwoPathBinders.push({
+            name: dependentTwoPathMethodNames[index],
+            type: fullDependentType,
+            typeSource: parser.stringify(fullDependentType)
+        });
+        const leftRecursorMethod = sandboxHitOnePathExpressionMethodValue(path.leftExpression, signature.parameters, signature.pointConstructors, pathConstructors, recursorBranchNames, recursorPathMethodNames, path.name);
+        const rightRecursorMethod = sandboxHitOnePathExpressionMethodValue(path.rightExpression, signature.parameters, signature.pointConstructors, pathConstructors, recursorBranchNames, recursorPathMethodNames, path.name);
         const recursorType = sandboxWrapPis(path.arguments, sandboxEquality(leftRecursorMethod, rightRecursorMethod));
         recursorTwoPathBinders.push({
             name: recursorTwoPathMethodNames[index],
@@ -2675,10 +2807,10 @@ export function lowerSandboxHit(signature) {
     }
     const dependentThreePathBinders = [];
     const recursorThreePathBinders = [];
-    const dependentTwoPathExpressionMethod = (expression, owner, sourceValue, targetValue, fiberMotive) => {
+    const dependentTwoPathExpressionMethod = (expression, owner, sourceValue, targetValue, fiberMotive, fiberHitType) => {
         if (expression.kind === "compose") {
-            const left = dependentTwoPathExpressionMethod(expression.left, owner, sourceValue, targetValue, fiberMotive);
-            const right = dependentTwoPathExpressionMethod(expression.right, owner, sourceValue, targetValue, fiberMotive);
+            const left = dependentTwoPathExpressionMethod(expression.left, owner, sourceValue, targetValue, fiberMotive, fiberHitType);
+            const right = dependentTwoPathExpressionMethod(expression.right, owner, sourceValue, targetValue, fiberMotive, fiberHitType);
             return {
                 term: sandboxCompose(left.term, right.term),
                 sourceMethod: left.sourceMethod,
@@ -2687,7 +2819,7 @@ export function lowerSandboxHit(signature) {
             };
         }
         if (expression.kind === "inverse") {
-            const value = dependentTwoPathExpressionMethod(expression.value, owner, sourceValue, targetValue, fiberMotive);
+            const value = dependentTwoPathExpressionMethod(expression.value, owner, sourceValue, targetValue, fiberMotive, fiberHitType);
             return {
                 term: sandboxApply(sandboxVar("inveq"), value.term),
                 sourceMethod: value.targetMethod,
@@ -2715,8 +2847,8 @@ export function lowerSandboxHit(signature) {
         });
         const sourceExpression = sandboxMapHitOnePathExpression(path.leftExpression, ast => substituteSandboxFreeVars(ast, replacements));
         const targetExpression = sandboxMapHitOnePathExpression(path.rightExpression, ast => substituteSandboxFreeVars(ast, replacements));
-        const source = dependentOnePathExpressionMethod(sourceExpression, owner, fiberMotive);
-        const target = dependentOnePathExpressionMethod(targetExpression, owner, fiberMotive);
+        const source = dependentOnePathExpressionMethod(sourceExpression, owner, fiberMotive, fiberHitType);
+        const target = dependentOnePathExpressionMethod(targetExpression, owner, fiberMotive, fiberHitType);
         return {
             term: sandboxHitTwoPathExpressionTerm(expression, signature.parameters, pathConstructors, twoPathConstructors, owner),
             sourceMethod: source.method,
@@ -2729,10 +2861,11 @@ export function lowerSandboxHit(signature) {
         const pathArguments = path.arguments.map(argument => sandboxVar(argument.name));
         const pathTerm = sandboxConstructorTerm(path.name, [...parameterVars, ...pathArguments]);
         const fiberMotive = sandboxHitFiberMotive(signature, motiveName, path.resultIndices);
+        const fiberHitType = sandboxHitFiberType(signature, path.resultIndices);
         const sourceValue = sandboxHitBranchValue(path.sourcePoint, signature.parameters, signature.pointConstructors, branchNames);
         const targetValue = sandboxHitBranchValue(path.targetPoint, signature.parameters, signature.pointConstructors, branchNames);
-        const leftDependentExpression = dependentTwoPathExpressionMethod(path.leftExpression, path.name, sourceValue, targetValue, fiberMotive);
-        const rightDependentExpression = dependentTwoPathExpressionMethod(path.rightExpression, path.name, sourceValue, targetValue, fiberMotive);
+        const leftDependentExpression = dependentTwoPathExpressionMethod(path.leftExpression, path.name, sourceValue, targetValue, fiberMotive, fiberHitType);
+        const rightDependentExpression = dependentTwoPathExpressionMethod(path.rightExpression, path.name, sourceValue, targetValue, fiberMotive, fiberHitType);
         const leftMethod = leftDependentExpression.proof;
         const rightMethod = rightDependentExpression.proof;
         const sourceMethod = leftDependentExpression.sourceMethod;
@@ -2768,13 +2901,18 @@ export function lowerSandboxHit(signature) {
         ...dependentTwoPathBinders,
         ...dependentThreePathBinders
     ];
+    const allFullDependentPathBinders = [
+        ...dependentPathBinders,
+        ...fullDependentTwoPathBinders,
+        ...dependentThreePathBinders
+    ];
     const allRecursorPathBinders = [
         ...recursorPathBinders,
         ...recursorTwoPathBinders,
         ...recursorThreePathBinders
     ];
     const publicEliminatorType = sandboxInsertPis(base.eliminator[1], signature.parameters.length + 1 + signature.pointConstructors.length, allDependentPathBinders);
-    const fullEliminatorType = sandboxInsertPis(fullEliminatorEntry[1], 1 + signature.parameters.length + 1 + signature.pointConstructors.length, allDependentPathBinders);
+    const fullEliminatorType = sandboxInsertPis(fullEliminatorEntry[1], 1 + signature.parameters.length + 1 + signature.pointConstructors.length, allFullDependentPathBinders);
     const publicRecursorType = sandboxInsertPis(base.recursor[1], signature.parameters.length + 1 + signature.pointConstructors.length, allRecursorPathBinders);
     const fullRecursorType = sandboxInsertPis(fullRecursorEntry[1], 1 + signature.parameters.length + 1 + signature.pointConstructors.length, allRecursorPathBinders);
     // Keep computation-rule metavariables disjoint from ordinary lowering's
@@ -2871,7 +3009,7 @@ export function lowerSandboxHit(signature) {
         publicApdType = sandboxPi(motiveName, extractSandboxPiBinder(base.eliminator[1], signature.parameters.length).type, publicApdType);
         publicApdType = sandboxWrapPis(signature.parameters, publicApdType);
         let fullApdType = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("apd"), fullDependentHead, pathTerm), Core.clone(pathMethodValue)));
-        fullApdType = sandboxWrapPis(allDependentPathBinders, fullApdType);
+        fullApdType = sandboxWrapPis(allFullDependentPathBinders, fullApdType);
         const fullPointBranchBinders = extractSandboxPiBinders(fullEliminatorEntry[1], 1 + signature.parameters.length + 1, signature.pointConstructors.length);
         fullApdType = sandboxWrapPis(fullPointBranchBinders, fullApdType);
         fullApdType = sandboxPi(motiveName, extractSandboxPiBinder(fullEliminatorEntry[1], 1 + signature.parameters.length).type, fullApdType);
@@ -2896,7 +3034,9 @@ export function lowerSandboxHit(signature) {
         if (expression.kind === "compose") {
             const left = makeSharedDependentOnePathComputation(expression.left, head, full, owner, motive, domainType);
             const right = makeSharedDependentOnePathComputation(expression.right, head, full, owner, motive, domainType);
-            const method = sandboxApply(sandboxVar("hit_dep1_comp"), Core.clone(motive), Core.clone(left.sourceValue), Core.clone(left.targetValue), Core.clone(right.targetValue), Core.clone(left.method), Core.clone(right.method));
+            const method = sandboxHitOnePathExpressionIncludesRefl(expression)
+                ? explicitDependentOnePathCompose(domainType, full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"), motive, left, right)
+                : sandboxApply(sandboxVar("hit_dep1_comp"), Core.clone(motive), Core.clone(left.sourceValue), Core.clone(left.targetValue), Core.clone(right.targetValue), Core.clone(left.method), Core.clone(right.method));
             const term = sandboxCompose(left.term, right.term);
             return {
                 term,
@@ -2912,7 +3052,9 @@ export function lowerSandboxHit(signature) {
         if (expression.kind === "inverse") {
             const value = makeSharedDependentOnePathComputation(expression.value, head, full, owner, motive, domainType);
             const term = sandboxApply(sandboxVar("inveq"), value.term);
-            const method = sandboxApply(sandboxVar("hit_dep1_inv"), Core.clone(motive), Core.clone(value.sourceValue), Core.clone(value.targetValue), Core.clone(value.method));
+            const method = sandboxHitOnePathExpressionIncludesRefl(expression)
+                ? explicitDependentOnePathInverse(domainType, full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"), motive, value)
+                : sandboxApply(sandboxVar("hit_dep1_inv"), Core.clone(motive), Core.clone(value.sourceValue), Core.clone(value.targetValue), Core.clone(value.method));
             return {
                 term,
                 sourcePoint: value.targetPoint,
@@ -2924,7 +3066,23 @@ export function lowerSandboxHit(signature) {
                 computation: sandboxApply(sandboxVar("@hit_apd1_corrected_inv"), Core.clone(hitUniverseLevel), full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"), Core.clone(domainType), Core.clone(value.sourcePoint), Core.clone(value.targetPoint), Core.clone(value.term), Core.clone(motive), Core.clone(head), Core.clone(value.method), Core.clone(value.computation))
             };
         }
-        const data = sandboxHitOnePathExpressionData(expression, signature.parameters, pathConstructors, owner);
+        if (expression.kind === "refl") {
+            const data = sandboxHitReflPointExpressionData(expression, signature.parameters, signature.pointConstructors, owner);
+            const pointValue = sandboxHitBranchValue(data.pointTerm, signature.parameters, signature.pointConstructors, branchNames);
+            const term = sandboxApply(sandboxVar("refl"), data.pointTerm);
+            const method = sandboxApply(sandboxVar("refl"), pointValue);
+            return {
+                term,
+                sourcePoint: Core.clone(data.pointTerm),
+                targetPoint: Core.clone(data.pointTerm),
+                sourceValue: Core.clone(pointValue),
+                targetValue: Core.clone(pointValue),
+                type: sandboxEquality(sandboxApply(sandboxVar("trans"), Core.clone(motive), term, pointValue), Core.clone(pointValue)),
+                method,
+                computation: sandboxApply(sandboxVar("refl"), method)
+            };
+        }
+        const data = sandboxHitOnePathExpressionData(expression, signature.parameters, signature.pointConstructors, pathConstructors, owner);
         if (data.pathIndex === undefined || !data.arguments_) {
             throw new Error(`二维 HIT 一阶路径端点 ${owner} 缺少原子路径数据`);
         }
@@ -2967,7 +3125,20 @@ export function lowerSandboxHit(signature) {
                 computation: sandboxApply(sandboxVar("@hit_ap1_corrected_inv"), Core.clone(hitUniverseLevel), full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"), Core.clone(domainType), sandboxVar(motiveName), Core.clone(value.sourcePoint), Core.clone(value.targetPoint), Core.clone(value.term), Core.clone(head), Core.clone(value.method), Core.clone(value.computation))
             };
         }
-        const data = sandboxHitOnePathExpressionData(expression, signature.parameters, pathConstructors, owner);
+        if (expression.kind === "refl") {
+            const data = sandboxHitReflPointExpressionData(expression, signature.parameters, signature.pointConstructors, owner);
+            const pointValue = sandboxHitBranchValue(data.pointTerm, signature.parameters, signature.pointConstructors, recursorBranchNames);
+            const term = sandboxApply(sandboxVar("refl"), data.pointTerm);
+            const method = sandboxApply(sandboxVar("refl"), pointValue);
+            return {
+                term,
+                sourcePoint: Core.clone(data.pointTerm),
+                targetPoint: Core.clone(data.pointTerm),
+                method,
+                computation: sandboxApply(sandboxVar("refl"), method)
+            };
+        }
+        const data = sandboxHitOnePathExpressionData(expression, signature.parameters, signature.pointConstructors, pathConstructors, owner);
         if (data.pathIndex === undefined || !data.arguments_) {
             throw new Error(`二维 HIT 一阶路径端点 ${owner} 缺少原子路径数据`);
         }
@@ -3003,7 +3174,9 @@ export function lowerSandboxHit(signature) {
             if (expression.kind === "compose") {
                 const left = makeDependentOnePathComputation(expression.left, head, full);
                 const right = makeDependentOnePathComputation(expression.right, head, full);
-                const method = sandboxApply(sandboxVar("hit_dep1_comp"), Core.clone(fiberMotive), Core.clone(left.sourceValue), Core.clone(left.targetValue), Core.clone(right.targetValue), Core.clone(left.method), Core.clone(right.method));
+                const method = sandboxHitOnePathExpressionIncludesRefl(expression)
+                    ? explicitDependentOnePathCompose(fiberHitType, full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"), fiberMotive, left, right)
+                    : sandboxApply(sandboxVar("hit_dep1_comp"), Core.clone(fiberMotive), Core.clone(left.sourceValue), Core.clone(left.targetValue), Core.clone(right.targetValue), Core.clone(left.method), Core.clone(right.method));
                 const term = sandboxCompose(left.term, right.term);
                 return {
                     term,
@@ -3019,7 +3192,9 @@ export function lowerSandboxHit(signature) {
             if (expression.kind === "inverse") {
                 const value = makeDependentOnePathComputation(expression.value, head, full);
                 const term = sandboxApply(sandboxVar("inveq"), value.term);
-                const method = sandboxApply(sandboxVar("hit_dep1_inv"), Core.clone(fiberMotive), Core.clone(value.sourceValue), Core.clone(value.targetValue), Core.clone(value.method));
+                const method = sandboxHitOnePathExpressionIncludesRefl(expression)
+                    ? explicitDependentOnePathInverse(fiberHitType, full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"), fiberMotive, value)
+                    : sandboxApply(sandboxVar("hit_dep1_inv"), Core.clone(fiberMotive), Core.clone(value.sourceValue), Core.clone(value.targetValue), Core.clone(value.method));
                 return {
                     term,
                     sourcePoint: value.targetPoint,
@@ -3031,7 +3206,23 @@ export function lowerSandboxHit(signature) {
                     computation: sandboxApply(sandboxVar("@hit_apd1_corrected_inv"), Core.clone(hitUniverseLevel), full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"), Core.clone(fiberHitType), Core.clone(value.sourcePoint), Core.clone(value.targetPoint), Core.clone(value.term), Core.clone(fiberMotive), Core.clone(head), Core.clone(value.method), Core.clone(value.computation))
                 };
             }
-            const data = sandboxHitOnePathExpressionData(expression, signature.parameters, pathConstructors, path.name);
+            if (expression.kind === "refl") {
+                const data = sandboxHitReflPointExpressionData(expression, signature.parameters, signature.pointConstructors, path.name);
+                const pointValue = sandboxHitBranchValue(data.pointTerm, signature.parameters, signature.pointConstructors, branchNames);
+                const term = sandboxApply(sandboxVar("refl"), data.pointTerm);
+                const method = sandboxApply(sandboxVar("refl"), pointValue);
+                return {
+                    term,
+                    sourcePoint: Core.clone(data.pointTerm),
+                    targetPoint: Core.clone(data.pointTerm),
+                    sourceValue: Core.clone(pointValue),
+                    targetValue: Core.clone(pointValue),
+                    type: sandboxEquality(sandboxApply(sandboxVar("trans"), Core.clone(fiberMotive), term, pointValue), Core.clone(pointValue)),
+                    method,
+                    computation: sandboxApply(sandboxVar("refl"), method)
+                };
+            }
+            const data = sandboxHitOnePathExpressionData(expression, signature.parameters, signature.pointConstructors, pathConstructors, path.name);
             if (data.pathIndex === undefined || !data.arguments_) {
                 throw new Error(`二维 HIT 一阶路径端点 ${path.name} 缺少原子路径数据`);
             }
@@ -3074,7 +3265,20 @@ export function lowerSandboxHit(signature) {
                     computation: sandboxApply(sandboxVar("@hit_ap1_corrected_inv"), Core.clone(hitUniverseLevel), full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"), Core.clone(fiberHitType), sandboxVar(motiveName), Core.clone(value.sourcePoint), Core.clone(value.targetPoint), Core.clone(value.term), Core.clone(head), Core.clone(value.method), Core.clone(value.computation))
                 };
             }
-            const data = sandboxHitOnePathExpressionData(expression, signature.parameters, pathConstructors, path.name);
+            if (expression.kind === "refl") {
+                const data = sandboxHitReflPointExpressionData(expression, signature.parameters, signature.pointConstructors, path.name);
+                const pointValue = sandboxHitBranchValue(data.pointTerm, signature.parameters, signature.pointConstructors, recursorBranchNames);
+                const term = sandboxApply(sandboxVar("refl"), data.pointTerm);
+                const method = sandboxApply(sandboxVar("refl"), pointValue);
+                return {
+                    term,
+                    sourcePoint: Core.clone(data.pointTerm),
+                    targetPoint: Core.clone(data.pointTerm),
+                    method,
+                    computation: sandboxApply(sandboxVar("refl"), method)
+                };
+            }
+            const data = sandboxHitOnePathExpressionData(expression, signature.parameters, signature.pointConstructors, pathConstructors, path.name);
             if (data.pathIndex === undefined || !data.arguments_) {
                 throw new Error(`二维 HIT 一阶路径端点 ${path.name} 缺少原子路径数据`);
             }
@@ -3126,7 +3330,7 @@ export function lowerSandboxHit(signature) {
         publicApd2Type = sandboxPi(motiveName, extractSandboxPiBinder(base.eliminator[1], signature.parameters.length).type, publicApd2Type);
         publicApd2Type = sandboxWrapPis(signature.parameters, publicApd2Type);
         let fullApd2Type = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("apd2"), fullDependentHead, pathTerm), correctedDependentMethodFull));
-        fullApd2Type = sandboxWrapPis(allDependentPathBinders, fullApd2Type);
+        fullApd2Type = sandboxWrapPis(allFullDependentPathBinders, fullApd2Type);
         fullApd2Type = sandboxWrapPis(extractSandboxPiBinders(fullEliminatorEntry[1], 1 + signature.parameters.length + 1, signature.pointConstructors.length), fullApd2Type);
         fullApd2Type = sandboxPi(motiveName, extractSandboxPiBinder(fullEliminatorEntry[1], 1 + signature.parameters.length).type, fullApd2Type);
         fullApd2Type = sandboxWrapPis(signature.parameters, fullApd2Type);
@@ -3189,8 +3393,8 @@ export function lowerSandboxHit(signature) {
         const targetDependentMethod = targetPath.method;
         const endpointValue = sourcePath.sourceValue;
         const targetEndpointValue = sourcePath.targetValue;
-        const leftDependentExpression = dependentTwoPathExpressionMethod(path.leftExpression, path.name, endpointValue, targetEndpointValue, fiberMotive);
-        const rightDependentExpression = dependentTwoPathExpressionMethod(path.rightExpression, path.name, endpointValue, targetEndpointValue, fiberMotive);
+        const leftDependentExpression = dependentTwoPathExpressionMethod(path.leftExpression, path.name, endpointValue, targetEndpointValue, fiberMotive, fiberHitType);
+        const rightDependentExpression = dependentTwoPathExpressionMethod(path.rightExpression, path.name, endpointValue, targetEndpointValue, fiberMotive, fiberHitType);
         const leftDependentTwoPathMethod = leftDependentExpression.proof;
         const rightDependentTwoPathMethod = rightDependentExpression.proof;
         const makeDependentTwoPathComputation = (expression, head, full) => {
@@ -3404,7 +3608,7 @@ export function lowerSandboxHit(signature) {
         publicApd3Type = sandboxPi(motiveName, extractSandboxPiBinder(base.eliminator[1], signature.parameters.length).type, publicApd3Type);
         publicApd3Type = sandboxWrapPis(signature.parameters, publicApd3Type);
         let fullApd3Type = sandboxWrapPis(path.arguments, sandboxEquality(sandboxApply(sandboxVar("apd3"), fullDependentHead, Core.clone(pathTerm)), correctedDependentThreeMethodFull));
-        fullApd3Type = sandboxWrapPis(allDependentPathBinders, fullApd3Type);
+        fullApd3Type = sandboxWrapPis(allFullDependentPathBinders, fullApd3Type);
         fullApd3Type = sandboxWrapPis(extractSandboxPiBinders(fullEliminatorEntry[1], 1 + signature.parameters.length + 1, signature.pointConstructors.length), fullApd3Type);
         fullApd3Type = sandboxPi(motiveName, extractSandboxPiBinder(fullEliminatorEntry[1], 1 + signature.parameters.length).type, fullApd3Type);
         fullApd3Type = sandboxWrapPis(signature.parameters, fullApd3Type);

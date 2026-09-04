@@ -132,12 +132,13 @@ valid bridge; declaration reordering or recursive disabling does.
 Composite third-path endpoints require transparent lower-dimensional laws, not
 new axioms. The system provides checked `hit_ap2_comp`, `hit_ap2_inv`,
 `hit_apd2_comp`, and `hit_apd2_inv` definitions. Non-indexed second-path
-endpoints support atoms, composition, and inverse end to end. Indexed HITs
-support same-fiber `path2` atoms, composition, and inverse, plus same-fiber
-atomic, composite, inverse, and restricted `refl path1` `path3`; Core checks
-their indices and shared lower-dimensional boundaries with NbE. A `refl` leaf
-must name a declared first-path constructor of the current HIT; cross-fiber
-dependent paths remain explicit boundaries.
+endpoints support atoms, composition, inverse, and restricted `refl point`
+end to end. Indexed HITs support the same-fiber `path2` forms, plus
+same-fiber atomic, composite, inverse, and restricted `refl path1` `path3`;
+Core checks their indices and shared lower-dimensional boundaries with NbE. A
+`path2` `refl` leaf must name a declared point constructor, while a `path3`
+`refl` leaf must name a declared first-path constructor of the current HIT;
+cross-fiber dependent paths remain explicit boundaries.
 
 ## Type-theory Proof Pages / 类型论证明页
 

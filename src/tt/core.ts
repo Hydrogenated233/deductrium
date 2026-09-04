@@ -461,6 +461,12 @@ export type CoreHitOnePathExpression =
         arguments: AST[];
     }
     | {
+        /** Reflexivity at one declared point-constructor application. */
+        kind: "refl";
+        pointName: string;
+        arguments: AST[];
+    }
+    | {
         kind: "compose";
         left: CoreHitOnePathExpression;
         right: CoreHitOnePathExpression;
@@ -635,6 +641,20 @@ function cloneCoreHitOnePathExpression(
                 arguments: (object.arguments as AST[]).map(argument => Core.clone(argument))
             };
         }
+        if (object.kind === "refl") {
+            const keys = Object.keys(object);
+            if (keys.some(key => !["kind", "pointName", "arguments"].includes(key))
+                || typeof object.pointName !== "string" || !object.pointName
+                || !Array.isArray(object.arguments)
+                || object.arguments.some(argument => !argument || typeof argument !== "object")) {
+                throw new Error(`${label} 一阶路径 refl 结构无效`);
+            }
+            return {
+                kind: "refl",
+                pointName: object.pointName,
+                arguments: (object.arguments as AST[]).map(argument => Core.clone(argument))
+            };
+        }
         if (object.kind === "compose") {
             const keys = Object.keys(object);
             if (keys.some(key => !["kind", "left", "right"].includes(key))) {
@@ -670,6 +690,13 @@ function mapCoreHitOnePathExpression(
         return {
             kind: "atom",
             name: expression.name,
+            arguments: expression.arguments.map(mapAst)
+        };
+    }
+    if (expression.kind === "refl") {
+        return {
+            kind: "refl",
+            pointName: expression.pointName,
             arguments: expression.arguments.map(mapAst)
         };
     }
@@ -3213,6 +3240,15 @@ export class Core {
                     resultIndices?: AST[];
                 }
                 | {
+                    kind: "refl";
+                    pointName: string;
+                    arguments: AST[];
+                    term: AST;
+                    sourcePoint: AST;
+                    targetPoint: AST;
+                    resultIndices?: AST[];
+                }
+                | {
                     kind: "compose";
                     left: EvaluatedOnePathExpression;
                     right: EvaluatedOnePathExpression;
@@ -3300,6 +3336,42 @@ export class Core {
                                 normalizedMetadataAst(referencedPath.right), replacements
                             ),
                             resultIndices
+                        };
+                    }
+                    if (expression.kind === "refl") {
+                        const point = metadata.constructors.find(candidate =>
+                            candidate.name === expression.pointName
+                        );
+                        if (!point) {
+                            throw new Error(`${label}引用的点构造子不存在：${expression.pointName}`);
+                        }
+                        const argumentNames = point.argumentNames ?? [];
+                        if (argumentNames.length !== point.argumentTypes.length
+                            || new Set(argumentNames).size !== argumentNames.length) {
+                            throw new Error(
+                                `二维 HIT 点构造子 ${expression.pointName} argumentNames 与 telescope 不一致`
+                            );
+                        }
+                        if (expression.arguments.length !== argumentNames.length) {
+                            throw new Error(
+                                `${label}参数数量与点构造子 ${expression.pointName} telescope 不一致：`
+                                + `需要 ${argumentNames.length} 个，实际 ${expression.arguments.length} 个`
+                            );
+                        }
+                        const arguments_ = expression.arguments.map(normalizedMetadataAst);
+                        const pointTerm = wrapApply(
+                            wrapVar(expression.pointName),
+                            ...parameters.map(parameter => wrapVar(parameter.name)),
+                            ...arguments_.map(argument => Core.clone(argument))
+                        );
+                        return {
+                            kind: "refl",
+                            pointName: expression.pointName,
+                            arguments: arguments_,
+                            term: wrapApply(wrapVar("refl"), Core.clone(pointTerm)),
+                            sourcePoint: Core.clone(pointTerm),
+                            targetPoint: Core.clone(pointTerm),
+                            resultIndices: hitPointResultIndices(pointTerm, label)
                         };
                     }
                     if (expression.kind === "compose") {
@@ -3402,39 +3474,6 @@ export class Core {
             };
             const onePathRecursorMethodValue = (
                 expression: EvaluatedOnePathExpression,
-                methodNames: readonly string[],
-                label: string
-            ): AST => {
-                if (expression.kind === "atom") {
-                    const index = metadataPathEntries.findIndex(entry =>
-                        entry.name === expression.path.name
-                    );
-                    if (index < 0 || !methodNames[index]) {
-                        throw new Error(`${label} 引用了未知一阶路径方法：${expression.path.name}`);
-                    }
-                    return wrapApply(
-                        wrapVar(methodNames[index]),
-                        ...expression.arguments.map(argument => Core.clone(argument))
-                    );
-                }
-                if (expression.kind === "compose") {
-                    return {
-                        type: "*",
-                        name: "",
-                        nodes: [
-                            onePathRecursorMethodValue(expression.left, methodNames, label),
-                            onePathRecursorMethodValue(expression.right, methodNames, label)
-                        ]
-                    };
-                }
-                return wrapApply(
-                    wrapVar("inveq"),
-                    onePathRecursorMethodValue(expression.value, methodNames, label)
-                );
-            };
-            const onePathDependentMethodValue = (
-                expression: EvaluatedOnePathExpression,
-                motive: AST,
                 branchNames: readonly string[],
                 methodNames: readonly string[],
                 label: string
@@ -3451,19 +3490,152 @@ export class Core {
                         ...expression.arguments.map(argument => Core.clone(argument))
                     );
                 }
+                if (expression.kind === "refl") {
+                    return wrapApply(
+                        wrapVar("refl"),
+                        hitBranchValue(expression.sourcePoint, branchNames, label)
+                    );
+                }
                 if (expression.kind === "compose") {
+                    return {
+                        type: "*",
+                        name: "",
+                        nodes: [
+                            onePathRecursorMethodValue(
+                                expression.left, branchNames, methodNames, label
+                            ),
+                            onePathRecursorMethodValue(
+                                expression.right, branchNames, methodNames, label
+                            )
+                        ]
+                    };
+                }
+                return wrapApply(
+                    wrapVar("inveq"),
+                    onePathRecursorMethodValue(
+                        expression.value, branchNames, methodNames, label
+                    )
+                );
+            };
+            type DependentOnePathMethodContext = {
+                hitUniverseLevel: AST;
+                motiveUniverseLevel: AST;
+                hitType: AST;
+            };
+            const onePathContainsRefl = (
+                expression: EvaluatedOnePathExpression
+            ): boolean => expression.kind === "refl"
+                || (expression.kind === "compose"
+                    && (onePathContainsRefl(expression.left)
+                        || onePathContainsRefl(expression.right)))
+                || (expression.kind === "inverse"
+                    && onePathContainsRefl(expression.value));
+            const dependentOnePathMethodContext = (
+                motiveUniverseLevel: AST,
+                resultIndices: readonly AST[],
+                label: string
+            ): DependentOnePathMethodContext => {
+                let familyUniverse = normalizedMetadataAst(bundle.type[1]);
+                for (let index = 0; index < parameters.length + indexCount; index++) {
+                    if (familyUniverse.type !== "P" || !familyUniverse.nodes?.[1]) {
+                        throw new Error(`${label} HIT Universe telescope 不完整`);
+                    }
+                    familyUniverse = familyUniverse.nodes[1];
+                }
+                if (familyUniverse.type !== "apply"
+                    || familyUniverse.nodes?.[0]?.type !== "var"
+                    || familyUniverse.nodes[0].name !== "U"
+                    || !familyUniverse.nodes[1]) {
+                    throw new Error(`${label} HIT Universe 缺少显式层级`);
+                }
+                return {
+                    hitUniverseLevel: Core.clone(familyUniverse.nodes[1]),
+                    motiveUniverseLevel: Core.clone(motiveUniverseLevel),
+                    hitType: wrapApply(
+                        wrapVar(metadata.typeName),
+                        ...parameters.map(parameter => wrapVar(parameter.name)),
+                        ...resultIndices.map(normalizedMetadataAst)
+                    )
+                };
+            };
+            const onePathDependentMethodValue = (
+                expression: EvaluatedOnePathExpression,
+                motive: AST,
+                branchNames: readonly string[],
+                methodNames: readonly string[],
+                label: string,
+                explicitContext?: DependentOnePathMethodContext
+            ): AST => {
+                if (expression.kind === "atom") {
+                    const index = metadataPathEntries.findIndex(entry =>
+                        entry.name === expression.path.name
+                    );
+                    if (index < 0 || !methodNames[index]) {
+                        throw new Error(`${label} 引用了未知一阶路径方法：${expression.path.name}`);
+                    }
+                    return wrapApply(
+                        wrapVar(methodNames[index]),
+                        ...expression.arguments.map(argument => Core.clone(argument))
+                    );
+                }
+                if (expression.kind === "refl") {
+                    return wrapApply(
+                        wrapVar("refl"),
+                        hitBranchValue(expression.sourcePoint, branchNames, label)
+                    );
+                }
+                if (expression.kind === "compose") {
+                    const leftMethod = onePathDependentMethodValue(
+                        expression.left, motive, branchNames, methodNames, label, explicitContext
+                    );
+                    const rightMethod = onePathDependentMethodValue(
+                        expression.right, motive, branchNames, methodNames, label, explicitContext
+                    );
+                    if (explicitContext && onePathContainsRefl(expression)) {
+                        return wrapApply(
+                            wrapVar("@hit_dep1_comp"),
+                            Core.clone(explicitContext.hitUniverseLevel),
+                            Core.clone(explicitContext.motiveUniverseLevel),
+                            Core.clone(explicitContext.hitType),
+                            Core.clone(expression.left.sourcePoint),
+                            Core.clone(expression.left.targetPoint),
+                            Core.clone(expression.right.targetPoint),
+                            Core.clone(expression.left.term),
+                            Core.clone(expression.right.term),
+                            Core.clone(motive),
+                            hitBranchValue(expression.left.sourcePoint, branchNames, label),
+                            hitBranchValue(expression.left.targetPoint, branchNames, label),
+                            hitBranchValue(expression.right.targetPoint, branchNames, label),
+                            leftMethod,
+                            rightMethod
+                        );
+                    }
                     return wrapApply(
                         wrapVar("hit_dep1_comp"),
                         Core.clone(motive),
                         hitBranchValue(expression.left.sourcePoint, branchNames, label),
                         hitBranchValue(expression.left.targetPoint, branchNames, label),
                         hitBranchValue(expression.right.targetPoint, branchNames, label),
-                        onePathDependentMethodValue(
-                            expression.left, motive, branchNames, methodNames, label
-                        ),
-                        onePathDependentMethodValue(
-                            expression.right, motive, branchNames, methodNames, label
-                        )
+                        leftMethod,
+                        rightMethod
+                    );
+                }
+                const valueMethod = onePathDependentMethodValue(
+                    expression.value, motive, branchNames, methodNames, label, explicitContext
+                );
+                if (explicitContext && onePathContainsRefl(expression)) {
+                    return wrapApply(
+                        wrapVar("@hit_dep1_inv"),
+                        Core.clone(explicitContext.hitUniverseLevel),
+                        Core.clone(explicitContext.motiveUniverseLevel),
+                        Core.clone(explicitContext.hitType),
+                        Core.clone(expression.value.sourcePoint),
+                        Core.clone(expression.value.targetPoint),
+                        Core.clone(expression.value.term),
+                        Core.clone(motive),
+                        hitBranchValue(expression.value.sourcePoint, branchNames, label),
+                        hitBranchValue(expression.value.targetPoint, branchNames, label),
+                        valueMethod
                     );
                 }
                 return wrapApply(
@@ -3471,9 +3643,7 @@ export class Core {
                     Core.clone(motive),
                     hitBranchValue(expression.value.sourcePoint, branchNames, label),
                     hitBranchValue(expression.value.targetPoint, branchNames, label),
-                    onePathDependentMethodValue(
-                        expression.value, motive, branchNames, methodNames, label
-                    )
+                    valueMethod
                 );
             };
 
@@ -4084,6 +4254,13 @@ export class Core {
                             name,
                             type: normalizedMetadataAst(path.argumentTypes[argumentIndex])
                         }));
+                        const methodContext = dependent
+                            ? dependentOnePathMethodContext(
+                                full ? wrapVar(binders[0].name) : wrapVar("@0"),
+                                path.resultIndices ?? [],
+                                `${label} ${path.name}`
+                            )
+                            : undefined;
                         const leftMethod = dependent
                             ? onePathDependentMethodValue(
                                 endpointData.left,
@@ -4092,10 +4269,12 @@ export class Core {
                                 ),
                                 branchNames,
                                 pathMethodNames,
-                                `${label} ${path.name}`
+                                `${label} ${path.name}`,
+                                methodContext
                             )
                             : onePathRecursorMethodValue(
                                 endpointData.left,
+                                branchNames,
                                 pathMethodNames,
                                 `${label} ${path.name}`
                             );
@@ -4107,10 +4286,12 @@ export class Core {
                                 ),
                                 branchNames,
                                 pathMethodNames,
-                                `${label} ${path.name}`
+                                `${label} ${path.name}`,
+                                methodContext
                             )
                             : onePathRecursorMethodValue(
                                 endpointData.right,
+                                branchNames,
                                 pathMethodNames,
                                 `${label} ${path.name}`
                             );
@@ -4255,6 +4436,11 @@ export class Core {
                         motiveName,
                         path.resultIndices ?? []
                     );
+                    const methodContext: DependentOnePathMethodContext = {
+                        hitUniverseLevel,
+                        motiveUniverseLevel,
+                        hitType
+                    };
                     const expressionData = (
                         expression: EvaluatedOnePathExpression
                     ): {
@@ -4278,7 +4464,8 @@ export class Core {
                             motiveAtFiber,
                             branchNames,
                             pathMethodNames,
-                            computationName
+                            computationName,
+                            methodContext
                         );
                         let computation: AST;
                         if (expression.kind === "atom") {
@@ -4307,6 +4494,8 @@ export class Core {
                                 Core.clone(left.computation),
                                 Core.clone(right.computation)
                             );
+                        } else if (expression.kind === "refl") {
+                            computation = wrapApply(wrapVar("refl"), Core.clone(method));
                         } else {
                             const value = expressionData(expression.value);
                             computation = wrapApply(
@@ -4441,6 +4630,9 @@ export class Core {
                     let offset = full ? 1 : 0;
                     offset += parameters.length;
                     const motiveName = recursorBinders[offset++].name;
+                    const branchNames = recursorBinders
+                        .slice(offset, offset + metadata.constructors.length)
+                        .map(binder => binder.name);
                     offset += metadata.constructors.length;
                     const pathMethodNames = recursorBinders
                         .slice(offset, offset + pathEntries.length)
@@ -4491,6 +4683,14 @@ export class Core {
                                 ...endpoint.arguments.map(argument => Core.clone(argument))
                             );
                         }
+                        if (endpoint.kind === "refl") {
+                            return wrapApply(
+                                wrapVar("refl"),
+                                onePathRecursorMethodValue(
+                                    endpoint, branchNames, pathMethodNames, computationName
+                                )
+                            );
+                        }
                         if (endpoint.kind === "compose") {
                             const left = endpointComputation(endpoint.left);
                             const right = endpointComputation(endpoint.right);
@@ -4506,8 +4706,12 @@ export class Core {
                                 Core.clone(endpoint.left.term),
                                 Core.clone(endpoint.right.term),
                                 Core.clone(recursorHead),
-                                onePathRecursorMethodValue(endpoint.left, pathMethodNames, computationName),
-                                onePathRecursorMethodValue(endpoint.right, pathMethodNames, computationName),
+                                onePathRecursorMethodValue(
+                                    endpoint.left, branchNames, pathMethodNames, computationName
+                                ),
+                                onePathRecursorMethodValue(
+                                    endpoint.right, branchNames, pathMethodNames, computationName
+                                ),
                                 left,
                                 right
                             );
@@ -4523,7 +4727,9 @@ export class Core {
                             Core.clone(endpoint.value.targetPoint),
                             Core.clone(endpoint.value.term),
                             Core.clone(recursorHead),
-                            onePathRecursorMethodValue(endpoint.value, pathMethodNames, computationName),
+                            onePathRecursorMethodValue(
+                                endpoint.value, branchNames, pathMethodNames, computationName
+                            ),
                             value
                         );
                     };
@@ -4599,6 +4805,9 @@ export class Core {
                     let offset = full ? 1 : 0;
                     offset += parameters.length;
                     const motiveName = recursorBinders[offset++].name;
+                    const branchNames = recursorBinders
+                        .slice(offset, offset + metadata.constructors.length)
+                        .map(binder => binder.name);
                     offset += metadata.constructors.length;
                     const pathMethodNames = recursorBinders
                         .slice(offset, offset + pathEntries.length)
@@ -4649,10 +4858,10 @@ export class Core {
                     const targetPath = Core.clone(endpointData.left.targetPath);
                     const pointBoundary = sourcePathExpression;
                     const sourceMethod = onePathRecursorMethodValue(
-                        sourcePathExpression, pathMethodNames, computationName
+                        sourcePathExpression, branchNames, pathMethodNames, computationName
                     );
                     const targetMethod = onePathRecursorMethodValue(
-                        targetPathExpression, pathMethodNames, computationName
+                        targetPathExpression, branchNames, pathMethodNames, computationName
                     );
                     const argumentNames = path.argumentNames ?? [];
                     const argumentValues = argumentNames.map(wrapVar);
@@ -4678,6 +4887,14 @@ export class Core {
                                 ...endpoint.arguments.map(argument => Core.clone(argument))
                             );
                         }
+                        if (endpoint.kind === "refl") {
+                            return wrapApply(
+                                wrapVar("refl"),
+                                onePathRecursorMethodValue(
+                                    endpoint, branchNames, pathMethodNames, computationName
+                                )
+                            );
+                        }
                         if (endpoint.kind === "compose") {
                             return wrapApply(
                                 wrapVar("@hit_ap1_corrected_comp"),
@@ -4692,10 +4909,10 @@ export class Core {
                                 Core.clone(endpoint.right.term),
                                 Core.clone(recursorHead),
                                 onePathRecursorMethodValue(
-                                    endpoint.left, pathMethodNames, computationName
+                                    endpoint.left, branchNames, pathMethodNames, computationName
                                 ),
                                 onePathRecursorMethodValue(
-                                    endpoint.right, pathMethodNames, computationName
+                                    endpoint.right, branchNames, pathMethodNames, computationName
                                 ),
                                 pathComputation(endpoint.left),
                                 pathComputation(endpoint.right)
@@ -4712,7 +4929,7 @@ export class Core {
                             Core.clone(endpoint.value.term),
                             Core.clone(recursorHead),
                             onePathRecursorMethodValue(
-                                endpoint.value, pathMethodNames, computationName
+                                endpoint.value, branchNames, pathMethodNames, computationName
                             ),
                             pathComputation(endpoint.value)
                         );
@@ -4741,6 +4958,7 @@ export class Core {
                                 wrapVar("refl"),
                                 onePathRecursorMethodValue(
                                     expression.sourceExpression,
+                                    branchNames,
                                     pathMethodNames,
                                     computationName
                                 )
@@ -4769,10 +4987,10 @@ export class Core {
                     } => {
                         if (expression.kind === "atom") {
                             const sourceMethod = onePathRecursorMethodValue(
-                                expression.sourceExpression, pathMethodNames, computationName
+                                expression.sourceExpression, branchNames, pathMethodNames, computationName
                             );
                             const targetMethod = onePathRecursorMethodValue(
-                                expression.targetExpression, pathMethodNames, computationName
+                                expression.targetExpression, branchNames, pathMethodNames, computationName
                             );
                             return {
                                 sourceMethod,
@@ -4789,7 +5007,7 @@ export class Core {
                         }
                         if (expression.kind === "refl") {
                             const sourceMethod = onePathRecursorMethodValue(
-                                expression.sourceExpression, pathMethodNames, computationName
+                                expression.sourceExpression, branchNames, pathMethodNames, computationName
                             );
                             const sourceComputation = pathComputation(expression.sourceExpression);
                             return {
@@ -5012,6 +5230,11 @@ export class Core {
                         motiveName,
                         path.resultIndices ?? []
                     );
+                    const methodContext: DependentOnePathMethodContext = {
+                        hitUniverseLevel,
+                        motiveUniverseLevel,
+                        hitType
+                    };
 
                     const pointBranchValue = (endpoint: AST) => hitBranchValue(
                         endpoint,
@@ -5042,7 +5265,8 @@ export class Core {
                                 motiveAtFiber,
                                 branchNames,
                                 pathMethodNames,
-                                computationName
+                                computationName,
+                                methodContext
                             )
                         };
                     };
@@ -5068,6 +5292,19 @@ export class Core {
                                 ...endpoint.arguments.map(argument => Core.clone(argument))
                             );
                         }
+                        if (endpoint.kind === "refl") {
+                            return wrapApply(
+                                wrapVar("refl"),
+                                onePathDependentMethodValue(
+                                    endpoint,
+                                    motiveAtFiber,
+                                    branchNames,
+                                    pathMethodNames,
+                                    computationName,
+                                    methodContext
+                                )
+                            );
+                        }
                         if (endpoint.kind === "compose") {
                             return wrapApply(
                                 wrapVar("@hit_apd1_corrected_comp"),
@@ -5086,14 +5323,16 @@ export class Core {
                                     motiveAtFiber,
                                     branchNames,
                                     pathMethodNames,
-                                    computationName
+                                    computationName,
+                                    methodContext
                                 ),
                                 onePathDependentMethodValue(
                                     endpoint.right,
                                     motiveAtFiber,
                                     branchNames,
                                     pathMethodNames,
-                                    computationName
+                                    computationName,
+                                    methodContext
                                 ),
                                 pathComputation(endpoint.left),
                                 pathComputation(endpoint.right)
@@ -5114,7 +5353,8 @@ export class Core {
                                 motiveAtFiber,
                                 branchNames,
                                 pathMethodNames,
-                                computationName
+                                computationName,
+                                methodContext
                             ),
                             pathComputation(endpoint.value)
                         );
@@ -5139,14 +5379,16 @@ export class Core {
                                     motiveAtFiber,
                                     branchNames,
                                     pathMethodNames,
-                                    computationName
+                                    computationName,
+                                    methodContext
                                 ),
                                 targetMethod: onePathDependentMethodValue(
                                     expression.targetExpression,
                                     motiveAtFiber,
                                     branchNames,
                                     pathMethodNames,
-                                    computationName
+                                    computationName,
+                                    methodContext
                                 ),
                                 proof: wrapApply(
                                     wrapVar(twoPathMethodNames[endpointIndex]),
@@ -5160,7 +5402,8 @@ export class Core {
                                 motiveAtFiber,
                                 branchNames,
                                 pathMethodNames,
-                                computationName
+                                computationName,
+                                methodContext
                             );
                             return {
                                 sourceMethod,
@@ -5240,7 +5483,8 @@ export class Core {
                                 motiveAtFiber,
                                 branchNames,
                                 pathMethodNames,
-                                computationName
+                                computationName,
+                                methodContext
                             );
                             const sourceComputation = pathComputation(expression.sourceExpression);
                             return {
@@ -5653,6 +5897,13 @@ export class Core {
                             motiveName,
                             path.resultIndices ?? []
                         );
+                        const methodContext = dependent
+                            ? dependentOnePathMethodContext(
+                                full ? wrapVar(binders[0].name) : wrapVar("@0"),
+                                path.resultIndices ?? [],
+                                `${label} ${path.name}`
+                            )
+                            : undefined;
                         const recursorExpressionMethod = (
                             expression: EvaluatedTwoPathExpression
                         ): AST => {
@@ -5675,6 +5926,7 @@ export class Core {
                                     wrapVar("refl"),
                                     onePathRecursorMethodValue(
                                         expression.sourceExpression,
+                                        branchNames,
                                         pathMethodNames,
                                         `${label} ${path.name}`
                                     )
@@ -5702,14 +5954,16 @@ export class Core {
                                 motiveAtFiber,
                                 branchNames,
                                 pathMethodNames,
-                                `${label} ${path.name}`
+                                `${label} ${path.name}`,
+                                methodContext
                             );
                             const targetMethod = onePathDependentMethodValue(
                                 targetPathExpression,
                                 motiveAtFiber,
                                 branchNames,
                                 pathMethodNames,
-                                `${label} ${path.name}`
+                                `${label} ${path.name}`,
+                                methodContext
                             );
                             const pointValue = branchValue(
                                 sourcePathExpression.sourcePoint,
@@ -5740,14 +5994,16 @@ export class Core {
                                             motiveAtFiber,
                                             branchNames,
                                             pathMethodNames,
-                                            `${label} ${path.name}`
+                                            `${label} ${path.name}`,
+                                            methodContext
                                         ),
                                         targetMethod: onePathDependentMethodValue(
                                             expression.targetExpression,
                                             motiveAtFiber,
                                             branchNames,
                                             pathMethodNames,
-                                            `${label} ${path.name}`
+                                            `${label} ${path.name}`,
+                                            methodContext
                                         ),
                                         proof: wrapApply(
                                             wrapVar(twoPathMethodNames[endpointIndex]),
@@ -5761,7 +6017,8 @@ export class Core {
                                         motiveAtFiber,
                                         branchNames,
                                         pathMethodNames,
-                                        `${label} ${path.name}`
+                                        `${label} ${path.name}`,
+                                        methodContext
                                     );
                                     return {
                                         sourceMethod,
