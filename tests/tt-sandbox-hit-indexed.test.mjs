@@ -363,6 +363,24 @@ assert.doesNotThrow(
     "same-fiber atomic indexed path3 must pass Core certification"
 );
 
+// `ap3` has an internal binder conventionally named `p`.  A user point
+// constructor with that legal name must remain a free constructor while its
+// generated path3 computation types are checked, rather than being captured
+// by the primitive's local binder.
+const twoIndexPointPPath3 = lowerSandboxHit(parseSandboxHit(
+    "hit Bi [i:nat] [j:nat] : U "
+    + "| p:Πi:nat,Πj:nat,Bi i j "
+    + "| l0:Πi:nat,Πj:nat,p i j=p i j "
+    + "| l1:Πi:nat,Πj:nat,p i j=p i j "
+    + "| path2 f0:Πi:nat,Πj:nat,l0 i j=l1 i j "
+    + "| path2 f1:Πi:nat,Πj:nat,l0 i j=l1 i j "
+    + "| path3 c:Πi:nat,Πj:nat,f0 i j=f1 i j"
+));
+assert.doesNotThrow(
+    () => register(twoIndexPointPPath3),
+    "a point constructor named p must not overflow path3 Core registration"
+);
+
 // A definitionally equal index cannot be rejected merely because one endpoint
 // contains a beta redex.  The parser must carry that semantic equality through
 // lowering and Core certification instead of requiring spelling equality.

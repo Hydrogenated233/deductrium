@@ -40,6 +40,12 @@ assert.strictEqual(contextBindings(context), contextBindings(context),
     "the indexed context view is reused while the source context is unchanged");
 assert.equal(findContextBinding({ type: "var", name: "x", bondVarId: 22 }, contextBindings(context))?.key,
     "context-id:22");
+assert.equal(findContextBinding(variable("x"), contextBindings(context)), undefined,
+    "an id-less occurrence must not be captured by a marked context entry");
+const legacyContext = [["x", variable("True"), 0]];
+assert.equal(findContextBinding(variable("x"), contextBindings(legacyContext))?.key,
+    "context-name:0:x",
+    "legacy id-less contexts retain name lookup");
 
 const cursor = new ScopeCursor();
 assert.equal(cursor.length, 0);
@@ -94,6 +100,18 @@ kernelScope.withBinding({ name: "x", id: 9 }, () => {
     assert.equal(findKernelScopeIndex({ type: "var", name: "x", bondVarId: 9 }, kernelScope), 0);
     assert.equal(findKernelScopeIndex(variable("x"), kernelScope), -1);
 });
+
+const captureGuardKernel = new SemanticNbeKernel();
+assert.equal(captureGuardKernel.setDefinition("p", variable("globalP")), true);
+assert.equal(
+    captureGuardKernel.tryEqualResult(
+        variable("p"),
+        variable("globalP"),
+        [["p", variable("True"), 9]]
+    ),
+    "equal",
+    "a substituted free constant must not be captured by a marked NbE context binder"
+);
 
 const scopedTerm = parser.parse("Lx:True.Ly:True.x y");
 scopedTerm.bondVarId = 51;

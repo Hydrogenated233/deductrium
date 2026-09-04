@@ -199,16 +199,22 @@ export function findKernelScopeIndex(ast, scope) {
 }
 export function findContextBinding(ast, context) {
     if (isContextIndex(context)) {
-        const positions = validBondVarId(ast?.bondVarId)
-            ? context.byBondVarId.get(ast.bondVarId)
-            : context.byName.get(ast?.name);
-        const position = positions?.[0];
+        if (validBondVarId(ast?.bondVarId)) {
+            const position = context.byBondVarId.get(ast.bondVarId)?.[0];
+            return position === undefined ? undefined : context.bindings[position];
+        }
+        // An id-less occurrence can originate from substituted constant syntax.
+        // Do not recapture it through a prepared local context entry that happens
+        // to share its printed name; retain lookup only for legacy id-less
+        // contexts. This mirrors findKernelScopeIndex.
+        const positions = context.byName.get(ast?.name) ?? [];
+        const position = positions.find(candidate => context.bindings[candidate]?.id === undefined);
         return position === undefined ? undefined : context.bindings[position];
     }
     if (validBondVarId(ast?.bondVarId)) {
         return context.find(binding => binding.id === ast.bondVarId);
     }
-    return context.find(binding => binding.name === ast?.name);
+    return context.find(binding => binding.id === undefined && binding.name === ast?.name);
 }
 function isContextIndex(context) {
     return !Array.isArray(context);

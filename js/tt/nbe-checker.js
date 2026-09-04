@@ -1113,7 +1113,13 @@ function lookupContextType(ast, context) {
         const binding = context.find(([, , id]) => id === ast.bondVarId);
         return binding?.[1] ? cloneSyntax(binding[1]) : null;
     }
-    const binding = context.find(([name]) => name === ast.name);
+    // A free constant introduced by substitution has no binder id.  It must
+    // not be captured by a prepared local binder that happens to use the
+    // same surface name (for example a HIT point constructor named `p` and
+    // the internal `p` binder in the type of `ap3`).  Prepared local uses
+    // always carry a positive id; retain name lookup only for legacy
+    // unmarked contexts.
+    const binding = context.find(([name, , id]) => !validId(id) && name === ast.name);
     return binding?.[1] ? cloneSyntax(binding[1]) : null;
 }
 function instantiateBinder(body, name, id, argument) {
