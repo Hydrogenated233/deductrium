@@ -234,60 +234,157 @@ const differentFibersResult = differentFibers.add(
 assert.equal(differentFibersResult.ok, false);
 assert.match(differentFibersResult.declarations[0].error ?? "", /索引|类型|断言|fiber|纤维/i);
 
-const indexedHigherPathError =
-    /索引.*(?:path[23]|二维|三维)|(?:path[23]|二维|三维).*索引/i;
+const indexedTwoPathSource =
+    "hit IndexedHit2 [n : nat] : U "
+    + "| p2 : Πn:nat,IndexedHit2 n "
+    + "| l20 : Πn:nat,p2 n=p2 n "
+    + "| l21 : Πn:nat,p2 n=p2 n "
+    + "| path2 s2 : Πn:nat,l20 n=l21 n";
+const indexedTwoPathSignature = parseSandboxHit(indexedTwoPathSource);
+const indexedTwoPath = indexedTwoPathSignature.pathLevels[1].constructors[0];
+assert.equal(indexedTwoPath.leftExpression.kind, "atom");
+assert.equal(indexedTwoPath.rightExpression.kind, "atom");
+assert.equal(indexedTwoPath.resultIndices.length, 1);
+assert.equal(
+    parser.stringify(indexedTwoPath.resultIndices[0]),
+    indexedTwoPath.arguments[0].name,
+    "indexed path2 must retain the common first-path fiber"
+);
+
+const indexedTwoPathBundle = lowerSandboxHit(indexedTwoPathSignature);
+assert.equal(indexedTwoPathBundle.metadata.kind, "hit2");
+assert.equal(indexedTwoPathBundle.metadata.indexCount, 1);
+for (const name of [
+    "apd_s2", "@apd_s2", "ap_s2", "@ap_s2", "ap2_s2", "@ap2_s2"
+]) {
+    assert.ok(
+        new Map(indexedTwoPathBundle.auxiliaryTypes).has(name),
+        `indexed path2 must export ${name}`
+    );
+}
+assert.doesNotThrow(
+    () => register(structuredClone(indexedTwoPathBundle)),
+    "same-fiber atomic indexed path2 must pass Core certification"
+);
+
+const betaIndexedTwoPath = lowerSandboxHit(parseSandboxHit(
+    "hit IndexedHit2Beta [n:nat] : U "
+    + "| p2b : Πn:nat,IndexedHit2Beta n "
+    + "| l20b : Πn:nat,p2b n=p2b n "
+    + "| l21b : Πn:nat,p2b n=p2b n "
+    + "| path2 s2b : Πn:nat,l20b n=l21b ((λx:nat.x) n)"
+));
+assert.doesNotThrow(
+    () => register(betaIndexedTwoPath),
+    "definitionally equal indexed path2 fibers must not be rejected syntactically"
+);
+
+const forgedTwoPathIndex = structuredClone(indexedTwoPathBundle);
+const forgedTwoPathMetadata = forgedTwoPathIndex.metadata.pathLevels[1].constructors[0];
+forgedTwoPathMetadata.resultIndices = [parser.parse(
+    `succ ${forgedTwoPathMetadata.argumentNames[0]}`
+)];
+assert.throws(
+    () => register(forgedTwoPathIndex),
+    /索引|metadata|纤维/i,
+    "Core must reconstruct indexed path2 fibers instead of trusting metadata"
+);
+
+const crossFiberTwoPath = lowerSandboxHit(parseSandboxHit(
+    "hit IndexedHit2Cross [n:nat] : U "
+    + "| p2c : Πn:nat,IndexedHit2Cross n "
+    + "| l20c : Πn:nat,p2c n=p2c n "
+    + "| l21c : Πn:nat,p2c (succ n)=p2c (succ n) "
+    + "| path2 s2c : Πn:nat,l20c n=l21c n"
+));
+assert.throws(
+    () => register(crossFiberTwoPath),
+    /索引|纤维|类型|相等/i,
+    "Core must reject genuinely different indexed path2 endpoint fibers"
+);
+
 for (const unsupported of [
-    "hit IndexedHit2 [n : nat] : U | p2 : Πn:nat,IndexedHit2 n "
-        + "| l2 : Πn:nat,p2 n=p2 n | path2 s2 : Πn:nat,l2 n=l2 n",
-    "hit IndexedHit3 [n : nat] : U | p3 : Πn:nat,IndexedHit3 n "
-        + "| l3 : Πn:nat,p3 n=p3 n | path2 s3 : Πn:nat,l3 n=l3 n "
-        + "| path3 c3 : Πn:nat,s3 n=s3 n"
+    "hit IndexedHit2Compose [n:nat] : U "
+        + "| p2d : Πn:nat,IndexedHit2Compose n "
+        + "| l2d : Πn:nat,p2d n=p2d n "
+        + "| path2 s2d : Πn:nat,(l2d n▪l2d n)=(l2d n▪l2d n)",
+    "hit IndexedHit2Inverse [n:nat] : U "
+        + "| p2e : Πn:nat,IndexedHit2Inverse n "
+        + "| l2e : Πn:nat,p2e n=p2e n "
+        + "| path2 s2e : Πn:nat,inveq (l2e n)=inveq (l2e n)"
 ]) {
     assert.throws(
         () => parseSandboxHit(unsupported),
-        indexedHigherPathError,
-        "the parser must reject indexed higher paths before elaboration"
+        /索引.*原子|原子.*索引/i,
+        "indexed path2 composition/inverse must stay outside the first supported slice"
     );
 }
 
-// Keep a separate lowerer guard: structured callers can bypass the source parser.
-const forgedIndexedHigherPath = parseSandboxHit(
-    "hit IndexedHit1 [n : nat] : U "
-    + "| p1 : Πn:nat,IndexedHit1 n "
-    + "| l1 : Πn:nat,p1 n=p1 n"
-);
-forgedIndexedHigherPath.pathLevels[1].constructors.push({});
+const indexedPath3Source =
+    "hit IndexedHit3 [n : nat] : U | p3 : Πn:nat,IndexedHit3 n "
+    + "| l3 : Πn:nat,p3 n=p3 n | path2 s3 : Πn:nat,l3 n=l3 n "
+    + "| path3 c3 : Πn:nat,s3 n=s3 n";
 assert.throws(
-    () => lowerSandboxHit(forgedIndexedHigherPath),
-    indexedHigherPathError,
-    "the lowerer must reject indexed higher paths from structured input"
+    () => parseSandboxHit(indexedPath3Source),
+    /索引.*(?:path3|三维)|(?:path3|三维).*索引/i,
+    "indexed path3 must remain an explicit unsupported boundary"
 );
 
-// Core is the final trust boundary, even for a forged indexed metadata bundle.
-// Start with a fully valid non-indexed HIT2 bundle, then add one family index
-// and matching path result metadata so the explicit unsupported check is the
-// first indexed-HIT higher-path boundary reached by registration.
-const nonIndexedHigher = lowerSandboxHit(parseSandboxHit(
-    "hit HigherPath : U | p : HigherPath | l : p=p | path2 q : l=l"
-));
-const forgedCoreHigherPath = structuredClone(nonIndexedHigher);
-forgedCoreHigherPath.type[1] = {
-    type: "P",
-    name: "n",
-    nodes: [parser.parse("nat"), forgedCoreHigherPath.type[1]]
-};
-forgedCoreHigherPath.metadata.kind = "hit2";
-forgedCoreHigherPath.metadata.dimension = 2;
-forgedCoreHigherPath.metadata.indexCount = 1;
-forgedCoreHigherPath.metadata.parameterCount = 0;
-forgedCoreHigherPath.metadata.indices = [{ name: "n", type: parser.parse("nat") }];
-for (const path of forgedCoreHigherPath.metadata.pathLevels[0].constructors) {
-    path.resultIndices = [parser.parse("n")];
-}
+// Keep a separate lowerer guard: structured callers can bypass the source parser.
+const forgedIndexedPath3 = parseSandboxHit(indexedTwoPathSource);
+forgedIndexedPath3.pathLevels[2].constructors.push({});
 assert.throws(
-    () => register(forgedCoreHigherPath),
-    /二维和三维 HIT metadata 暂不支持索引/,
-    "Core must reject indexed hit2/hit3 metadata"
+    () => lowerSandboxHit(forgedIndexedPath3),
+    /索引.*(?:path3|三维)|(?:path3|三维).*索引/i,
+    "the lowerer must reject indexed path3 from structured input"
+);
+
+const indexedTwoPathSandbox = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+});
+const indexedTwoPathAdded = indexedTwoPathSandbox.add(indexedTwoPathSource);
+assert.equal(indexedTwoPathAdded.ok, true, indexedTwoPathAdded.error);
+for (const name of ["apd_s2", "ap_s2", "ap2_s2"]) {
+    assert.equal(
+        indexedTwoPathSandbox.check(name).ok,
+        true,
+        `the sandbox bridge must expose ${name}`
+    );
+}
+const indexedTwoPathWorker = new SandboxWorkerSession();
+const indexedTwoPathLoaded = indexedTwoPathWorker.handle({
+    id: 2,
+    kind: "load",
+    save: indexedTwoPathSandbox.toJSON(),
+    options: { systemRuleIds: creativeSandboxSystemRuleIds }
+});
+assert.equal(indexedTwoPathLoaded.ok, true, indexedTwoPathLoaded.error);
+assert.equal(indexedTwoPathLoaded.bridge.inductives[0].metadata.kind, "hit2");
+
+const indexedTwoPathAssist = new TTAssistEngine();
+indexedTwoPathAssist.configure({
+    unlockedTypes: [...new Set(initTypeSystem().map(rule => rule.id))],
+    trustedInductives: [indexedTwoPathBundle],
+    inferDisplayMode: "_",
+    timeout: 60_000,
+    language: "zh"
+});
+let indexedTwoPathSnapshot = indexedTwoPathAssist.start(
+    "Πn:nat,Πx:IndexedHit2 n,True",
+    assistOptions
+);
+for (const command of ["intro n", "intro x", "induction x"]) {
+    indexedTwoPathSnapshot = indexedTwoPathAssist.apply(command);
+}
+assert.equal(indexedTwoPathSnapshot.error, undefined);
+assert.equal(
+    indexedTwoPathSnapshot.goals.length,
+    4,
+    "indexed hit2 induction must expose point, two path, and path2 coherence branches"
+);
+assert.ok(
+    indexedTwoPathSnapshot.goals[3].context.some(([name]) => name.includes("path2")),
+    "the indexed path2 coherence branch must retain its fiber index"
 );
 
 // Indexed recursive points must carry the child fiber explicitly.  The
@@ -328,4 +425,4 @@ assert.throws(
     "the lowerer must reject missing indexed path result metadata"
 );
 
-console.log("sandbox indexed fiberwise hit1 regression passed");
+console.log("sandbox indexed fiberwise hit1/path2 regression passed");

@@ -110,9 +110,9 @@ support through dimension 3. Internally, path constructors are organized as
 contiguous `pathLevels` so later experiments do not require another storage
 rewrite. Dimension 4 is limited to fixtures, preflight rejection, and resource
 boundaries; arbitrary-dimensional HIT support is not a project commitment.
-HIT metadata version 7 carries only this canonical `pathLevels` structure and
+HIT metadata version 8 carries only this canonical `pathLevels` structure and
 the restricted structured endpoint language needed by three-dimensional paths.
-Legacy versions 3 through 6 are normalized once at the Core boundary; sandbox
+Legacy versions 3 through 7 are normalized once at the Core boundary; sandbox
 saves retain source declarations rather than persisting derived metadata.
 The sandbox authoring model follows the same rule: `SandboxHitDeclaration`
 stores point constructors separately and has no parallel legacy path arrays.
@@ -131,9 +131,10 @@ folders, folding, renaming, and other presentation-only changes do not revoke a
 valid bridge; declaration reordering or recursive disabling does.
 Composite third-path endpoints require transparent lower-dimensional laws, not
 new axioms. The system provides checked `hit_ap2_comp`, `hit_ap2_inv`,
-`hit_apd2_comp`, and `hit_apd2_inv` definitions. Authoring syntax remains
-limited to atomic second-path endpoints until expression metadata and Core
-reconstruction use those laws end to end.
+`hit_apd2_comp`, and `hit_apd2_inv` definitions. Non-indexed second-path
+endpoints support atoms, composition, and inverse end to end. Indexed HITs
+currently support only same-fiber atomic `path2`; indexed composition, inverse,
+and `path3` remain explicit boundaries.
 
 ## Type-theory Proof Pages / 类型论证明页
 

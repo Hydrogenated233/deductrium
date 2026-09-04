@@ -474,6 +474,8 @@ export type CoreHitTwoPathConstructorMetadata = {
     name: string;
     argumentTypes: AST[];
     argumentNames?: string[];
+    /** Common family indices of both first-path endpoint expressions. */
+    resultIndices?: AST[];
     /** Canonical v8 endpoints. */
     leftExpression?: CoreHitOnePathExpression;
     rightExpression?: CoreHitOnePathExpression;
@@ -1040,6 +1042,7 @@ function normalizeCoreSystemInductiveMetadata(
             "name",
             "argumentTypes",
             "argumentNames",
+            "resultIndices",
             "leftExpression",
             "rightExpression",
             "computationName",
@@ -1055,10 +1058,28 @@ function normalizeCoreSystemInductiveMetadata(
         if (!path.leftExpression || !path.rightExpression) {
             throw new Error(`HIT metadata v8 二阶路径构造子 ${path.name} 缺少表达式端点`);
         }
+        const hasResultIndices = Array.isArray(path.resultIndices);
+        if (path.resultIndices !== undefined && !hasResultIndices) {
+            throw new Error(`HIT metadata v8 二阶路径构造子 ${path.name} 的 resultIndices 结构无效`);
+        }
+        const resultIndices = hasResultIndices
+            ? path.resultIndices!.map(index => Core.clone(index))
+            : [];
+        if (indexCount > 0 && resultIndices.length !== indexCount) {
+            throw new Error(
+                `indexed HIT 二阶路径构造子 ${path.name} 的 resultIndices 数量与索引不一致`
+            );
+        }
+        if (resultIndices.length && resultIndices.length !== indexCount) {
+            throw new Error(
+                `HIT 二阶路径构造子 ${path.name} 的 resultIndices 数量与索引不一致`
+            );
+        }
         return {
             name: path.name,
             argumentTypes: path.argumentTypes.map(type => Core.clone(type)),
             argumentNames: path.argumentNames ? [...path.argumentNames] : undefined,
+            resultIndices,
             leftExpression: cloneCoreHitOnePathExpression(
                 path.leftExpression, `二阶路径构造子 ${path.name} 左端点`
             ),
@@ -1144,6 +1165,7 @@ export function cloneCoreHitPathMetadata(metadata: CoreSystemInductiveMetadata) 
             name: ctor.name,
             argumentTypes: ctor.argumentTypes.map(type => Core.clone(type)),
             argumentNames: ctor.argumentNames ? [...ctor.argumentNames] : undefined,
+            resultIndices: (ctor.resultIndices ?? []).map(index => Core.clone(index)),
             leftExpression: cloneCoreHitOnePathExpression(
                 ctor.leftExpression,
                 `二阶路径构造子 ${ctor.name} 左端点`
@@ -2568,9 +2590,8 @@ export class Core {
                 `归纳类型 metadata 参数/索引数量不一致：${parameterCount}+${indexCount}`
             );
         }
-        if (indexCount > 0 && (bundle.metadata?.kind === "hit2"
-            || bundle.metadata?.kind === "hit3")) {
-            throw new Error("二维和三维 HIT metadata 暂不支持索引");
+        if (indexCount > 0 && bundle.metadata?.kind === "hit3") {
+            throw new Error("索引 HIT 当前只支持一阶和原子 path2，暂不支持 path3");
         }
         const parameters = familyBinders.slice(0, parameterCount);
         const indices = familyBinders.slice(parameterCount);
@@ -3149,6 +3170,7 @@ export class Core {
                     term: AST;
                     sourcePoint: AST;
                     targetPoint: AST;
+                    resultIndices?: AST[];
                 }
                 | {
                     kind: "compose";
@@ -3157,6 +3179,7 @@ export class Core {
                     term: AST;
                     sourcePoint: AST;
                     targetPoint: AST;
+                    resultIndices?: AST[];
                 }
                 | {
                     kind: "inverse";
@@ -3164,6 +3187,7 @@ export class Core {
                     term: AST;
                     sourcePoint: AST;
                     targetPoint: AST;
+                    resultIndices?: AST[];
                 };
             const evaluateOnePathExpression = (
                 expression: CoreHitOnePathExpression | undefined,
@@ -3213,6 +3237,12 @@ export class Core {
                         argumentNames.forEach((name, index) => {
                             replacements.set(name, arguments_[index]);
                         });
+                        const resultIndices = (referencedPath.resultIndices ?? []).map(index =>
+                            substituteGeneratedFreeNames(
+                                normalizedMetadataAst(index),
+                                replacements
+                            )
+                        );
                         return {
                             kind: "atom",
                             path: referencedPath,
@@ -3227,7 +3257,8 @@ export class Core {
                             ),
                             targetPoint: substituteGeneratedFreeNames(
                                 normalizedMetadataAst(referencedPath.right), replacements
-                            )
+                            ),
+                            resultIndices
                         };
                     }
                     if (expression.kind === "compose") {
@@ -3407,14 +3438,80 @@ export class Core {
                 const rightEndpoint = evaluateOnePathExpression(
                     path.rightExpression, path.name, "右"
                 );
+                const pathResultIndices = path.resultIndices ?? [];
+                if (pathResultIndices.length !== indexCount) {
+                    throw new Error(
+                        `二维 HIT 二阶路径构造子 ${path.name} resultIndices 与索引数量不一致`
+                    );
+                }
+                if (indexCount > 0) {
+                    if (path.leftExpression?.kind !== "atom"
+                        || path.rightExpression?.kind !== "atom") {
+                        throw new Error(
+                            `索引 HIT 二阶路径构造子 ${path.name} 目前只支持原子一阶路径端点`
+                        );
+                    }
+                    const leftIndices = leftEndpoint.resultIndices ?? [];
+                    const rightIndices = rightEndpoint.resultIndices ?? [];
+                    if (leftIndices.length !== indexCount
+                        || rightIndices.length !== indexCount) {
+                        throw new Error(
+                            `索引 HIT 二阶路径构造子 ${path.name} 的端点索引纤维不完整`
+                        );
+                    }
+                    const pathIndexContext: Context = [];
+                    let nextPathContextId = 1;
+                    for (const parameter of parameters) {
+                        pathIndexContext.unshift([
+                            parameter.name,
+                            Core.clone(parameter.type),
+                            nextPathContextId++
+                        ]);
+                    }
+                    const argumentNames = path.argumentNames ?? [];
+                    for (let index = 0; index < argumentNames.length; index++) {
+                        pathIndexContext.unshift([
+                            argumentNames[index],
+                            normalizedMetadataAst(path.argumentTypes[index]),
+                            nextPathContextId++
+                        ]);
+                    }
+                    for (let index = 0; index < indexCount; index++) {
+                        requireHitIndexEquality(
+                            leftIndices[index],
+                            rightIndices[index],
+                            pathIndexContext,
+                            `二维 HIT 二阶路径构造子 ${path.name} 第 ${index + 1} 个端点索引`
+                        );
+                        requireHitIndexEquality(
+                            leftIndices[index],
+                            normalizedMetadataAst(pathResultIndices[index]),
+                            pathIndexContext,
+                            `二维 HIT 二阶路径构造子 ${path.name} 第 ${index + 1} 个 metadata 索引`
+                        );
+                    }
+                    requireHitIndexEquality(
+                        leftEndpoint.sourcePoint,
+                        rightEndpoint.sourcePoint,
+                        pathIndexContext,
+                        `二维 HIT 二阶路径构造子 ${path.name} 的起点边界`
+                    );
+                    requireHitIndexEquality(
+                        leftEndpoint.targetPoint,
+                        rightEndpoint.targetPoint,
+                        pathIndexContext,
+                        `二维 HIT 二阶路径构造子 ${path.name} 的终点边界`
+                    );
+                }
                 const endpoints = generatedEqualityEndpoints(conclusion);
                 if (!endpoints
                     || !sameGeneratedAst(endpoints[0], leftEndpoint.term)
                     || !sameGeneratedAst(endpoints[1], rightEndpoint.term)) {
                     throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 端点与 metadata 不一致`);
                 }
-                if (!sameGeneratedAstAlpha(leftEndpoint.sourcePoint, rightEndpoint.sourcePoint)
-                    || !sameGeneratedAstAlpha(leftEndpoint.targetPoint, rightEndpoint.targetPoint)) {
+                if (indexCount === 0
+                    && (!sameGeneratedAstAlpha(leftEndpoint.sourcePoint, rightEndpoint.sourcePoint)
+                        || !sameGeneratedAstAlpha(leftEndpoint.targetPoint, rightEndpoint.targetPoint))) {
                     throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 的点边界不一致`);
                 }
                 evaluatedTwoPathEndpoints.set(path.name, {
@@ -3755,6 +3852,45 @@ export class Core {
                     name,
                     nodes: [type, body]
                 });
+                const twoPathFiberMotive = (
+                    motiveName: string,
+                    resultIndices: readonly AST[]
+                ) => {
+                    if (!resultIndices.length) return wrapVar(motiveName);
+                    const occupied = new Set([
+                        metadata.typeName,
+                        motiveName,
+                        ...parameters.map(parameter => parameter.name)
+                    ]);
+                    const stack = [...resultIndices];
+                    const seen = new WeakSet<object>();
+                    while (stack.length) {
+                        const node = stack.pop();
+                        if (!node || typeof node !== "object" || seen.has(node)) continue;
+                        seen.add(node);
+                        if (node.name) occupied.add(node.name);
+                        for (const child of node.nodes ?? []) stack.push(child);
+                    }
+                    let valueName = "fiberValue";
+                    while (occupied.has(valueName)) valueName += "_";
+                    const value = wrapVar(valueName);
+                    return {
+                        type: "L",
+                        name: valueName,
+                        nodes: [
+                            wrapApply(
+                                wrapVar(metadata.typeName),
+                                ...parameters.map(parameter => wrapVar(parameter.name)),
+                                ...resultIndices.map(normalizedMetadataAst)
+                            ),
+                            wrapApply(
+                                wrapVar(motiveName),
+                                ...resultIndices.map(normalizedMetadataAst),
+                                value
+                            )
+                        ]
+                    } as AST;
+                };
                 const strongWrapPis = (
                     binders: readonly { name: string; type: AST }[],
                     body: AST
@@ -3783,6 +3919,7 @@ export class Core {
                         + metadataPathEntries.length
                         + metadataTwoPathEntries.length
                         + metadataThreePathEntries.length
+                        + indexCount
                         + 1;
                     if (binders.length !== expectedCount) {
                         throw new Error(`${label} telescope 长度与二维 metadata 不一致`);
@@ -3855,7 +3992,10 @@ export class Core {
                                 strongCompose(
                                     wrapApply(
                                         wrapVar("trans2"),
-                                        wrapVar(motiveName),
+                                        twoPathFiberMotive(
+                                            motiveName,
+                                            path.resultIndices ?? []
+                                        ),
                                         pathTerm,
                                         endpointValue
                                     ),
@@ -3940,13 +4080,13 @@ export class Core {
                         .map(binder => binder.name);
                     offset += metadataTwoPathEntries.length;
                     offset += metadataThreePathEntries.length;
-                    if (binders.length !== offset + 1) {
+                    if (binders.length !== offset + indexCount + 1) {
                         throw new Error("二维 HIT 消去器 telescope 与 dependent 计算 metadata 不一致");
                     }
                     const prefixBinders = binders.slice(0, offset);
                     const prefixValues = prefixBinders.map(binder => wrapVar(binder.name));
                     let familyUniverse = normalizedMetadataAst(bundle.type[1]);
-                    for (let index = 0; index < parameters.length; index++) {
+                    for (let index = 0; index < parameters.length + indexCount; index++) {
                         if (familyUniverse.type !== "P" || !familyUniverse.nodes?.[1]) {
                             throw new Error(`二维 HIT ${metadata.typeName} 的 Universe telescope 不完整`);
                         }
@@ -3968,7 +4108,12 @@ export class Core {
                     );
                     const dependentHead = wrapApply(
                         wrapVar(eliminatorName),
-                        ...prefixValues.map(value => Core.clone(value))
+                        ...prefixValues.map(value => Core.clone(value)),
+                        ...(path.resultIndices ?? []).map(normalizedMetadataAst)
+                    );
+                    const motiveAtFiber = twoPathFiberMotive(
+                        motiveName,
+                        path.resultIndices ?? []
                     );
                     const expressionData = (
                         expression: EvaluatedOnePathExpression
@@ -4047,7 +4192,7 @@ export class Core {
                             type: strongEquality(
                                 wrapApply(
                                     wrapVar("trans"),
-                                    wrapVar(motiveName),
+                                    Core.clone(motiveAtFiber),
                                     Core.clone(expression.term),
                                     Core.clone(sourceValue)
                                 ),
@@ -4077,7 +4222,7 @@ export class Core {
                     );
                     const transport2Value = wrapApply(
                         wrapVar("trans2"),
-                        wrapVar(motiveName),
+                        Core.clone(motiveAtFiber),
                         Core.clone(pathTerm),
                         Core.clone(left.sourceValue)
                     );
@@ -4165,13 +4310,13 @@ export class Core {
                         .map(binder => binder.name);
                     offset += twoPathEntries.length;
                     offset += threePathEntries.length;
-                    if (recursorBinders.length !== offset + 1) {
+                    if (recursorBinders.length !== offset + indexCount + 1) {
                         throw new Error("二维 HIT 递归器 telescope 与高阶路径 metadata 不一致");
                     }
                     const prefixBinders = recursorBinders.slice(0, offset);
                     const prefixValues = prefixBinders.map(binder => wrapVar(binder.name));
                     let familyUniverse = normalizedMetadataAst(bundle.type[1]);
-                    for (let index = 0; index < parameters.length; index++) {
+                    for (let index = 0; index < parameters.length + indexCount; index++) {
                         if (familyUniverse.type !== "P" || !familyUniverse.nodes?.[1]) {
                             throw new Error(`二维 HIT ${metadata.typeName} 的 Universe telescope 不完整`);
                         }
@@ -4193,7 +4338,8 @@ export class Core {
                     );
                     const recursorHead = wrapApply(
                         wrapVar(recursorName),
-                        ...prefixValues.map(value => Core.clone(value))
+                        ...prefixValues.map(value => Core.clone(value)),
+                        ...(path.resultIndices ?? []).map(normalizedMetadataAst)
                     );
                     const endpointComputation = (endpoint: EvaluatedOnePathExpression): AST => {
                         if (endpoint.kind === "atom") {

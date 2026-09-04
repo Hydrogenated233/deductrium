@@ -188,7 +188,7 @@ hit FiberLoop [n : nat] : U
 - indexed hit1 复用普通索引归纳的 family、点构造子、递归子项索引和点 iota 骨架，但为每条路径独立推导所在纤维。左右端点必须形成同一 `H indices` 中的普通等式。
 - indexed hit1 的依赖 coherence 使用纤维特化的 motive `λx:H indices,C indices x`；生成的 `apd_`/`ap_` 命题也必须先把消去器或递归器特化到该纤维，不能把仍等待索引参数的函数直接传给 `apd`/`ap`。
 - Core 从 family、点构造子 `resultIndices`、路径端点和消去器 telescope 独立重建索引与 coherence，不信任 Sandbox 提供的派生索引或计算命题。
-- 本轮 indexed HIT 仅支持同纤维一阶路径。不同索引纤维之间的路径、indexed `path2`/`path3`、依赖于索引路径的 transport，以及函数型递归点参数出现在路径端点中的情形均明确拒绝。
+- indexed HIT 支持同纤维一阶路径和同纤维原子 `path2`。`path2` 两端必须是原子一阶路径表达式，索引与点边界由 Core 使用 NbE 定义相等独立认证；组合/逆 `path2`、indexed `path3`、跨索引 dependent path，以及函数型递归点参数出现在路径端点中的情形仍明确拒绝。
 
 ### 验收标准
 
@@ -227,9 +227,9 @@ hit FiberLoop [n : nat] : U
 - 提供沙盒包导入、导出、复制、禁用和清空功能。
 - 对不同版本生成的沙盒包执行兼容性迁移或明确拒绝加载。
 
-### 当前实现状态（2026-09-03）
+### 当前实现状态（2026-09-04）
 
-- 一阶 HIT 已支持同纤维 indexed family：点构造子沿用结构化 `resultIndices` 和递归子项索引，路径 lowering 会把 motive、消去器和递归器特化到端点所在纤维。不同纤维端点、indexed `path2`/`path3`、跨索引 dependent path 和函数型递归端点仍明确拒绝。
+- 一阶 HIT 已支持同纤维 indexed family：点构造子沿用结构化 `resultIndices` 和递归子项索引，路径 lowering 会把 motive、消去器和递归器特化到端点所在纤维。indexed 原子 `path2` 也已贯通 parser、lowerer、Core 独立认证、Worker/bridge 和证明助手分支；Core 会以 NbE 验证定义相等的索引与点边界。组合/逆 indexed `path2`、indexed `path3`、跨索引 dependent path 和函数型递归端点仍明确拒绝。
 - 二维 HIT 已完成结构解析、消去器 lowering、命题计算规则和 Core schema 认证。
 - 三维 `path3` 已支持原子二阶路径端点、使用 `▪` 的组合端点和 `inveq` 逆端点；统一参数、局部参数、递归组合边界和点边界都会被检查。三维是面向用户的最高维度，`path4` 及更高维仍明确拒绝。
 - 三维端点已支持受限的反身形式 `refl loop`：它只能引用当前 HIT 已声明的一阶路径构造子，并由 Core 重新注入统一参数、检查局部 telescope 和重建二阶边界。它不是任意二阶路径 AST，也不会放开 `refl face` 或四维端点。
