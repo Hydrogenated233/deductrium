@@ -303,23 +303,6 @@ assert.throws(
     "Core must reject genuinely different indexed path2 endpoint fibers"
 );
 
-for (const unsupported of [
-    "hit IndexedHit2Compose [n:nat] : U "
-        + "| p2d : Πn:nat,IndexedHit2Compose n "
-        + "| l2d : Πn:nat,p2d n=p2d n "
-        + "| path2 s2d : Πn:nat,(l2d n▪l2d n)=(l2d n▪l2d n)",
-    "hit IndexedHit2Inverse [n:nat] : U "
-        + "| p2e : Πn:nat,IndexedHit2Inverse n "
-        + "| l2e : Πn:nat,p2e n=p2e n "
-        + "| path2 s2e : Πn:nat,inveq (l2e n)=inveq (l2e n)"
-]) {
-    assert.throws(
-        () => parseSandboxHit(unsupported),
-        /索引.*原子|原子.*索引/i,
-        "indexed path2 composition/inverse must stay outside the first supported slice"
-    );
-}
-
 const indexedPath3Source =
     "hit IndexedHit3 [n : nat] : U "
     + "| point3 : Πn:nat,IndexedHit3 n "
