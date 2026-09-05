@@ -996,6 +996,16 @@ function decomposeConstructorType(
     constructorName: string,
     constructorIndex: number
 ) {
+    // Header indices describe the family, not an ambient constructor scope.
+    // A constructor must introduce any index variable it uses in its own
+    // telescope (for example `Pi n:nat, Vec n`). Accepting a free header
+    // index leaves an unbound name in the generated eliminator and produces
+    // a misleading later Core error.
+    rejectFreeHeaderIndexReferences(
+        type,
+        indices,
+        `索引归纳构造子 ${constructorName}`
+    );
     const arguments_: SandboxInductiveArgument[] = [];
     const usedNames = new Set([
         signatureName,
@@ -1058,6 +1068,24 @@ function decomposeConstructorType(
         }
     }
     return { arguments: arguments_, result, resultIndices };
+}
+
+/** Header indices are only family parameters; every constructor/path that
+ * uses one must bind it in its own telescope. */
+function rejectFreeHeaderIndexReferences(
+    type: AST,
+    indices: readonly SandboxInductiveBinder[],
+    owner: string
+) {
+    const freeNames = new Set(collectFreeNames(type));
+    for (const index of indices) {
+        if (freeNames.has(index.name)) {
+            throw new Error(
+                owner + " 不能直接引用声明头部索引 " + index.name
+                + "，请在构造子 telescope 中重新绑定"
+            );
+        }
+    }
 }
 
 /** Extract declaration-owned telescope names before the compact parser sees them. */
@@ -1384,12 +1412,7 @@ function elaborateHitTwoPathEndpoint(
             endpoint.nodes[1], signatureName, parameters, pointConstructors,
             pathConstructors, pathName, boundNames, budget, depth + 1
         );
-        if (!sameSandboxAst(left.targetPoint, right.sourcePoint)) {
-            throw new Error(`二阶路径构造子 ${pathName} 的组合端点中间点边界不一致`);
-        }
-        if (left.resultIndices.length !== right.resultIndices.length
-            || left.resultIndices.some((index, position) =>
-                !sameSandboxAst(index, right.resultIndices[position]))) {
+        if (left.resultIndices.length !== right.resultIndices.length) {
             throw new Error(`二阶路径构造子 ${pathName} 的组合端点索引纤维不一致`);
         }
         return {
@@ -1554,18 +1577,7 @@ function elaborateHitThreePathEndpoint(
             endpoint.nodes[1], signatureName, parameters, pathConstructors, twoPathConstructors,
             pathName, boundNames, budget, depth + 1
         );
-        if (!sameSandboxAst(left.targetPath, right.sourcePath)) {
-            throw new Error(
-                `三阶路径构造子 ${pathName} 的二阶路径组合边界不一致：`
-                + `${parser.stringify(left.targetPath)} != ${parser.stringify(right.sourcePath)}`
-            );
-        }
-        if (!sameSandboxAst(left.targetPoint, right.sourcePoint)) {
-            throw new Error(`三阶路径构造子 ${pathName} 的二阶路径组合点边界不一致`);
-        }
-        if (left.resultIndices.length !== right.resultIndices.length
-            || left.resultIndices.some((index, position) =>
-                !sameSandboxAst(index, right.resultIndices[position]))) {
+        if (left.resultIndices.length !== right.resultIndices.length) {
             throw new Error(`三阶路径构造子 ${pathName} 的二阶路径组合索引纤维不一致`);
         }
         return {
@@ -1591,8 +1603,8 @@ function elaborateHitThreePathEndpoint(
             term: sandboxApply(sandboxVar("inveq"), value.term),
             sourcePath: value.targetPath,
             targetPath: value.sourcePath,
-            sourcePoint: value.targetPoint,
-            targetPoint: value.sourcePoint,
+            sourcePoint: Core.clone(value.sourcePoint),
+            targetPoint: Core.clone(value.targetPoint),
             resultIndices: value.resultIndices.map(index => Core.clone(index))
         };
     }
@@ -1876,6 +1888,11 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
     for (const path of pathSections) {
         if (names.has(path.name)) throw new Error(`HIT 构造子名称冲突：${path.name}`);
         names.add(path.name);
+        rejectFreeHeaderIndexReferences(
+            path.type,
+            ordinary.indices,
+            `一阶路径构造子 ${path.name}`
+        );
         const { arguments: arguments_, body } = sandboxPathTelescope(path.type, path.name);
         if (body.type !== "=" || !body.nodes?.[0] || !body.nodes?.[1]) {
             throw new Error(`路径构造子 ${path.name} 必须以等式为结论`);
@@ -1922,6 +1939,11 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
     for (const path2 of twoPathSections) {
         if (names.has(path2.name)) throw new Error(`HIT 构造子名称冲突：${path2.name}`);
         names.add(path2.name);
+        rejectFreeHeaderIndexReferences(
+            path2.type,
+            ordinary.indices,
+            `二阶路径构造子 ${path2.name}`
+        );
         const { arguments: arguments_, body } = sandboxPathTelescope(path2.type, path2.name);
         if (body.type !== "=" || !body.nodes?.[0] || !body.nodes?.[1]) {
             throw new Error(`二阶路径构造子 ${path2.name} 必须以等式为结论`);
@@ -1946,11 +1968,6 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
             body.nodes[1], ordinary.name, ordinary.parameters, ordinary.constructors,
             pathConstructors, path2.name, endpointBoundNames
         );
-        if (!ordinary.indices.length
-            && (!sameSandboxAst(left.sourcePoint, right.sourcePoint)
-                || !sameSandboxAst(left.targetPoint, right.targetPoint))) {
-            throw new Error(`二阶路径构造子 ${path2.name} 的一阶路径端点不一致`);
-        }
         if (ordinary.indices.length) {
             if (left.resultIndices.length !== ordinary.indices.length
                 || right.resultIndices.length !== ordinary.indices.length) {
@@ -1978,6 +1995,11 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
     for (const path3 of threePathSections) {
         if (names.has(path3.name)) throw new Error(`HIT 构造子名称冲突：${path3.name}`);
         names.add(path3.name);
+        rejectFreeHeaderIndexReferences(
+            path3.type,
+            ordinary.indices,
+            `三阶路径构造子 ${path3.name}`
+        );
         const { arguments: arguments_, body } = sandboxPathTelescope(path3.type, path3.name);
         if (body.type !== "=" || !body.nodes?.[0] || !body.nodes?.[1]) {
             throw new Error(`三阶路径构造子 ${path3.name} 必须以等式为结论`);
@@ -2002,16 +2024,7 @@ export function parseSandboxHit(source: string): SandboxHitDeclaration {
             body.nodes[1], ordinary.name, ordinary.parameters,
             pathConstructors, twoPathConstructors, path3.name, endpointBoundNames
         );
-        if (!ordinary.indices.length) {
-            if (!sameSandboxAst(left.sourcePath, right.sourcePath)
-                || !sameSandboxAst(left.targetPath, right.targetPath)) {
-                throw new Error(`三阶路径构造子 ${path3.name} 的二阶路径边界不一致`);
-            }
-            if (!sameSandboxAst(left.sourcePoint, right.sourcePoint)
-                || !sameSandboxAst(left.targetPoint, right.targetPoint)) {
-                throw new Error(`三阶路径构造子 ${path3.name} 的一阶路径边界不一致`);
-            }
-        } else {
+        if (ordinary.indices.length) {
             if (left.resultIndices.length !== ordinary.indices.length
                 || right.resultIndices.length !== ordinary.indices.length) {
                 throw new Error(`索引 HIT 三阶路径构造子 ${path3.name} 的端点索引纤维不一致`);
@@ -2169,7 +2182,10 @@ function sandboxRecursiveCall(
 }
 
 /** Lower a validated ordinary signature to Core's trusted system bundle. */
-export function lowerSandboxInductive(signature: SandboxInductiveDeclaration): SandboxInductiveBundle {
+export function lowerSandboxInductive(
+    signature: SandboxInductiveDeclaration,
+    additionalReservedNames: readonly string[] = []
+): SandboxInductiveBundle {
     const typeName = signature.name;
     const parameterVars = signature.parameters.map(parameter => sandboxVar(parameter.name));
     const indexVars = signature.indices.map(index => sandboxVar(index.name));
@@ -2177,9 +2193,14 @@ export function lowerSandboxInductive(signature: SandboxInductiveDeclaration): S
     const constructorEntries: [string, AST][] = [];
     const metadataConstructors: SandboxInductiveMetadata["constructors"] = [];
     const generatedScope = new Set([
+        signature.name,
         ...signature.parameters.map(parameter => parameter.name),
         ...signature.indices.map(index => index.name),
-        ...signature.constructors.flatMap(constructor => constructor.argumentAsts.map(argument => argument.name))
+        ...signature.constructors.map(constructor => constructor.name),
+        ...signature.constructors.flatMap(constructor =>
+            constructor.argumentAsts.map(argument => argument.name)
+        ),
+        ...additionalReservedNames
     ]);
     const motiveName = sandboxFreshName("C", generatedScope);
     const motiveUniverseName = sandboxFreshName("u", generatedScope);
@@ -2755,9 +2776,6 @@ function sandboxHitOnePathExpressionData(
         const right = sandboxHitOnePathExpressionData(
             expression.right, parameters, pointConstructors, pathConstructors, owner
         );
-        if (!sameSandboxAst(left.targetPoint, right.sourcePoint)) {
-            throw new Error(`二维 HIT 一阶路径表达式 ${owner} 的组合中间点边界不一致`);
-        }
         return {
             term: sandboxCompose(left.term, right.term),
             sourcePoint: left.sourcePoint,
@@ -3730,7 +3748,12 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         universeAst: signature.universeAst,
         constructors: signature.pointConstructors
     };
-    const base = lowerSandboxInductive(ordinary);
+    const hitConstructorNames = [
+        ...pathConstructors.map(path => path.name),
+        ...twoPathConstructors.map(path => path.name),
+        ...threePathConstructors.map(path => path.name)
+    ];
+    const base = lowerSandboxInductive(ordinary, hitConstructorNames);
     const fullEliminatorEntry = base.auxiliaryTypes?.find(([name]) => name === `@ind_${signature.name}`);
     const fullRecursorEntry = base.auxiliaryTypes?.find(([name]) => name === `@rec_${signature.name}`);
     if (!fullEliminatorEntry || !fullRecursorEntry || !base.eliminator || !base.recursor) {
@@ -3935,10 +3958,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             const right = dependentOnePathExpressionMethod(
                 expression.right, owner, motive, domainType, motiveUniverseLevel
             );
-            if (!sameSandboxAst(left.targetPoint, right.sourcePoint)) {
-                throw new Error(`二维 HIT 一阶路径表达式 ${owner} 的组合中间点边界不一致`);
-            }
-            return {
+            const result = {
                 term: sandboxCompose(left.term, right.term),
                 sourcePoint: left.sourcePoint,
                 targetPoint: right.targetPoint,
@@ -3958,12 +3978,13 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                         right.method
                     )
             };
+            return result;
         }
         if (expression.kind === "inverse") {
             const value = dependentOnePathExpressionMethod(
                 expression.value, owner, motive, domainType, motiveUniverseLevel
             );
-            return {
+            const result = {
                 term: sandboxApply(sandboxVar("inveq"), value.term),
                 sourcePoint: value.targetPoint,
                 targetPoint: value.sourcePoint,
@@ -3981,6 +4002,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                         value.method
                     )
             };
+            return result;
         }
         if (expression.kind === "refl") {
             const data = sandboxHitReflPointExpressionData(
@@ -3989,7 +4011,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             const pointValue = sandboxHitBranchValue(
                 data.pointTerm, signature.parameters, signature.pointConstructors, branchNames
             );
-            return {
+            const result = {
                 term: sandboxApply(sandboxVar("refl"), data.pointTerm),
                 sourcePoint: Core.clone(data.pointTerm),
                 targetPoint: Core.clone(data.pointTerm),
@@ -3997,6 +4019,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 targetValue: Core.clone(pointValue),
                 method: sandboxApply(sandboxVar("refl"), pointValue)
             };
+            return result;
         }
         const data = sandboxHitOnePathExpressionData(
             expression, signature.parameters, signature.pointConstructors, pathConstructors, owner
@@ -4010,7 +4033,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         const targetValue = sandboxHitBranchValue(
             data.targetPoint, signature.parameters, signature.pointConstructors, branchNames
         );
-        return {
+        const result = {
             term: data.term,
             sourcePoint: data.sourcePoint,
             targetPoint: data.targetPoint,
@@ -4021,6 +4044,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 ...data.arguments_.map(argument => Core.clone(argument))
             )
         };
+        return result;
     };
 
     const dependentTwoPathBinders: SandboxInductiveBinder[] = [];
@@ -4036,10 +4060,12 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         );
         const fiberHitType = sandboxHitFiberType(signature, path.resultIndices);
         const leftDependent = dependentOnePathExpressionMethod(
-            path.leftExpression, path.name, fiberMotive, fiberHitType
+            path.leftExpression, path.name, fiberMotive, fiberHitType,
+            sandboxVar("@0")
         );
         const rightDependent = dependentOnePathExpressionMethod(
-            path.rightExpression, path.name, fiberMotive, fiberHitType
+            path.rightExpression, path.name, fiberMotive, fiberHitType,
+            sandboxVar("@0")
         );
         const fullLeftDependent = dependentOnePathExpressionMethod(
             path.leftExpression, path.name, fiberMotive, fiberHitType,
@@ -4123,60 +4149,168 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
     }
 
     const dependentThreePathBinders: SandboxInductiveBinder[] = [];
+    const fullDependentThreePathBinders: SandboxInductiveBinder[] = [];
     const recursorThreePathBinders: SandboxInductiveBinder[] = [];
+    const dependentTwoPathExpressionIncludesRefl = (
+        expression: SandboxHitTwoPathExpression,
+        depth = 0
+    ): boolean => {
+        if (depth > SANDBOX_HIT_ONE_PATH_EXPRESSION_MAX_DEPTH) {
+            throw new Error("三维 HIT 二阶路径表达式嵌套过深");
+        }
+        if (expression.kind === "compose") {
+            return dependentTwoPathExpressionIncludesRefl(expression.left, depth + 1)
+                || dependentTwoPathExpressionIncludesRefl(expression.right, depth + 1);
+        }
+        if (expression.kind === "inverse") {
+            return dependentTwoPathExpressionIncludesRefl(expression.value, depth + 1);
+        }
+        if (expression.kind === "refl") return false;
+        const path = twoPathConstructors.find(candidate => candidate.name === expression.name);
+        if (!path) return false;
+        return sandboxHitOnePathExpressionIncludesRefl(path.leftExpression)
+            || sandboxHitOnePathExpressionIncludesRefl(path.rightExpression);
+    };
+    type DependentTwoPathExpressionValue = {
+        term: AST;
+        sourcePath: AST;
+        targetPath: AST;
+        sourcePoint: AST;
+        targetPoint: AST;
+        sourceMethod: AST;
+        targetMethod: AST;
+        sourceValue: AST;
+        targetValue: AST;
+        proof: AST;
+    };
+    const explicitDependentTwoPathCompose = (
+        motiveUniverseLevel: AST,
+        domainType: AST,
+        source: DependentTwoPathExpressionValue,
+        right: DependentTwoPathExpressionValue,
+        motive: AST
+    ) => sandboxApply(
+        sandboxVar("@hit_dep2_comp"),
+        Core.clone(hitUniverseLevel),
+        Core.clone(motiveUniverseLevel),
+        Core.clone(domainType),
+        Core.clone(source.sourcePoint),
+        Core.clone(source.targetPoint),
+        Core.clone(source.sourcePath),
+        Core.clone(source.targetPath),
+        Core.clone(right.targetPath),
+        Core.clone(motive),
+        Core.clone(source.sourceValue),
+        Core.clone(source.targetValue),
+        Core.clone(source.sourceMethod),
+        Core.clone(source.targetMethod),
+        Core.clone(right.targetMethod),
+        Core.clone(source.term),
+        Core.clone(right.term),
+        Core.clone(source.proof),
+        Core.clone(right.proof)
+    );
+    const explicitDependentTwoPathInverse = (
+        motiveUniverseLevel: AST,
+        domainType: AST,
+        value: DependentTwoPathExpressionValue,
+        motive: AST
+    ) => sandboxApply(
+        sandboxVar("@hit_dep2_inv"),
+        Core.clone(hitUniverseLevel),
+        Core.clone(motiveUniverseLevel),
+        Core.clone(domainType),
+        Core.clone(value.sourcePoint),
+        Core.clone(value.targetPoint),
+        Core.clone(value.sourcePath),
+        Core.clone(value.targetPath),
+        Core.clone(motive),
+        Core.clone(value.sourceValue),
+        Core.clone(value.targetValue),
+        Core.clone(value.sourceMethod),
+        Core.clone(value.targetMethod),
+        Core.clone(value.term),
+        Core.clone(value.proof)
+    );
     const dependentTwoPathExpressionMethod = (
         expression: SandboxHitTwoPathExpression,
         owner: string,
         sourceValue: AST,
         targetValue: AST,
         fiberMotive: AST,
-        fiberHitType: AST
-    ): { term: AST; sourceMethod: AST; targetMethod: AST; proof: AST } => {
+        fiberHitType: AST,
+        motiveUniverseLevel: AST = sandboxVar("@0")
+    ): DependentTwoPathExpressionValue => {
         if (expression.kind === "compose") {
             const left = dependentTwoPathExpressionMethod(
-                expression.left, owner, sourceValue, targetValue, fiberMotive, fiberHitType
+                expression.left, owner, sourceValue, targetValue, fiberMotive, fiberHitType,
+                motiveUniverseLevel
             );
             const right = dependentTwoPathExpressionMethod(
-                expression.right, owner, sourceValue, targetValue, fiberMotive, fiberHitType
+                expression.right, owner, sourceValue, targetValue, fiberMotive, fiberHitType,
+                motiveUniverseLevel
             );
-            return {
+            const result = {
                 term: sandboxCompose(left.term, right.term),
+                sourcePath: left.sourcePath,
+                targetPath: right.targetPath,
+                sourcePoint: left.sourcePoint,
+                targetPoint: right.targetPoint,
                 sourceMethod: left.sourceMethod,
                 targetMethod: right.targetMethod,
-                proof: sandboxApply(
-                    sandboxVar("hit_dep2_comp"),
-                    Core.clone(fiberMotive),
-                    Core.clone(sourceValue),
-                    Core.clone(targetValue),
-                    left.sourceMethod,
-                    left.targetMethod,
-                    right.targetMethod,
-                    left.term,
-                    right.term,
-                    left.proof,
-                    right.proof
-                )
+                sourceValue: left.sourceValue,
+                targetValue: right.targetValue,
+                proof: dependentTwoPathExpressionIncludesRefl(expression)
+                    ? explicitDependentTwoPathCompose(
+                        motiveUniverseLevel, fiberHitType, left, right, fiberMotive
+                    )
+                    : sandboxApply(
+                        sandboxVar("hit_dep2_comp"),
+                        Core.clone(fiberMotive),
+                        Core.clone(sourceValue),
+                        Core.clone(targetValue),
+                        left.sourceMethod,
+                        left.targetMethod,
+                        right.targetMethod,
+                        left.term,
+                        right.term,
+                        left.proof,
+                        right.proof
+                    )
             };
+            return result;
         }
         if (expression.kind === "inverse") {
             const value = dependentTwoPathExpressionMethod(
-                expression.value, owner, sourceValue, targetValue, fiberMotive, fiberHitType
+                expression.value, owner, sourceValue, targetValue, fiberMotive, fiberHitType,
+                motiveUniverseLevel
             );
-            return {
+            const result = {
                 term: sandboxApply(sandboxVar("inveq"), value.term),
+                sourcePath: value.targetPath,
+                targetPath: value.sourcePath,
+                sourcePoint: Core.clone(value.sourcePoint),
+                targetPoint: Core.clone(value.targetPoint),
                 sourceMethod: value.targetMethod,
                 targetMethod: value.sourceMethod,
-                proof: sandboxApply(
-                    sandboxVar("hit_dep2_inv"),
-                    Core.clone(fiberMotive),
-                    Core.clone(sourceValue),
-                    Core.clone(targetValue),
-                    value.sourceMethod,
-                    value.targetMethod,
-                    value.term,
-                    value.proof
-                )
+                sourceValue: Core.clone(value.sourceValue),
+                targetValue: Core.clone(value.targetValue),
+                proof: dependentTwoPathExpressionIncludesRefl(expression)
+                    ? explicitDependentTwoPathInverse(
+                        motiveUniverseLevel, fiberHitType, value, fiberMotive
+                    )
+                    : sandboxApply(
+                        sandboxVar("hit_dep2_inv"),
+                        Core.clone(fiberMotive),
+                        Core.clone(sourceValue),
+                        Core.clone(targetValue),
+                        value.sourceMethod,
+                        value.targetMethod,
+                        value.term,
+                        value.proof
+                    )
             };
+            return result;
         }
         if (expression.kind === "refl") {
             const data = sandboxHitReflExpressionPathData(
@@ -4186,12 +4320,19 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 sandboxVar(pathMethodNames[data.pathIndex]),
                 ...data.arguments_
             );
-            return {
+            const result = {
                 term: sandboxApply(sandboxVar("refl"), data.pathTerm),
+                sourcePath: Core.clone(data.pathTerm),
+                targetPath: Core.clone(data.pathTerm),
+                sourcePoint: Core.clone(data.path.left),
+                targetPoint: Core.clone(data.path.right),
                 sourceMethod: Core.clone(method),
                 targetMethod: Core.clone(method),
+                sourceValue: Core.clone(sourceValue),
+                targetValue: Core.clone(targetValue),
                 proof: sandboxApply(sandboxVar("refl"), method)
             };
+            return result;
         }
         const pathIndex = twoPathConstructors.findIndex(path => path.name === expression.name);
         if (pathIndex < 0) throw new Error(`未知的三维 HIT 二阶路径端点：${expression.name || owner}`);
@@ -4209,22 +4350,29 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             ast => substituteSandboxFreeVars(ast, replacements)
         );
         const source = dependentOnePathExpressionMethod(
-            sourceExpression, owner, fiberMotive, fiberHitType
+            sourceExpression, owner, fiberMotive, fiberHitType, motiveUniverseLevel
         );
         const target = dependentOnePathExpressionMethod(
-            targetExpression, owner, fiberMotive, fiberHitType
+            targetExpression, owner, fiberMotive, fiberHitType, motiveUniverseLevel
         );
-        return {
+        const result = {
             term: sandboxHitTwoPathExpressionTerm(
                 expression, signature.parameters, pathConstructors, twoPathConstructors, owner
             ),
+            sourcePath: source.term,
+            targetPath: target.term,
+            sourcePoint: source.sourcePoint,
+            targetPoint: target.targetPoint,
             sourceMethod: source.method,
             targetMethod: target.method,
+            sourceValue,
+            targetValue,
             proof: sandboxApply(
                 sandboxVar(dependentTwoPathMethodNames[pathIndex]),
                 ...expression.arguments.map(argument => Core.clone(argument))
             )
         };
+        return result;
     };
     for (let index = 0; index < threePathConstructors.length; index++) {
         const path = threePathConstructors[index];
@@ -4240,11 +4388,19 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         );
         const leftDependentExpression = dependentTwoPathExpressionMethod(
             path.leftExpression, path.name, sourceValue, targetValue,
-            fiberMotive, fiberHitType
+            fiberMotive, fiberHitType, sandboxVar("@0")
         );
         const rightDependentExpression = dependentTwoPathExpressionMethod(
             path.rightExpression, path.name, sourceValue, targetValue,
-            fiberMotive, fiberHitType
+            fiberMotive, fiberHitType, sandboxVar("@0")
+        );
+        const fullLeftDependentExpression = dependentTwoPathExpressionMethod(
+            path.leftExpression, path.name, sourceValue, targetValue,
+            fiberMotive, fiberHitType, sandboxVar(motiveUniverseName)
+        );
+        const fullRightDependentExpression = dependentTwoPathExpressionMethod(
+            path.rightExpression, path.name, sourceValue, targetValue,
+            fiberMotive, fiberHitType, sandboxVar(motiveUniverseName)
         );
         const leftMethod = leftDependentExpression.proof;
         const rightMethod = rightDependentExpression.proof;
@@ -4290,6 +4446,33 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             type: dependentType,
             typeSource: parser.stringify(dependentType)
         });
+        const fullPathValue = sandboxVar(pathValueName);
+        const fullCoherenceFamily = sandboxLambda(
+            pathValueName,
+            sandboxEquality(Core.clone(path.sourcePath), Core.clone(path.targetPath)),
+            sandboxEquality(
+                fullLeftDependentExpression.sourceMethod,
+                sandboxCompose(
+                    sandboxApply(
+                        sandboxVar("trans2"),
+                        Core.clone(fiberMotive),
+                        fullPathValue,
+                        Core.clone(sourceValue)
+                    ),
+                    fullLeftDependentExpression.targetMethod
+                )
+            )
+        );
+        const fullDependentType = sandboxWrapPis(path.arguments, sandboxEquality(
+            sandboxApply(sandboxVar("trans"), fullCoherenceFamily, pathTerm,
+                fullLeftDependentExpression.proof),
+            fullRightDependentExpression.proof
+        ));
+        fullDependentThreePathBinders.push({
+            name: dependentThreePathMethodNames[index],
+            type: fullDependentType,
+            typeSource: parser.stringify(fullDependentType)
+        });
 
         const leftRecursorMethod = sandboxHitTwoPathExpressionMethodValue(
             path.leftExpression,
@@ -4328,7 +4511,7 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
     const allFullDependentPathBinders = [
         ...dependentPathBinders,
         ...fullDependentTwoPathBinders,
-        ...dependentThreePathBinders
+        ...fullDependentThreePathBinders
     ];
     const allRecursorPathBinders = [
         ...recursorPathBinders,
@@ -5602,8 +5785,18 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             path.rightExpression, path.name, endpointValue, targetEndpointValue,
             fiberMotive, fiberHitType
         );
+        const fullLeftDependentExpression = dependentTwoPathExpressionMethod(
+            path.leftExpression, path.name, endpointValue, targetEndpointValue,
+            fiberMotive, fiberHitType, sandboxVar(motiveUniverseName)
+        );
+        const fullRightDependentExpression = dependentTwoPathExpressionMethod(
+            path.rightExpression, path.name, endpointValue, targetEndpointValue,
+            fiberMotive, fiberHitType, sandboxVar(motiveUniverseName)
+        );
         const leftDependentTwoPathMethod = leftDependentExpression.proof;
         const rightDependentTwoPathMethod = rightDependentExpression.proof;
+        const fullLeftDependentTwoPathMethod = fullLeftDependentExpression.proof;
+        const fullRightDependentTwoPathMethod = fullRightDependentExpression.proof;
         const makeDependentTwoPathComputation = (
             expression: SandboxHitTwoPathExpression,
             head: AST,
@@ -5622,19 +5815,49 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             if (expression.kind === "compose") {
                 const left = makeDependentTwoPathComputation(expression.left, head, full);
                 const right = makeDependentTwoPathComputation(expression.right, head, full);
-                const method = sandboxApply(
-                    sandboxVar("hit_dep2_comp"),
-                    Core.clone(fiberMotive),
-                    Core.clone(endpointValue),
-                    Core.clone(targetEndpointValue),
-                    Core.clone(left.sourceMethod),
-                    Core.clone(left.targetMethod),
-                    Core.clone(right.targetMethod),
-                    Core.clone(left.term),
-                    Core.clone(right.term),
-                    Core.clone(left.method),
-                    Core.clone(right.method)
-                );
+                const method = dependentTwoPathExpressionIncludesRefl(expression)
+                    ? explicitDependentTwoPathCompose(
+                        full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
+                        fiberHitType,
+                        {
+                            term: left.term,
+                            sourcePath: left.sourcePath,
+                            targetPath: left.targetPath,
+                            sourcePoint: path.sourcePoint,
+                            targetPoint: path.targetPoint,
+                            sourceMethod: left.sourceMethod,
+                            targetMethod: left.targetMethod,
+                            sourceValue: endpointValue,
+                            targetValue: targetEndpointValue,
+                            proof: left.method
+                        },
+                        {
+                            term: right.term,
+                            sourcePath: right.sourcePath,
+                            targetPath: right.targetPath,
+                            sourcePoint: path.sourcePoint,
+                            targetPoint: path.targetPoint,
+                            sourceMethod: right.sourceMethod,
+                            targetMethod: right.targetMethod,
+                            sourceValue: endpointValue,
+                            targetValue: targetEndpointValue,
+                            proof: right.method
+                        },
+                        fiberMotive
+                    )
+                    : sandboxApply(
+                        sandboxVar("hit_dep2_comp"),
+                        Core.clone(fiberMotive),
+                        Core.clone(endpointValue),
+                        Core.clone(targetEndpointValue),
+                        Core.clone(left.sourceMethod),
+                        Core.clone(left.targetMethod),
+                        Core.clone(right.targetMethod),
+                        Core.clone(left.term),
+                        Core.clone(right.term),
+                        Core.clone(left.method),
+                        Core.clone(right.method)
+                    );
                 return {
                     term: sandboxCompose(left.term, right.term),
                     sourcePath: left.sourcePath,
@@ -5673,16 +5896,34 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             }
             if (expression.kind === "inverse") {
                 const value = makeDependentTwoPathComputation(expression.value, head, full);
-                const method = sandboxApply(
-                    sandboxVar("hit_dep2_inv"),
-                    Core.clone(fiberMotive),
-                    Core.clone(endpointValue),
-                    Core.clone(targetEndpointValue),
-                    Core.clone(value.sourceMethod),
-                    Core.clone(value.targetMethod),
-                    Core.clone(value.term),
-                    Core.clone(value.method)
-                );
+                const method = dependentTwoPathExpressionIncludesRefl(expression)
+                    ? explicitDependentTwoPathInverse(
+                        full ? sandboxVar(motiveUniverseName) : sandboxVar("@0"),
+                        fiberHitType,
+                        {
+                            term: value.term,
+                            sourcePath: value.sourcePath,
+                            targetPath: value.targetPath,
+                            sourcePoint: path.sourcePoint,
+                            targetPoint: path.targetPoint,
+                            sourceMethod: value.sourceMethod,
+                            targetMethod: value.targetMethod,
+                            sourceValue: endpointValue,
+                            targetValue: targetEndpointValue,
+                            proof: value.method
+                        },
+                        fiberMotive
+                    )
+                    : sandboxApply(
+                        sandboxVar("hit_dep2_inv"),
+                        Core.clone(fiberMotive),
+                        Core.clone(endpointValue),
+                        Core.clone(targetEndpointValue),
+                        Core.clone(value.sourceMethod),
+                        Core.clone(value.targetMethod),
+                        Core.clone(value.term),
+                        Core.clone(value.method)
+                    );
                 return {
                     term: sandboxApply(sandboxVar("inveq"), value.term),
                     sourcePath: value.targetPath,
@@ -5836,6 +6077,9 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
         const dependentTargetPathName = sandboxFreshName(
             "dependentTargetPathValue", dependentCorrectionScope
         );
+        const dependentCorrectedValueName = sandboxFreshName(
+            "dependentCorrectedValue", dependentCorrectionScope
+        );
         const dependentTwoPathDomain = sandboxEquality(
             Core.clone(sourcePath.term),
             Core.clone(targetPath.term)
@@ -5935,8 +6179,8 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
             Core.clone(leftTwoPathTerm),
             Core.clone(rightTwoPathTerm),
             Core.clone(pathTerm),
-            Core.clone(leftDependentTwoPathMethod),
-            Core.clone(rightDependentTwoPathMethod),
+            Core.clone(fullLeftDependentTwoPathMethod),
+            Core.clone(fullRightDependentTwoPathMethod),
             Core.clone(dependentMethodValue)
         );
         const publicActualFamily = sandboxLambda(
@@ -5957,19 +6201,16 @@ export function lowerSandboxHit(signature: SandboxHitDeclaration): SandboxInduct
                 actualFamily === publicActualFamily ? dependentHead : fullDependentHead,
                 Core.clone(leftTwoPathTerm)
             );
-            const valueName = sandboxFreshName(
-                "dependentCorrectedValue", dependentCorrectionScope
-            );
             return sandboxApply(
                 sandboxVar("ap"),
                 sandboxLambda(
-                    valueName,
+                    dependentCorrectedValueName,
                     leftActualType,
                     sandboxApply(
                         sandboxVar("trans"),
                         Core.clone(actualFamily),
                         Core.clone(pathTerm),
-                        sandboxVar(valueName)
+                        sandboxVar(dependentCorrectedValueName)
                     )
                 ),
                 leftComputation
@@ -6924,6 +7165,8 @@ export class SandboxEnvironment {
     private axiomTypes = new Map<string, AST>();
     /** Checked source bodies used for the read-only creative bridge. */
     private definitionBodies = new Map<string, AST>();
+    /** The exact bundles admitted by Core, reused by bridge publication. */
+    private inductiveBundles = new Map<string, SandboxInductiveBundle>();
     private nextId = 1;
     private nextFolderId = 1;
     private dirtyFrom = 0;
@@ -6973,13 +7216,29 @@ export class SandboxEnvironment {
         const config = {
             unlockedTypes: [...this.systemRuleIds],
             inferDisplayMode: "_" as const,
-            semanticResourceScale: this.semanticResourceScale ?? 1
+            semanticResourceScale: this.semanticResourceScale ?? 1,
+            isolatedTimeout: this.validationBudget.timeoutMs
         };
-        // Keep the process-wide Core.timeout untouched. The sandbox timeout
-        // is enforced by validate() at declaration boundaries, so constructing
-        // a bounded sandbox cannot leak its setting into the game Core.
+        // The sandbox Core receives an instance-local timeout. Browser
+        // validation can therefore use its own long-running Worker budget
+        // without changing the game/proof-assistant timeout.
         engine.configure(config);
         return engine;
+    }
+
+    private withRemainingCoreBudget<T>(
+        engine: TTCoreEngine,
+        budget: SandboxValidationBudget,
+        started: number,
+        callback: () => T
+    ): T {
+        if (budget.timeoutMs === undefined) return callback();
+        const remaining = Math.max(0, budget.timeoutMs - (performance.now() - started));
+        return engine.core.withTimeoutBudget(
+            remaining,
+            Date.now() + remaining,
+            callback
+        );
     }
 
     add(source: string) {
@@ -7254,7 +7513,13 @@ export class SandboxEnvironment {
                 this.validatedThrough,
                 orderedDeclarations.length
             );
-            this.replayValidatedPrefix(orderedDeclarations, prefixLength, layout);
+            this.replayValidatedPrefix(
+                orderedDeclarations,
+                prefixLength,
+                layout,
+                budget,
+                started
+            );
             this.validatedThrough = prefixLength;
             replayedDeclarations = prefixLength;
         }
@@ -7415,70 +7680,70 @@ export class SandboxEnvironment {
             }
 
             try {
-                if (parsed.hit) {
-                    const bundle = lowerSandboxHit(parsed.hit);
-                    this.engine.core.registerSystemInductive(bundle);
-                    declaration.generatedNames = [...bundle.generatedNames];
-                } else if (parsed.inductive) {
-                    const bundle = lowerSandboxInductive(parsed.inductive);
-                    this.engine.core.registerSystemInductive(bundle);
-                    declaration.generatedNames = [...bundle.generatedNames];
-                } else if (parsed.definitionAst) {
-                    // Validate the source (including an optional type
-                    // ascription) before installing its transparent body. The
-                    // check is performed in the same Core so subsequent
-                    // declarations can depend on this definition, while the
-                    // explicit cleanup keeps a failed registration from
-                    // leaving a stale system entry behind.
-                    const definitionAst: AST = {
-                        type: ":=",
-                        name: "",
-                        nodes: [
-                            { type: "var", name: declaration.name, nodes: [] },
-                            parsed.typeAst
-                                ? {
-                                    type: ":",
-                                    name: "",
-                                    nodes: [
-                                        Core.clone(parsed.definitionAst),
-                                        Core.clone(parsed.typeAst)
-                                    ]
-                                }
-                                : Core.clone(parsed.definitionAst)
-                        ]
-                    };
-                    const checked = this.engine.core.checkDefinition(definitionAst, []);
-                    const body = checked.filledDefinition.type === ":"
-                        ? checked.filledDefinition.nodes?.[0]
-                        : checked.filledDefinition;
-                    if (!body) throw new Error("定义体为空");
-                    try {
-                        this.engine.core.registerSystemDefinition(
+                this.withRemainingCoreBudget(this.engine, budget, started, () => {
+                    if (parsed.hit) {
+                        const bundle = lowerSandboxHit(parsed.hit);
+                        this.engine.core.registerSystemInductive(bundle);
+                        this.inductiveBundles.set(declaration.name, bundle);
+                        declaration.generatedNames = [...bundle.generatedNames];
+                    } else if (parsed.inductive) {
+                        const bundle = lowerSandboxInductive(parsed.inductive);
+                        this.engine.core.registerSystemInductive(bundle);
+                        this.inductiveBundles.set(declaration.name, bundle);
+                        declaration.generatedNames = [...bundle.generatedNames];
+                    } else if (parsed.definitionAst) {
+                        // Validate the source (including an optional type
+                        // ascription) before installing its transparent body.
+                        const definitionAst: AST = {
+                            type: ":=",
+                            name: "",
+                            nodes: [
+                                { type: "var", name: declaration.name, nodes: [] },
+                                parsed.typeAst
+                                    ? {
+                                        type: ":",
+                                        name: "",
+                                        nodes: [
+                                            Core.clone(parsed.definitionAst),
+                                            Core.clone(parsed.typeAst)
+                                        ]
+                                    }
+                                    : Core.clone(parsed.definitionAst)
+                            ]
+                        };
+                        const checked = this.engine.core.checkDefinition(definitionAst, []);
+                        const body = checked.filledDefinition.type === ":"
+                            ? checked.filledDefinition.nodes?.[0]
+                            : checked.filledDefinition;
+                        if (!body) throw new Error("定义体为空");
+                        try {
+                            this.engine.core.registerSystemDefinition(
+                                declaration.name,
+                                Core.clone(body)
+                            );
+                        } catch (error) {
+                            this.engine.core.setSystemDefinition(declaration.name);
+                            this.engine.core.clearDefinitionCache(declaration.name);
+                            throw error;
+                        }
+                        const inferredType = parsed.typeAst
+                            ?? this.engine.core.state.defTypes[declaration.name]?.type
+                            ?? definitionAst.checked;
+                        if (inferredType) {
+                            declaration.typeSource = parser.stringify(inferredType);
+                            declaration.kind = "definition";
+                        }
+                        this.definitionBodies.set(
                             declaration.name,
                             Core.clone(body)
                         );
-                    } catch (error) {
-                        this.engine.core.setSystemDefinition(declaration.name);
-                        this.engine.core.clearDefinitionCache(declaration.name);
-                        throw error;
+                    } else {
+                        const type = this.engine.core.checkTypeFormation(parsed.typeAst, []);
+                        this.engine.core.setSystemType(declaration.name, Core.clone(type));
+                        this.engine.core.syncSemanticTypes();
+                        this.axiomTypes.set(declaration.name, Core.clone(type));
                     }
-                    const inferredType = parsed.typeAst
-                        ?? this.engine.core.state.defTypes[declaration.name]?.type
-                        ?? definitionAst.checked;
-                    if (inferredType) {
-                        declaration.typeSource = parser.stringify(inferredType);
-                        declaration.kind = "definition";
-                    }
-                    this.definitionBodies.set(
-                        declaration.name,
-                        Core.clone(body)
-                    );
-                } else {
-                    const type = this.engine.core.checkTypeFormation(parsed.typeAst, []);
-                    this.engine.core.setSystemType(declaration.name, Core.clone(type));
-                    this.engine.core.syncSemanticTypes();
-                    this.axiomTypes.set(declaration.name, Core.clone(type));
-                }
+                });
                 declaration.status = "valid";
             } catch (error) {
                 this.definitionBodies.delete(declaration.name);
@@ -7505,11 +7770,16 @@ export class SandboxEnvironment {
             validatedThrough: this.validatedThrough
         };
         const validationCache = this.buildValidationCache();
+        const incomplete = this.declarations.some(declaration =>
+            declaration.enabled && declaration.status === "unchecked"
+        );
+        const validationError = firstError
+            ?? (incomplete ? "沙盒声明未完成校验（存档中的声明或顺序无效）" : undefined);
         return {
-            ok: !this.declarations.some(declaration => declaration.status === "invalid"),
+            ok: !validationError,
             declarations: this.getDeclarations(),
-            error: firstError,
-            status: firstError ? "invalid" : "ok",
+            error: validationError,
+            status: validationError ? "invalid" : "ok",
             bridge: this.bridge(),
             validationStats: { ...this.lastValidationStats },
             validationCache
@@ -7552,17 +7822,19 @@ export class SandboxEnvironment {
             const state = layout.get(declaration.id);
             if (!declaration.enabled || declaration.status !== "valid" || state?.disabled) continue;
             if (declaration.hit) {
-                try {
-                    inductives.push(lowerSandboxHit(declaration.hit));
+                const bundle = this.inductiveBundles.get(declaration.name);
+                if (bundle) {
+                    inductives.push(structuredClone(bundle));
                     order.push({ kind: "inductive", name: declaration.name });
-                } catch { }
+                }
                 continue;
             }
             if (declaration.inductive) {
-                try {
-                    inductives.push(lowerSandboxInductive(declaration.inductive));
+                const bundle = this.inductiveBundles.get(declaration.name);
+                if (bundle) {
+                    inductives.push(structuredClone(bundle));
                     order.push({ kind: "inductive", name: declaration.name });
-                } catch { }
+                }
                 continue;
             }
             try {
@@ -7989,6 +8261,7 @@ export class SandboxEnvironment {
         const nextEngine = this.createEngine();
         const nextAxiomTypes = new Map<string, AST>();
         const nextBodies = new Map<string, AST>();
+        const nextBundles = new Map<string, SandboxInductiveBundle>();
         const patches: { target: SandboxDeclaration; value: SandboxDeclaration }[] = [];
         const statusByName = new Map<string, SandboxDeclarationStatus>();
 
@@ -8065,41 +8338,45 @@ export class SandboxEnvironment {
                     }
 
                     const artifact = entry.artifact!;
-                    if (parsed.hit) {
-                        if (artifact.kind !== "hit") throw new Error("沙盒 HIT 缓存格式不匹配");
-                        const bundle = lowerSandboxHit(parsed.hit);
-                        nextEngine.core.registerSystemInductive(bundle);
-                        restored.generatedNames = [...bundle.generatedNames];
-                    } else if (parsed.inductive) {
-                        if (artifact.kind !== "inductive") throw new Error("沙盒归纳缓存格式不匹配");
-                        const bundle = lowerSandboxInductive(parsed.inductive);
-                        nextEngine.core.registerSystemInductive(bundle);
-                        restored.generatedNames = [...bundle.generatedNames];
-                    } else if (parsed.definitionAst) {
-                        if (artifact.kind !== "definition") throw new Error("沙盒定义缓存格式不匹配");
-                        const body = this.restoreCachedDefinition(
-                            nextEngine,
-                            restored.name,
-                            parsed.definitionAst,
-                            parsed.typeAst,
-                            artifact.body,
-                            artifact.cache
-                        );
-                        nextBodies.set(restored.name, Core.clone(body));
-                    } else {
-                        if (artifact.kind !== "axiom") throw new Error("沙盒公理缓存格式不匹配");
-                        const sourceType = nextEngine.core.checkTypeFormation(parsed.typeAst!, []);
-                        const cachedType = nextEngine.core.checkTypeFormation(artifact.type, []);
-                        const equality = nextEngine.checkAst({
-                            type: "===",
-                            name: "",
-                            nodes: [Core.clone(sourceType), Core.clone(cachedType)]
-                        });
-                        if (!equality.ok) throw new Error("沙盒公理缓存与声明源不匹配");
-                        nextEngine.core.setSystemType(restored.name, Core.clone(sourceType));
-                        nextEngine.core.syncSemanticTypes();
-                        nextAxiomTypes.set(restored.name, Core.clone(sourceType));
-                    }
+                    this.withRemainingCoreBudget(nextEngine, budget, started, () => {
+                        if (parsed.hit) {
+                            if (artifact.kind !== "hit") throw new Error("沙盒 HIT 缓存格式不匹配");
+                            const bundle = lowerSandboxHit(parsed.hit);
+                            nextEngine.core.registerSystemInductive(bundle);
+                            nextBundles.set(restored.name, bundle);
+                            restored.generatedNames = [...bundle.generatedNames];
+                        } else if (parsed.inductive) {
+                            if (artifact.kind !== "inductive") throw new Error("沙盒归纳缓存格式不匹配");
+                            const bundle = lowerSandboxInductive(parsed.inductive);
+                            nextEngine.core.registerSystemInductive(bundle);
+                            nextBundles.set(restored.name, bundle);
+                            restored.generatedNames = [...bundle.generatedNames];
+                        } else if (parsed.definitionAst) {
+                            if (artifact.kind !== "definition") throw new Error("沙盒定义缓存格式不匹配");
+                            const body = this.restoreCachedDefinition(
+                                nextEngine,
+                                restored.name,
+                                parsed.definitionAst,
+                                parsed.typeAst,
+                                artifact.body,
+                                artifact.cache
+                            );
+                            nextBodies.set(restored.name, Core.clone(body));
+                        } else {
+                            if (artifact.kind !== "axiom") throw new Error("沙盒公理缓存格式不匹配");
+                            const sourceType = nextEngine.core.checkTypeFormation(parsed.typeAst!, []);
+                            const cachedType = nextEngine.core.checkTypeFormation(artifact.type, []);
+                            const equality = nextEngine.checkAst({
+                                type: "===",
+                                name: "",
+                                nodes: [Core.clone(sourceType), Core.clone(cachedType)]
+                            });
+                            if (!equality.ok) throw new Error("沙盒公理缓存与声明源不匹配");
+                            nextEngine.core.setSystemType(restored.name, Core.clone(sourceType));
+                            nextEngine.core.syncSemanticTypes();
+                            nextAxiomTypes.set(restored.name, Core.clone(sourceType));
+                        }
+                    });
 
                     restored.status = "valid";
                     patches.push({ target, value: restored });
@@ -8110,6 +8387,7 @@ export class SandboxEnvironment {
                 this.engine = nextEngine;
                 this.axiomTypes = nextAxiomTypes;
                 this.definitionBodies = nextBodies;
+                this.inductiveBundles = nextBundles;
                 return { status: "restored", count: cache.entries!.length };
             });
         } catch {
@@ -8171,12 +8449,15 @@ export class SandboxEnvironment {
     private replayValidatedPrefix(
         orderedDeclarations: readonly SandboxDeclaration[],
         prefixLength: number,
-        layout: ReadonlyMap<string, TheoremWorkspaceLayoutItem>
+        layout: ReadonlyMap<string, TheoremWorkspaceLayoutItem>,
+        budget: SandboxValidationBudget,
+        started: number
     ) {
         const previousBodies = this.definitionBodies;
         const previousAxiomTypes = this.axiomTypes;
         const nextAxiomTypes = new Map<string, AST>();
         const nextBodies = new Map<string, AST>();
+        const nextBundles = new Map<string, SandboxInductiveBundle>();
         const nextEngine = this.createEngine();
         try {
             for (let index = 0; index < prefixLength; index++) {
@@ -8184,28 +8465,34 @@ export class SandboxEnvironment {
                 const rowState = layout.get(declaration.id);
                 if (declaration.status !== "valid" || !declaration.enabled || rowState?.disabled) continue;
                 const parsed = parseSandboxStoredDeclaration(declaration.source);
-                if (parsed.hit) {
-                    nextEngine.core.registerSystemInductive(lowerSandboxHit(parsed.hit));
-                    continue;
-                }
-                if (parsed.inductive) {
-                    nextEngine.core.registerSystemInductive(lowerSandboxInductive(parsed.inductive));
-                    continue;
-                }
-                if (parsed.definitionAst) {
-                    const body = previousBodies.get(declaration.name);
-                    if (!body) {
-                        throw new Error(`缺少透明定义缓存：${declaration.name}`);
+                this.withRemainingCoreBudget(nextEngine, budget, started, () => {
+                    if (parsed.hit) {
+                        const bundle = lowerSandboxHit(parsed.hit);
+                        nextEngine.core.registerSystemInductive(bundle);
+                        nextBundles.set(declaration.name, bundle);
+                        return;
                     }
-                    nextEngine.core.registerSystemDefinition(declaration.name, Core.clone(body));
-                    nextBodies.set(declaration.name, Core.clone(body));
-                    continue;
-                }
-                const type = previousAxiomTypes.get(declaration.name)
-                    ?? nextEngine.core.checkTypeFormation(parsed.typeAst, []);
-                nextEngine.core.setSystemType(declaration.name, Core.clone(type));
-                nextEngine.core.syncSemanticTypes();
-                nextAxiomTypes.set(declaration.name, Core.clone(type));
+                    if (parsed.inductive) {
+                        const bundle = lowerSandboxInductive(parsed.inductive);
+                        nextEngine.core.registerSystemInductive(bundle);
+                        nextBundles.set(declaration.name, bundle);
+                        return;
+                    }
+                    if (parsed.definitionAst) {
+                        const body = previousBodies.get(declaration.name);
+                        if (!body) {
+                            throw new Error(`缺少透明定义缓存：${declaration.name}`);
+                        }
+                        nextEngine.core.registerSystemDefinition(declaration.name, Core.clone(body));
+                        nextBodies.set(declaration.name, Core.clone(body));
+                        return;
+                    }
+                    const type = previousAxiomTypes.get(declaration.name)
+                        ?? nextEngine.core.checkTypeFormation(parsed.typeAst, []);
+                    nextEngine.core.setSystemType(declaration.name, Core.clone(type));
+                    nextEngine.core.syncSemanticTypes();
+                    nextAxiomTypes.set(declaration.name, Core.clone(type));
+                });
             }
         } catch (error) {
             throw new Error(`恢复沙盒增量前缀失败：${String(error)}`);
@@ -8213,6 +8500,7 @@ export class SandboxEnvironment {
         this.engine = nextEngine;
         this.axiomTypes = nextAxiomTypes;
         this.definitionBodies = nextBodies;
+        this.inductiveBundles = nextBundles;
     }
 
     private validationSignatures() {

@@ -49,9 +49,10 @@ assert.deepEqual(inverseFace.rightExpression, {
     arguments: []
 });
 
-assert.throws(
-    () => parseSandboxHit(
-        "hit BadComposeExpr : U "
+const invalidComposition = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+}).add(
+    "hit BadComposeExpr : U "
         + "| aBCE : BadComposeExpr "
         + "| bBCE : BadComposeExpr "
         + "| cBCE : BadComposeExpr "
@@ -59,10 +60,10 @@ assert.throws(
         + "| qBCE : aBCE=cBCE "
         + "| rBCE : aBCE=cBCE "
         + "| path2 brokenBCE : (pBCE▪qBCE)=rBCE"
-    ),
-    /组合.*边界不一致/,
-    "path2 composition must reject non-composable point boundaries"
 );
+assert.equal(invalidComposition.ok, false);
+assert.match(invalidComposition.error ?? "", /组合.*边界.*不一致/,
+    "Core must reject non-composable point boundaries after parser elaboration");
 
 const torusBundle = lowerSandboxHit(torus);
 assert.equal(torusBundle.metadata.version, 8);

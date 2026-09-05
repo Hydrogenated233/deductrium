@@ -414,7 +414,10 @@ export class TTSandboxGui {
         if (folderId) {
             const folder = this.folders.find(item => item.id === folderId);
             if (!folder) return;
-            if (!folder.open) folder.open = true;
+            if (!folder.open) {
+                this.setStatus("折叠文件夹不能添加沙盒声明，请先展开文件夹", true);
+                return;
+            }
         }
         const beforeKey = this.validationSemanticsKey();
         const next = this.declarations.reduce((max, declaration) => {
@@ -571,6 +574,27 @@ export class TTSandboxGui {
                 ? "沙盒校验已取消，保留上次可信声明"
                 : `沙盒校验已停止：${result.error ?? "达到资源上限"}`;
             this.setStatus(message, result.status === "budget-exhausted");
+            return;
+        }
+        if (result.status === "invalid" || result.ok === false) {
+            // Invalid validation results may include a diagnostic bridge for
+            // already-valid prefixes. Never publish that partial projection;
+            // a bridge is trusted only after the complete save succeeds.
+            this.pendingValidationCache = undefined;
+            this.validationCache = undefined;
+            this.validationCanRestoreBridge = false;
+            try { this.onAxiomsChange?.(emptyBridge(), { revalidate: true }); } catch { }
+            this.lastTrustedBridge = null;
+            // Keep the Worker's per-row diagnostics even though its partial
+            // bridge and cache are rejected. Otherwise the edited row remains
+            // visually unchecked and the useful error exists only in the
+            // aggregate status line.
+            this.declarations = result.declarations;
+            this.syncWorkspaceFromState();
+            this.persist();
+            this.render();
+            const invalidMessage = result.error ?? "沙盒声明未通过校验";
+            this.setStatus(`沙盒校验失败：${invalidMessage}`, true);
             return;
         }
         try {
@@ -925,9 +949,8 @@ export class TTSandboxGui {
         };
         const add = actionButton("+", "在文件夹底部添加沙盒声明", () => {
             if (!folder.open) {
-                this.syncWorkspaceFromState();
-                const mutation = this.workspace.setFolderOpen(folder.id, true);
-                if (mutation.changed) this.applyWorkspaceSnapshot(mutation.snapshot);
+                this.setStatus("折叠文件夹不能添加沙盒声明，请先展开文件夹", true);
+                return;
             }
             this.pendingFolderId = folder.id;
             this.renderWorkspaceStructure();

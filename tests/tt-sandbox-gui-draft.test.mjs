@@ -121,6 +121,11 @@ class FakeElement {
             const element = new FakeElement(tagName);
             created.push(element);
             return element;
+        },
+        createTextNode(text) {
+            const element = new FakeElement("#text");
+            element.textContent = text;
+            return element;
         }
     };
     try {
@@ -158,6 +163,32 @@ class FakeElement {
             "editing an invalid draft must not be blocked by the main-thread AST parser");
         assert.equal(declaration.status, "unchecked");
         assert.deepEqual(events, ["persist", "validate"]);
+
+        // A collapsed folder is not an insertion target. The add-at-folder-
+        // bottom action must leave it collapsed and report the reason rather
+        // than silently changing the user's folder state.
+        const collapsedFolder = {
+            kind: "folder",
+            id: "sandbox-folder-1",
+            name: "Closed",
+            length: 1,
+            open: false,
+            disabled: false
+        };
+        gui.folders = [collapsedFolder];
+        gui.order = [collapsedFolder.id, declaration.id];
+        created.length = 0;
+        gui.createFolderRow(collapsedFolder);
+        const addToCollapsed = created.find(element =>
+            element.tagName === "BUTTON" && element.title === "在文件夹底部添加沙盒声明"
+        );
+        assert.ok(addToCollapsed, "collapsed folders must still expose the guarded add action");
+        addToCollapsed.dispatch("click");
+        assert.equal(collapsedFolder.open, false,
+            "the guarded add action must not expand a collapsed folder");
+        assert.equal(gui.pendingFolderId, null,
+            "a rejected collapsed-folder insertion must not leave a pending target");
+        assert.match(events.at(-1)?.message ?? "", /折叠文件夹不能添加沙盒声明/);
     } finally {
         parserGuard.restore();
         if (previousDocument === undefined) delete globalThis.document;

@@ -79,6 +79,44 @@ for (const name of ["apd_loopPRF", "ap_loopPRF"]) {
         `parameterized indexed recursive endpoint must generate ${name}`);
 }
 
+for (const [label, source, error] of [
+    [
+        "a first-path constructor",
+        "hit FreeHeaderPath [n:nat] : U "
+            + "| pointFHP:Πn:nat,FreeHeaderPath n "
+            + "| loopFHP:pointFHP n=pointFHP n",
+        /一阶路径构造子 loopFHP.*声明头部索引.*n.*重新绑定/
+    ],
+    [
+        "a second-path constructor",
+        "hit FreeHeaderPath2 [n:nat] : U "
+            + "| pointFHP2:Πn:nat,FreeHeaderPath2 n "
+            + "| loopFHP2:Πn:nat,pointFHP2 n=pointFHP2 n "
+            + "| path2 faceFHP2:loopFHP2 n=loopFHP2 n",
+        /二阶路径构造子 faceFHP2.*声明头部索引.*n.*重新绑定/
+    ],
+    [
+        "a third-path constructor",
+        "hit FreeHeaderPath3 [n:nat] : U "
+            + "| pointFHP3:Πn:nat,FreeHeaderPath3 n "
+            + "| loopFHP3:Πn:nat,pointFHP3 n=pointFHP3 n "
+            + "| path2 faceFHP3:Πn:nat,loopFHP3 n=loopFHP3 n "
+            + "| path3 cellFHP3:faceFHP3 n=faceFHP3 n",
+        /三阶路径构造子 cellFHP3.*声明头部索引.*n.*重新绑定/
+    ]
+]) {
+    assert.throws(() => parseSandboxHit(source), error,
+        label + " must not capture a header index as a free variable");
+}
+assert.doesNotThrow(
+    () => parseSandboxHit(
+        "hit ReboundHeaderPath [n:nat] : U "
+            + "| pointRHP:Πn:nat,ReboundHeaderPath n "
+            + "| loopRHP:Πn:nat,pointRHP n=pointRHP n"
+    ),
+    "path-local binders may intentionally reuse the header index name"
+);
+
 for (const [label, source] of [
     ["non-final constructor with an extra argument",
         "hit PairFiber (A:U) [n:nat] : U "

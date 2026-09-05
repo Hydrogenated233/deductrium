@@ -115,6 +115,10 @@ const hit3Options = { systemRuleIds: creativeSandboxSystemRuleIds };
 const hit3Environment = new SandboxEnvironment(hit3Options);
 const hit3Added = hit3Environment.add(hit3Source);
 assert.equal(hit3Added.ok, true, hit3Added.error);
+const firstHit3Bridge = hit3Environment.bridge();
+firstHit3Bridge.inductives[0].metadata.typeName = "mutated-bridge-copy";
+assert.equal(hit3Environment.bridge().inductives[0].metadata.typeName, "SaveCube3",
+    "bridge publication must clone the cached Core-certified bundle");
 
 const hit3Gui = Object.create(TTSandboxGui.prototype);
 hit3Gui.declarations = hit3Environment.getDeclarations();

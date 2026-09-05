@@ -8,6 +8,52 @@ const sourceEnvironment = new SandboxEnvironment();
 sourceEnvironment.add("A : U");
 const save = sourceEnvironment.toJSON();
 
+// A save with an invalid declaration must not leave a partially validated
+// prefix available to `check`.  The result can still expose diagnostics, but
+// the Worker session is not ready until a fully valid save is loaded.
+const invalidEnvironment = new SandboxEnvironment();
+invalidEnvironment.add("A : U");
+invalidEnvironment.add("bad : Missing");
+const invalidSave = invalidEnvironment.toJSON();
+const invalidSession = new SandboxWorkerSession();
+const invalidResult = invalidSession.handle({ id: 100, kind: "load", save: invalidSave });
+assert.equal(invalidResult.status, "invalid");
+assert.equal(invalidResult.ok, false);
+assert.deepEqual(invalidResult.bridge, {
+    axioms: [],
+    inductives: [],
+    definitions: [],
+    order: []
+}, "an invalid save must not publish a partially validated bridge");
+const invalidCheck = invalidSession.handle({ id: 101, kind: "check", source: "A" });
+assert.equal(invalidCheck.ok, false,
+    "an invalid save must not expose its valid prefix to a later check");
+assert.match(invalidCheck.error ?? "", /Unknown|未知|未定义|沙盒/);
+assert.equal(
+    invalidSession.handle({ id: 102, kind: "load", save }).status,
+    "ok",
+    "the Worker must recover after the invalid save is replaced"
+);
+
+// Duplicate declaration IDs collapse in the shared workspace map. The load
+// result must report that omitted row as invalid rather than claiming success
+// with an unchecked declaration and an empty bridge.
+const duplicateIdSave = structuredClone(save);
+duplicateIdSave.declarations.push({
+    ...duplicateIdSave.declarations[0],
+    source: "B : U"
+});
+duplicateIdSave.order = [duplicateIdSave.declarations[0].id];
+const duplicateIdSession = new SandboxWorkerSession();
+const duplicateIdResult = duplicateIdSession.handle({
+    id: 103,
+    kind: "load",
+    save: duplicateIdSave
+});
+assert.equal(duplicateIdResult.ok, false);
+assert.equal(duplicateIdResult.status, "invalid");
+assert.match(duplicateIdResult.error ?? "", /未完成校验|顺序无效/);
+
 // A rejected replacement save must invalidate the stateful session.  Otherwise
 // a caller that omits the save on its next check can observe declarations from
 // the previous creative workspace.
@@ -121,10 +167,27 @@ class SynchronousSandboxWorker {
     }
 }
 
+class RacingSandboxWorker extends SynchronousSandboxWorker {
+    static instances = [];
+
+    constructor() {
+        super();
+        RacingSandboxWorker.instances.push(this);
+    }
+}
+
 const previousWorker = globalThis.Worker;
 globalThis.Worker = SynchronousSandboxWorker;
 try {
     const client = new SandboxWorkerClient();
+    assert.equal((await client.load(save)).status, "ok");
+    const invalidClientResult = await client.load(invalidSave);
+    assert.equal(invalidClientResult.status, "invalid");
+    await assert.rejects(
+        client.check("A"),
+        /尚未加载|先加载|先校验/,
+        "an invalid client load must not expose its valid prefix to a later check"
+    );
     assert.equal((await client.load(save)).status, "ok");
     await assert.rejects(
         client.load({ version: 999, declarations: [] }),
@@ -157,6 +220,21 @@ try {
         /尚未加载|先加载|先校验/,
         "a rejected validateRequest must invalidate the client session too"
     );
+
+    // A terminated worker may report its error after a replacement worker has
+    // already loaded a valid save. The stale event must not tear down the
+    // replacement session.
+    globalThis.Worker = RacingSandboxWorker;
+    RacingSandboxWorker.instances = [];
+    const racingClient = new SandboxWorkerClient();
+    assert.equal((await racingClient.load(save)).status, "ok");
+    const firstWorker = RacingSandboxWorker.instances[0];
+    racingClient.terminate();
+    assert.equal((await racingClient.load(save)).status, "ok");
+    assert.equal(RacingSandboxWorker.instances.length, 2);
+    firstWorker.emit("error", { message: "late error from old worker" });
+    assert.equal((await racingClient.check("A")).ok, true,
+        "a late error from an old worker must not invalidate the replacement session");
 } finally {
     if (previousWorker === undefined) delete globalThis.Worker;
     else globalThis.Worker = previousWorker;

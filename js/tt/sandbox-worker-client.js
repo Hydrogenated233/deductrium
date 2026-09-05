@@ -142,7 +142,10 @@ export class SandboxWorkerClient {
         }
     }
     rememberValidationResult(result, save) {
-        if (result.status === "cancelled" || result.status === "budget-exhausted") {
+        // Keep the client-side readiness flag in lockstep with the stateful
+        // Worker session.  Invalid saves must be reloaded after correction;
+        // their diagnostic bridge is never a usable check environment.
+        if (result.status !== "ok") {
             this.invalidateSession();
             return;
         }
@@ -172,6 +175,11 @@ export class SandboxWorkerClient {
                 pending.reject(new Error("error" in event.data ? event.data.error : "沙盒 Worker 失败"));
         });
         worker.addEventListener("error", event => {
+            // A terminated worker may deliver its error event after a new
+            // worker has already been installed.  Never let that stale event
+            // invalidate the replacement session or reject its requests.
+            if (this.worker !== worker)
+                return;
             this.worker = null;
             this.sessionReady = false;
             this.rejectAll(new Error(event.message || "沙盒 Worker 失败"));

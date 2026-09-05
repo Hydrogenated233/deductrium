@@ -41,9 +41,44 @@ assert.throws(
 );
 assert.throws(
     () => parseSandboxInductive(
-        "inductive NonUniform (A : U) [n : nat] : U | bad : NonUniform True n"
+        "inductive NonUniform (A : U) [n : nat] : U | bad : NonUniform True 0"
     ),
     /参数.*一致|统一参数/
+);
+assert.throws(
+    () => parseSandboxInductive(
+        "inductive FreeHeaderIndex [n : nat] : U | bad : FreeHeaderIndex n"
+    ),
+    /不能直接引用声明头部索引.*n.*重新绑定/,
+    "an indexed constructor must not capture a header index as a free name"
+);
+assert.throws(
+    () => parseSandboxInductive(
+        "inductive FreeHeaderIndexArg [n : nat] : U "
+            + "| bad : FreeHeaderIndexArg 0 -> FreeHeaderIndexArg n"
+    ),
+    /不能直接引用声明头部索引.*n.*重新绑定/,
+    "header-index capture must also be rejected in constructor arguments"
+);
+assert.doesNotThrow(
+    () => parseSandboxInductive(
+        "inductive ReboundIndex [n : nat] : U "
+            + "| scoped : Pn:nat,ReboundIndex n"
+    ),
+    "a constructor-local binder may intentionally reuse the header index name"
+);
+const freeHeaderIndexSandbox = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+});
+const freeHeaderIndexResult = freeHeaderIndexSandbox.add(
+    "inductive FreeHeaderIndexSandbox [n : nat] : U "
+        + "| bad : FreeHeaderIndexSandbox n"
+);
+assert.equal(freeHeaderIndexResult.ok, false);
+assert.match(
+    freeHeaderIndexResult.error ?? "",
+    /不能直接引用声明头部索引.*n.*重新绑定/,
+    "the sandbox must report the scope error before lowering can emit an unrelated unknown variable"
 );
 
 const sandbox = new SandboxEnvironment({ systemRuleIds: creativeSandboxSystemRuleIds });

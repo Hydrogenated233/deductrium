@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { ASTParser } from "../js/tt/astparser.js";
+import { Core } from "../js/tt/core.js";
 import { TTCoreEngine } from "../js/tt/engine.js";
 import { cloneInductiveBundle } from "../js/tt/gui.js";
 import { lowerSandboxInductive, parseSandboxInductive } from "../js/tt/sandbox.js";
@@ -146,5 +147,45 @@ assert.equal(
     configured.check("ind_tri (Lx:tri.True) true true true 0t === true").ok,
     true
 );
+
+// Canonical HITs may use their bounded structure budget for subject-reduction
+// checks, but an ordinary schema-v1 inductive bundle must still use the global
+// assertion budget.  This prevents the HIT allowance from silently weakening
+// validation for non-HIT system bundles.
+const ordinaryBudgetBundle = lowerSandboxInductive(parseSandboxInductive(
+    "inductive OrdinaryBudgetScope : U "
+    + "| zeroOrdinaryBudgetScope : OrdinaryBudgetScope "
+    + "| succOrdinaryBudgetScope : OrdinaryBudgetScope -> OrdinaryBudgetScope"
+));
+const ordinaryCertifiedEngine = new TTCoreEngine();
+ordinaryCertifiedEngine.configure({ unlockedTypes: ["True", "False"] });
+ordinaryCertifiedEngine.core.registerSystemInductive(structuredClone(ordinaryBudgetBundle));
+for (const name of ordinaryBudgetBundle.generatedNames ?? []) {
+    assert.equal(
+        ordinaryCertifiedEngine.core.certifiedLargeSystemTypes.has(name),
+        false,
+        `${name} must not inherit the canonical HIT output allowance`
+    );
+}
+const previousAssertionBudget = Core.semanticTypeAssertionMaxSteps;
+try {
+    Core.semanticTypeAssertionMaxSteps = 1;
+    const budgetEngine = new TTCoreEngine();
+    budgetEngine.configure({ unlockedTypes: ["True", "False"] });
+    assert.throws(
+        () => budgetEngine.core.registerSystemInductive(structuredClone(ordinaryBudgetBundle)),
+        /subject-reduction|资源耗尽/,
+        "ordinary schema-v1 inductives must not receive the canonical HIT budget"
+    );
+    for (const name of ordinaryBudgetBundle.generatedNames ?? []) {
+        assert.equal(
+            budgetEngine.core.hasConst(name),
+            false,
+            `${name} leaked after ordinary budget-scope rejection`
+        );
+    }
+} finally {
+    Core.semanticTypeAssertionMaxSteps = previousAssertionBudget;
+}
 
 console.log("Core dynamic ordinary-inductive bundle regression passed");

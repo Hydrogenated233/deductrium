@@ -90,6 +90,7 @@ export class TTCoreEngine {
         langMgr.lang = config.language ?? langMgr.lang;
         this.core = new Core();
         Core.timeout = config.timeout ?? Core.timeout;
+        this.core.setTimeoutOverride(config.isolatedTimeout);
         if (config.semanticResourceScale !== undefined) {
             Core.setSemanticResourceScale(config.semanticResourceScale);
         }

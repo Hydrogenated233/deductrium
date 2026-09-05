@@ -54,15 +54,34 @@ export class SandboxWorkerSession {
                 const result = current.load(request.save, {
                     shouldCancel: () => this.cancelledRequests.has(request.id)
                 });
-                this.loaded = result.status !== "cancelled" && result.status !== "budget-exhausted";
-                if (!this.loaded) {
+                const publishedResult = result.status === "invalid"
+                    ? {
+                        ...result,
+                        // The synchronous environment keeps its valid prefix
+                        // for diagnostics, but a Worker result is a bridge
+                        // publication boundary and must never carry it out.
+                        bridge: {
+                            axioms: [],
+                            inductives: [],
+                            definitions: [],
+                            order: []
+                        }
+                    }
+                    : result;
+                // An invalid result is not a usable saved session, but keep a
+                // fresh empty prelude environment available to direct callers
+                // so `check` returns an explicit failure instead of exposing a
+                // stale prefix. The browser client separately remains not-ready
+                // until a complete `ok` validation result is received.
+                this.loaded = result.status === "ok" || result.status === "invalid";
+                if (result.status !== "ok") {
                     // Validation may have installed a prefix before it noticed
                     // cancellation or a budget limit.  Discard that partial
                     // Core instead of allowing a later request to reuse it.
                     this.environment = new SandboxEnvironment(request.options);
                     this.environmentOptionsKey = optionsKey(request.options);
                 }
-                return result;
+                return publishedResult;
             } catch (error) {
                 // A malformed save or an unexpected validation exception must
                 // not leave the previous environment addressable by a later

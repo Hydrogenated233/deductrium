@@ -191,30 +191,32 @@ assert.throws(
     /三阶路径构造子.*端点必须由 BadEndpoint3 的二阶路径构造子形成/
 );
 
-assert.throws(
-    () => parseSandboxHit(
-        "hit BadBoundary3 : U | baseB3 : BadBoundary3 "
+const invalidBoundary = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+}).add(
+    "hit BadBoundary3 : U | baseB3 : BadBoundary3 "
             + "| loopB31 : baseB3=baseB3 "
             + "| loopB32 : baseB3=baseB3 "
             + "| loopB33 : baseB3=baseB3 "
             + "| path2 faceB31 : loopB31=loopB32 "
             + "| path2 faceB32 : loopB31=loopB33 "
             + "| path3 cellB3 : faceB31=faceB32"
-    ),
-    /三阶路径构造子.*二阶路径边界不一致/
 );
+assert.equal(invalidBoundary.ok, false);
+assert.match(invalidBoundary.error ?? "", /三阶路径构造子.*二阶边界.*不一致/);
 
-assert.throws(
-    () => parseSandboxHit(
-        "hit BadArgs3 (A : U) : U | baseA3 : BadArgs3 A "
+const invalidArguments = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+}).add(
+    "hit BadArgs3 (A : U) : U | baseA3 : BadArgs3 A "
             + "| loopA31 : Πz:A,baseA3=baseA3 "
             + "| loopA32 : Πz:A,baseA3=baseA3 "
             + "| path2 faceA31 : Πz:A,loopA31 z=loopA32 z "
             + "| path2 faceA32 : Πz:A,loopA31 z=loopA32 z "
             + "| path3 cellA3 : Πx:A,Πy:A,faceA31 x=faceA32 y"
-    ),
-    /三阶路径构造子.*二阶路径边界不一致/
 );
+assert.equal(invalidArguments.ok, false);
+assert.match(invalidArguments.error ?? "", /三阶路径构造子.*二阶边界.*不一致/);
 
 assert.throws(
     () => parseSandboxHit(

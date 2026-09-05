@@ -187,6 +187,8 @@ const tests = [
     "./tt-sandbox-hit3.test.mjs",
     "./tt-sandbox-hit3-composite.test.mjs",
     "./tt-sandbox-hit3-refl.test.mjs",
+    "./tt-sandbox-hit3-path2-refl.test.mjs",
+    "./tt-sandbox-hit-definitional-boundary.test.mjs",
     "./tt-creative-sorry.test.mjs",
     "./tt-sandbox-hit4-boundary.test.mjs",
     "./tt-sandbox-resource-boundary.test.mjs",

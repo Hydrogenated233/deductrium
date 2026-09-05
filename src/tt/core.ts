@@ -79,6 +79,18 @@ const certifiedPathComputationResourceLimits: SemanticTypeSynthesisResourceLimit
         synthesisMaxSteps: 131_072,
         outputMaxNodes: 4_096
     });
+/**
+ * Canonically reconstructed HIT eliminators may be larger than ordinary user
+ * expressions because their telescope contains certified coherence methods.
+ * Keep this allowance local to the trusted registration boundary; ordinary
+ * terms and definitions continue to use the normal semantic budgets.
+ */
+const certifiedHitStructureResourceLimits: SemanticTypeSynthesisResourceLimits =
+    Object.freeze({
+        inputMaxNodes: 32_768,
+        synthesisMaxSteps: 8_388_608,
+        outputMaxNodes: 65_536
+    });
 
 function fitsSemanticNbeBudget(
     ast: AST,
@@ -1950,6 +1962,8 @@ export function assignContext(added: [string, AST, number], oldContext: Context)
 export class Core {
     static timeout:number = 10_000;
     static timeoutOccured:boolean;
+    private timeoutOverride?: number;
+    private timeoutDeadline?: number;
     /** Enable recursive semantic synthesis. */
     static semanticTypeCheckRecursive = false;
     /** Automatically use recursive synthesis once a large theorem library is loaded. */
@@ -1973,6 +1987,45 @@ export class Core {
     static semanticTypeCheckAttempts = 0;
     static semanticTypeCheckHits = 0;
     static semanticTypeCheckFastPathHits = 0;
+
+    /** Give an isolated worker/session its own wall-clock limit without
+     * mutating the game-wide timeout used by the main type-theory engine. */
+    setTimeoutOverride(timeout?: number) {
+        this.timeoutOverride = Number.isFinite(timeout) && timeout >= 0
+            ? Number(timeout)
+            : undefined;
+    }
+
+    /** Clamp every nested check in one operation to the same absolute
+     * deadline. This prevents a bundle with many formation checks from
+     * restarting the request budget for each entry. */
+    withTimeoutBudget<T>(timeout: number, deadline: number, callback: () => T): T {
+        const previousOverride = this.timeoutOverride;
+        const previousDeadline = this.timeoutDeadline;
+        this.timeoutOverride = Number.isFinite(timeout) && timeout >= 0
+            ? Number(timeout)
+            : previousOverride;
+        this.timeoutDeadline = Number.isFinite(deadline)
+            ? Number(deadline)
+            : previousDeadline;
+        try {
+            return callback();
+        } finally {
+            this.timeoutOverride = previousOverride;
+            this.timeoutDeadline = previousDeadline;
+        }
+    }
+
+    private timeoutLimit() {
+        return this.timeoutOverride ?? Core.timeout;
+    }
+
+    private deadlineFrom(started: number) {
+        const relativeDeadline = started + this.timeoutLimit();
+        return this.timeoutDeadline === undefined
+            ? relativeDeadline
+            : Math.min(relativeDeadline, this.timeoutDeadline);
+    }
 
     static setSemanticResourceScale(value: unknown) {
         const numeric = Number(value);
@@ -2213,7 +2266,8 @@ export class Core {
         normalizedEntries: readonly (readonly [string, AST])[],
         normalizedRules: Readonly<Record<string, readonly { pattern: AST[]; result: AST }[]>>,
         parameters: readonly { name: string; type: AST }[],
-        indexCount: number
+        indexCount: number,
+        semanticResourceLimits?: SemanticTypeSynthesisResourceLimits
     ) {
         if (bundle.metadata?.ruleSchemaVersion !== 1) return;
         const metadata = bundle.metadata;
@@ -2247,7 +2301,8 @@ export class Core {
                     type: ":",
                     name: "",
                     nodes: [Core.clone(term), Core.clone(expected)]
-                }, Core.cloneContext(context), false, undefined, false, true, false));
+                }, Core.cloneContext(context), false, undefined, false, true, false,
+                    semanticResourceLimits));
             } catch {
                 throw new Error(`${label} 未通过 subject-reduction 类型检查`);
             }
@@ -2689,7 +2744,8 @@ export class Core {
                 left: AST,
                 right: AST,
                 context: Context,
-                label: string
+                label: string,
+                mismatch = "不在同一索引纤维"
             ) => {
                 const result = this.semanticKernel.tryEqualResult(
                     left,
@@ -2697,7 +2753,7 @@ export class Core {
                     context,
                     {
                         maxSteps: Core.semanticTypeAssertionMaxSteps,
-                        deadline: Date.now() + Core.timeout
+                        deadline: this.deadlineFrom(Date.now())
                     }
                 );
                 if (result === "equal") return;
@@ -2707,7 +2763,16 @@ export class Core {
                 if (result === "unsupported") {
                     throw new Error(`${label} 的定义相等检查暂不支持该表达式`);
                 }
-                throw new Error(`${label} 不在同一索引纤维`);
+                throw new Error(`${label} ${mismatch}`);
+            };
+            const requireHitBoundaryEquality = (
+                left: AST,
+                right: AST,
+                context: Context,
+                label: string
+            ) => {
+                if (sameGeneratedAstAlpha(left, right)) return;
+                requireHitIndexEquality(left, right, context, label, "不一致");
             };
             const hitPathIndexContext = (
                 argumentNames: readonly string[],
@@ -2969,6 +3034,7 @@ export class Core {
                     if (!generatedEqualityEndpoints(conclusion)) {
                         throw new Error(`一阶 HIT 路径计算项 ${computationName} 不是等式命题`);
                     }
+                    canonicallyCertifiedTypeFormations.add(computationName);
                 }
             }
 
@@ -3187,6 +3253,7 @@ export class Core {
                     if (!actual || !sameGeneratedAstAlpha(actual, expected)) {
                         throw new Error(`一阶 HIT 路径计算定理 ${computationName} 与 metadata 不一致`);
                     }
+                    canonicallyCertifiedTypeFormations.add(computationName);
                 };
 
                 const publicEliminatorType = bundle.eliminator?.[1]
@@ -3396,15 +3463,13 @@ export class Core {
                                     `${label}组合项第 ${index + 1} 个索引`
                                 );
                             }
-                            requireHitIndexEquality(
-                                left.targetPoint,
-                                right.sourcePoint,
-                                indexContext,
-                                `${label}组合项的中间点边界`
-                            );
-                        } else if (!sameGeneratedAstAlpha(left.targetPoint, right.sourcePoint)) {
-                            throw new Error(`${label}组合项的中间点边界不一致`);
                         }
+                        requireHitBoundaryEquality(
+                            left.targetPoint,
+                            right.sourcePoint,
+                            indexContext,
+                            `${label}组合项的中间点边界`
+                        );
                         return {
                             kind: "compose",
                             left,
@@ -3705,29 +3770,24 @@ export class Core {
                             `二维 HIT 二阶路径构造子 ${path.name} 第 ${index + 1} 个 metadata 索引`
                         );
                     }
-                    requireHitIndexEquality(
-                        leftEndpoint.sourcePoint,
-                        rightEndpoint.sourcePoint,
-                        pathIndexContext,
-                        `二维 HIT 二阶路径构造子 ${path.name} 的起点边界`
-                    );
-                    requireHitIndexEquality(
-                        leftEndpoint.targetPoint,
-                        rightEndpoint.targetPoint,
-                        pathIndexContext,
-                        `二维 HIT 二阶路径构造子 ${path.name} 的终点边界`
-                    );
                 }
+                requireHitBoundaryEquality(
+                    leftEndpoint.sourcePoint,
+                    rightEndpoint.sourcePoint,
+                    pathIndexContext,
+                    `二维 HIT 二阶路径构造子 ${path.name} 的起点边界`
+                );
+                requireHitBoundaryEquality(
+                    leftEndpoint.targetPoint,
+                    rightEndpoint.targetPoint,
+                    pathIndexContext,
+                    `二维 HIT 二阶路径构造子 ${path.name} 的终点边界`
+                );
                 const endpoints = generatedEqualityEndpoints(conclusion);
                 if (!endpoints
                     || !sameGeneratedAst(endpoints[0], leftEndpoint.term)
                     || !sameGeneratedAst(endpoints[1], rightEndpoint.term)) {
                     throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 端点与 metadata 不一致`);
-                }
-                if (indexCount === 0
-                    && (!sameGeneratedAstAlpha(leftEndpoint.sourcePoint, rightEndpoint.sourcePoint)
-                        || !sameGeneratedAstAlpha(leftEndpoint.targetPoint, rightEndpoint.targetPoint))) {
-                    throw new Error(`二维 HIT 二阶路径构造子 ${path.name} 的点边界不一致`);
                 }
                 evaluatedTwoPathEndpoints.set(path.name, {
                     left: leftEndpoint,
@@ -3967,15 +4027,13 @@ export class Core {
                                     `${label}组合项第 ${index + 1} 个索引`
                                 );
                             }
-                            requireHitIndexEquality(
-                                left.targetPath,
-                                right.sourcePath,
-                                indexContext,
-                                `${label}组合项的中间一阶路径边界`
-                            );
-                        } else if (!sameGeneratedAstAlpha(left.targetPath, right.sourcePath)) {
-                            throw new Error(`${label}组合项的中间一阶路径边界不一致`);
                         }
+                        requireHitBoundaryEquality(
+                            left.targetPath,
+                            right.sourcePath,
+                            indexContext,
+                            `${label}组合项的中间一阶路径边界`
+                        );
                         return {
                             kind: "compose",
                             left,
@@ -4012,6 +4070,17 @@ export class Core {
                     state.ancestors.delete(expression);
                 }
             };
+            const twoPathContainsRefl = (
+                expression: EvaluatedTwoPathExpression
+            ): boolean => expression.kind === "atom"
+                ? onePathContainsRefl(expression.sourceExpression)
+                    || onePathContainsRefl(expression.targetExpression)
+                : expression.kind === "refl"
+                    ? false
+                    : expression.kind === "compose"
+                        ? twoPathContainsRefl(expression.left)
+                            || twoPathContainsRefl(expression.right)
+                        : twoPathContainsRefl(expression.value);
             const evaluatedThreePathEndpoints = new Map<string, {
                 left: EvaluatedTwoPathExpression;
                 right: EvaluatedTwoPathExpression;
@@ -4078,29 +4147,36 @@ export class Core {
                             `三维 HIT 三阶路径构造子 ${path.name} 第 ${index + 1} 个 metadata 索引`
                         );
                     }
-                    requireHitIndexEquality(
-                        leftEndpoint.sourcePath,
-                        rightEndpoint.sourcePath,
-                        pathIndexContext,
-                        `三维 HIT 三阶路径构造子 ${path.name} 的起始二阶边界`
-                    );
-                    requireHitIndexEquality(
-                        leftEndpoint.targetPath,
-                        rightEndpoint.targetPath,
-                        pathIndexContext,
-                        `三维 HIT 三阶路径构造子 ${path.name} 的终止二阶边界`
-                    );
                 }
+                requireHitBoundaryEquality(
+                    leftEndpoint.sourcePath,
+                    rightEndpoint.sourcePath,
+                    pathIndexContext,
+                    `三维 HIT 三阶路径构造子 ${path.name} 的起始二阶边界`
+                );
+                requireHitBoundaryEquality(
+                    leftEndpoint.targetPath,
+                    rightEndpoint.targetPath,
+                    pathIndexContext,
+                    `三维 HIT 三阶路径构造子 ${path.name} 的终止二阶边界`
+                );
+                requireHitBoundaryEquality(
+                    leftEndpoint.sourceExpression.sourcePoint,
+                    rightEndpoint.sourceExpression.sourcePoint,
+                    pathIndexContext,
+                    `三维 HIT 三阶路径构造子 ${path.name} 的起点边界`
+                );
+                requireHitBoundaryEquality(
+                    leftEndpoint.targetExpression.targetPoint,
+                    rightEndpoint.targetExpression.targetPoint,
+                    pathIndexContext,
+                    `三维 HIT 三阶路径构造子 ${path.name} 的终点边界`
+                );
                 const endpoints = generatedEqualityEndpoints(conclusion);
                 if (!endpoints
                     || !sameGeneratedAst(endpoints[0], leftEndpoint.term)
                     || !sameGeneratedAst(endpoints[1], rightEndpoint.term)) {
                     throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 端点与 metadata 不一致`);
-                }
-                if (indexCount === 0
-                    && (!sameGeneratedAstAlpha(leftEndpoint.sourcePath, rightEndpoint.sourcePath)
-                        || !sameGeneratedAstAlpha(leftEndpoint.targetPath, rightEndpoint.targetPath))) {
-                    throw new Error(`三维 HIT 三阶路径构造子 ${path.name} 的二阶路径边界不一致`);
                 }
                 evaluatedThreePathEndpoints.set(path.name, {
                     left: leftEndpoint,
@@ -5418,7 +5494,21 @@ export class Core {
                                 sourceMethod: left.sourceMethod,
                                 targetMethod: right.targetMethod,
                                 proof: wrapApply(
-                                    wrapVar("hit_dep2_comp"),
+                                    wrapVar(twoPathContainsRefl(expression)
+                                        ? "@hit_dep2_comp"
+                                        : "hit_dep2_comp"),
+                                    ...(twoPathContainsRefl(expression)
+                                        ? [
+                                            Core.clone(hitUniverseLevel),
+                                            Core.clone(motiveUniverseLevel),
+                                            Core.clone(hitType),
+                                            Core.clone(expression.left.sourceExpression.sourcePoint),
+                                            Core.clone(expression.left.sourceExpression.targetPoint),
+                                            Core.clone(expression.left.sourcePath),
+                                            Core.clone(expression.left.targetPath),
+                                            Core.clone(expression.right.targetPath),
+                                        ]
+                                        : []),
                                     Core.clone(motiveAtFiber),
                                     Core.clone(sourceValue),
                                     Core.clone(targetValue),
@@ -5437,7 +5527,20 @@ export class Core {
                             sourceMethod: value.targetMethod,
                             targetMethod: value.sourceMethod,
                             proof: wrapApply(
-                                wrapVar("hit_dep2_inv"),
+                                wrapVar(twoPathContainsRefl(expression)
+                                    ? "@hit_dep2_inv"
+                                    : "hit_dep2_inv"),
+                                ...(twoPathContainsRefl(expression)
+                                    ? [
+                                        Core.clone(hitUniverseLevel),
+                                        Core.clone(motiveUniverseLevel),
+                                        Core.clone(hitType),
+                                        Core.clone(expression.value.sourceExpression.sourcePoint),
+                                        Core.clone(expression.value.sourceExpression.targetPoint),
+                                        Core.clone(expression.value.sourcePath),
+                                        Core.clone(expression.value.targetPath),
+                                    ]
+                                    : []),
                                 Core.clone(motiveAtFiber),
                                 Core.clone(sourceValue),
                                 Core.clone(targetValue),
@@ -5513,8 +5616,21 @@ export class Core {
                         if (expression.kind === "compose") {
                             const left = dependentExpressionComputation(expression.left);
                             const right = dependentExpressionComputation(expression.right);
+                            const explicit = twoPathContainsRefl(expression);
                             const method = wrapApply(
-                                wrapVar("hit_dep2_comp"),
+                                wrapVar(explicit ? "@hit_dep2_comp" : "hit_dep2_comp"),
+                                ...(explicit
+                                    ? [
+                                        Core.clone(hitUniverseLevel),
+                                        Core.clone(motiveUniverseLevel),
+                                        Core.clone(hitType),
+                                        Core.clone(expression.left.sourceExpression.sourcePoint),
+                                        Core.clone(expression.left.sourceExpression.targetPoint),
+                                        Core.clone(expression.left.sourcePath),
+                                        Core.clone(expression.left.targetPath),
+                                        Core.clone(expression.right.targetPath),
+                                    ]
+                                    : []),
                                 Core.clone(motiveAtFiber),
                                 Core.clone(sourceValue),
                                 Core.clone(targetValue),
@@ -5562,8 +5678,20 @@ export class Core {
                             };
                         }
                         const value = dependentExpressionComputation(expression.value);
+                        const explicit = twoPathContainsRefl(expression);
                         const method = wrapApply(
-                            wrapVar("hit_dep2_inv"),
+                            wrapVar(explicit ? "@hit_dep2_inv" : "hit_dep2_inv"),
+                            ...(explicit
+                                ? [
+                                    Core.clone(hitUniverseLevel),
+                                    Core.clone(motiveUniverseLevel),
+                                    Core.clone(hitType),
+                                    Core.clone(expression.value.sourceExpression.sourcePoint),
+                                    Core.clone(expression.value.sourceExpression.targetPoint),
+                                    Core.clone(expression.value.sourcePath),
+                                    Core.clone(expression.value.targetPath),
+                                ]
+                                : []),
                             Core.clone(motiveAtFiber),
                             Core.clone(sourceValue),
                             Core.clone(targetValue),
@@ -5945,6 +6073,13 @@ export class Core {
                         };
                         let expectedBody: AST;
                         if (dependent) {
+                            const dependentContext = methodContext;
+                            if (!dependentContext) {
+                                throw new Error(`${label} ${path.name} 缺少 dependent 方法上下文`);
+                            }
+                            const hitUniverseLevel = dependentContext.hitUniverseLevel;
+                            const motiveUniverseLevel = dependentContext.motiveUniverseLevel;
+                            const hitType = dependentContext.hitType;
                             const sourcePathExpression = endpointData.left.sourceExpression;
                             const targetPathExpression = endpointData.left.targetExpression;
                             const sourcePath = Core.clone(endpointData.left.sourcePath);
@@ -6033,7 +6168,21 @@ export class Core {
                                         sourceMethod: left.sourceMethod,
                                         targetMethod: right.targetMethod,
                                         proof: wrapApply(
-                                            wrapVar("hit_dep2_comp"),
+                                            wrapVar(twoPathContainsRefl(expression)
+                                                ? "@hit_dep2_comp"
+                                                : "hit_dep2_comp"),
+                                            ...(twoPathContainsRefl(expression)
+                                                ? [
+                                                    Core.clone(hitUniverseLevel),
+                                                    Core.clone(motiveUniverseLevel),
+                                                    Core.clone(hitType),
+                                                    Core.clone(expression.left.sourceExpression.sourcePoint),
+                                                    Core.clone(expression.left.sourceExpression.targetPoint),
+                                                    Core.clone(expression.left.sourcePath),
+                                                    Core.clone(expression.left.targetPath),
+                                                    Core.clone(expression.right.targetPath),
+                                                ]
+                                                : []),
                                             Core.clone(motiveAtFiber),
                                             Core.clone(pointValue),
                                             Core.clone(targetPointValue),
@@ -6052,7 +6201,20 @@ export class Core {
                                     sourceMethod: value.targetMethod,
                                     targetMethod: value.sourceMethod,
                                     proof: wrapApply(
-                                        wrapVar("hit_dep2_inv"),
+                                        wrapVar(twoPathContainsRefl(expression)
+                                            ? "@hit_dep2_inv"
+                                            : "hit_dep2_inv"),
+                                        ...(twoPathContainsRefl(expression)
+                                            ? [
+                                                Core.clone(hitUniverseLevel),
+                                                Core.clone(motiveUniverseLevel),
+                                                Core.clone(hitType),
+                                                Core.clone(expression.value.sourceExpression.sourcePoint),
+                                                Core.clone(expression.value.sourceExpression.targetPoint),
+                                                Core.clone(expression.value.sourcePath),
+                                                Core.clone(expression.value.targetPath),
+                                            ]
+                                            : []),
                                         Core.clone(motiveAtFiber),
                                         Core.clone(pointValue),
                                         Core.clone(targetPointValue),
@@ -6180,6 +6342,22 @@ export class Core {
                     if (name) deferredComputationTypes.add(name);
                 }
             }
+            if (bundle.metadata?.kind === "hit1"
+                || bundle.metadata?.kind === "hit2"
+                || bundle.metadata?.kind === "hit3") {
+                if (bundle.eliminator?.[0]) {
+                    deferredComputationTypes.add(bundle.eliminator[0]);
+                }
+                if (bundle.recursor?.[0]) {
+                    deferredComputationTypes.add(bundle.recursor[0]);
+                }
+                if (bundle.metadata.fullEliminatorName) {
+                    deferredComputationTypes.add(bundle.metadata.fullEliminatorName);
+                }
+                if (bundle.metadata.fullRecursorName) {
+                    deferredComputationTypes.add(bundle.metadata.fullRecursorName);
+                }
+            }
         }
         const publishComputeRules = () => {
             for (const [head, rules] of Object.entries(normalizedRules)) {
@@ -6190,6 +6368,18 @@ export class Core {
             }
             this.syncSemanticComputeRules();
         };
+        const isCanonicalHitStructureType = (name: string) => isCanonicalHitBundle
+            && (name === bundle.eliminator?.[0]
+                || name === bundle.recursor?.[0]
+                || name === bundle.metadata?.fullEliminatorName
+                || name === bundle.metadata?.fullRecursorName);
+        const isCanonicalHitBundle = strictRuleSchema
+            && (bundle.metadata?.kind === "hit1"
+                || bundle.metadata?.kind === "hit2"
+                || bundle.metadata?.kind === "hit3");
+        const usesCertifiedHitStructureBudget = (name: string) =>
+            isCanonicalHitStructureType(name)
+            || (isCanonicalHitBundle && name.startsWith("@"));
         try {
             for (const [name, type] of normalizedEntries) this.state.sysTypes[name] = type;
             for (const [name, definition] of normalizedDefinitions) this.state.sysDefs[name] = definition;
@@ -6201,7 +6391,7 @@ export class Core {
             // eliminator application and therefore need the certified rules.
             if (!strictRuleSchema) publishComputeRules();
             for (const [name, type] of normalizedEntries) {
-                if (deferredComputationTypes.has(name)) continue;
+                if (deferredComputationTypes.has(name) || isCanonicalHitStructureType(name)) continue;
                 this.checkTypeFormation(type, []);
             }
             if (strictRuleSchema) {
@@ -6210,17 +6400,43 @@ export class Core {
                     normalizedEntries,
                     normalizedRules,
                     parameters,
-                    indexCount
+                    indexCount,
+                    isCanonicalHitBundle ? certifiedHitStructureResourceLimits : undefined
                 );
+                if (isCanonicalHitBundle) {
+                    if (bundle.metadata.fullEliminatorName) {
+                        canonicallyCertifiedTypeFormations.add(bundle.metadata.fullEliminatorName);
+                    }
+                    if (bundle.metadata.fullRecursorName) {
+                        canonicallyCertifiedTypeFormations.add(bundle.metadata.fullRecursorName);
+                    }
+                    if (bundle.eliminator?.[0]) {
+                        canonicallyCertifiedTypeFormations.add(bundle.eliminator[0]);
+                    }
+                    if (bundle.recursor?.[0]) {
+                        canonicallyCertifiedTypeFormations.add(bundle.recursor[0]);
+                    }
+                }
+                // Every hidden `@...` slot in a schema-v1 HIT bundle is
+                // generated from the same canonical reconstruction.  Mark
+                // those slots together so full path computations receive the
+                // same bounded structure budget as the full eliminator.
+                for (const [name] of normalizedEntries) {
+                    if (isCanonicalHitBundle && name.startsWith("@")) {
+                        canonicallyCertifiedTypeFormations.add(name);
+                    }
+                }
                 publishComputeRules();
             }
             for (const [name, type] of normalizedEntries) {
-                if (!deferredComputationTypes.has(name)) continue;
+                if (!deferredComputationTypes.has(name) && !isCanonicalHitStructureType(name)) continue;
                 this.checkTypeFormation(
                     type,
                     [],
                     canonicallyCertifiedTypeFormations.has(name)
-                        ? certifiedPathComputationResourceLimits
+                        ? (usesCertifiedHitStructureBudget(name)
+                            ? certifiedHitStructureResourceLimits
+                            : certifiedPathComputationResourceLimits)
                         : undefined
                 );
             }
@@ -6683,7 +6899,7 @@ export class Core {
         }
         if (isNbeUniverseType(inferred)) return candidate;
         const normalized = this.semanticKernel.tryWhnf(inferred, context, {
-            deadline: this.state.time ? this.state.time + Core.timeout : undefined,
+            deadline: this.state.time ? this.deadlineFrom(this.state.time) : undefined,
             maxSteps: semanticResourceLimits?.synthesisMaxSteps
                 ?? Core.semanticTypeSynthesisMaxSteps,
             unfoldDefinitions: true
@@ -6754,7 +6970,8 @@ export class Core {
                 !beforeInferResolution,
                 allowUnsolvedTermMetas
                     || hasSemanticElaborationHole(semanticAssertionTarget.nodes[0]),
-                semanticAssertionSource
+                semanticAssertionSource,
+                semanticResourceLimits
             );
             if (isNbeTypeFailure(semanticAssertion)) {
                 this.reportSemanticFailure(semanticAssertionTarget, semanticAssertion);
@@ -7151,7 +7368,8 @@ export class Core {
         context: Context,
         annotateTerm: boolean,
         allowUnsolvedTermMetas: boolean,
-        sourceAssertion?: AST
+        sourceAssertion?: AST,
+        semanticResourceLimits?: SemanticTypeSynthesisResourceLimits
     ): SemanticTypeAttempt<SemanticTypeAssertionResult> {
         if (ast.type !== ":") return;
         const term = Core.clone(ast.nodes?.[0]);
@@ -7166,7 +7384,8 @@ export class Core {
         const sourceExpected = sourceAssertion?.type === ":"
             ? sourceAssertion.nodes?.[1]
             : undefined;
-        const sourceMaxNodes = Core.semanticTypeAssertionMaxNodes;
+        const sourceMaxNodes = semanticResourceLimits?.inputMaxNodes
+            ?? Core.semanticTypeAssertionMaxNodes;
         const sourceFits = (!sourceTerm || fitsSemanticNbeBudget(
             sourceTerm,
             sourceMaxNodes,
@@ -7225,8 +7444,9 @@ export class Core {
             ...context.map(([, , id]) => Number.isFinite(id) ? id + 1 : 0)
         );
         const options = {
-            deadline: this.state.time ? this.state.time + Core.timeout : undefined,
-            maxSteps: Core.semanticTypeAssertionMaxSteps,
+            deadline: this.state.time ? this.deadlineFrom(this.state.time) : undefined,
+            maxSteps: semanticResourceLimits?.synthesisMaxSteps
+                ?? Core.semanticTypeAssertionMaxSteps,
             elaborateMetas: true,
             annotateTerm,
             allowUnsolvedTermMetas,
@@ -7297,9 +7517,11 @@ export class Core {
             return checked.status === "invalid" ? false : undefined;
         }
         const returnedSchematicMetaNames = new Set(checked.schematicMetaNames ?? []);
+        const checkedOutputMaxNodes = semanticResourceLimits?.outputMaxNodes
+            ?? expectedMaxNodes;
         if (!fitsSemanticNbeBudget(
             checked.type,
-            expectedMaxNodes,
+            checkedOutputMaxNodes,
             false,
             context,
             false,
@@ -7307,7 +7529,7 @@ export class Core {
         )) {
             return exceedsSemanticNbeNodeBudget(
                 checked.type,
-                expectedMaxNodes
+                checkedOutputMaxNodes
             ) ? { status: "unsupported", code: "budget-exhausted" } : undefined;
         }
         if (!this.commitSemanticSourceMetaConstraints(
@@ -7369,7 +7591,7 @@ export class Core {
             ...context.map(([, , id]) => Number.isFinite(id) ? id + 1 : 0)
         );
         const options = {
-            deadline: this.state.time ? this.state.time + Core.timeout : undefined,
+            deadline: this.state.time ? this.deadlineFrom(this.state.time) : undefined,
             maxSteps: Core.semanticTypeAssertionMaxSteps,
             elaborateMetas: true,
             annotateTerm: true,
@@ -7471,7 +7693,7 @@ export class Core {
             context,
             {
                 maxSteps: Core.semanticTypeAssertionMaxSteps,
-                deadline: Date.now() + Core.timeout,
+                deadline: this.deadlineFrom(Date.now()),
                 elaborateMetas: true,
                 preserveKernelType: true,
                 sourceMetas: preparedCandidate.sourceMetas,
@@ -7549,7 +7771,7 @@ export class Core {
             ...context.map(([, , id]) => Number.isFinite(id) ? id + 1 : 0)
         );
         const normalized = this.semanticKernel.tryNormalize(semanticAst, context, {
-            deadline: this.state.time ? this.state.time + Core.timeout : undefined,
+            deadline: this.state.time ? this.deadlineFrom(this.state.time) : undefined,
             maxSteps: Core.semanticTypeAssertionMaxSteps,
             unfoldDefinitions: false,
             freshBondVarId: () => nextSemanticBondVarId++
@@ -7569,7 +7791,7 @@ export class Core {
      * this pass performs only local beta/iota computation introduced by the
      * substitution and keeps unrelated named definitions opaque. */
     normalizeExpandedProofGoal(ast: AST, context: Context) {
-        const deadline = Date.now() + Core.timeout;
+        const deadline = this.deadlineFrom(Date.now());
         let nextSemanticBondVarId = Math.max(
             this.state.bondVarId,
             ...context.map(([, , id]) => Number.isFinite(id) ? id + 1 : 0)
@@ -7680,7 +7902,7 @@ export class Core {
             ...context.map(([, , id]) => Number.isFinite(id) ? id + 1 : 0)
         );
         const checkerOptions = {
-            deadline: this.state.time ? this.state.time + Core.timeout : undefined,
+            deadline: this.state.time ? this.deadlineFrom(this.state.time) : undefined,
             maxSteps: synthesisMaxSteps,
             annotateTerm: options.annotateTerm ?? false,
             generalizeMetas,
@@ -7875,7 +8097,7 @@ export class Core {
         throw new Error("unreachable semantic failure");
     }
     private reportSemanticBudgetFailure(ast: AST): never {
-        if (this.state.time && Date.now() - this.state.time >= Core.timeout) {
+        if (this.state.time && Date.now() >= this.deadlineFrom(this.state.time)) {
             Core.timeoutOccured = true;
         }
         this.error(

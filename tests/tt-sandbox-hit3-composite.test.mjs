@@ -48,19 +48,20 @@ for (const name of [
     assert.equal(sandbox.check(name).ok, true, `${name} must have a formed type`);
 }
 
-assert.throws(
-    () => parseSandboxHit(
-        "hit BadComposite3 : U "
+const invalidComposite = new SandboxEnvironment({
+    systemRuleIds: creativeSandboxSystemRuleIds
+}).add(
+    "hit BadComposite3 : U "
         + "| badBase3:BadComposite3 "
         + "| badLoop0:badBase3=badBase3 | badLoop1:badBase3=badBase3 "
         + "| badLoop2:badBase3=badBase3 "
         + "| path2 badFace01:badLoop0=badLoop1 "
         + "| path2 badFace20:badLoop2=badLoop0 "
         + "| path3 badCell:(badFace01▪badFace20)=badFace01"
-    ),
-    /三阶路径构造子.*(?:无法拼接|边界不一致)/,
-    "non-composable second-path expressions must report a Chinese boundary error"
 );
+assert.equal(invalidComposite.ok, false);
+assert.match(invalidComposite.error ?? "", /三阶路径构造子.*边界.*不一致/,
+    "Core must reject non-composable second-path expressions after parser elaboration");
 
 const parameterizedSource = "hit CompositeP (A : U) : U "
     + "| baseCompositeP : CompositeP A "

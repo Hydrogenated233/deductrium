@@ -32,6 +32,8 @@
     "benchmark:workspace": "node tests/benchmarks/theorem-workspace-index.mjs",
     "prebenchmark:issue5": "npm run build",
     "benchmark:issue5": "node tests/benchmarks/issue-5-resource-limit.mjs",
+    "prebenchmark:hit3": "npm run build",
+    "benchmark:hit3": "node --expose-gc tests/benchmarks/hit3-expansion.mjs",
     "test:tt-assist-even": "node tests/tt-assist-even.test.mjs",
     "test:tt-definition-caches": "node tests/tt-worker-definition-caches.test.mjs",
     "test:tt-worker-cache": "node tests/tt-worker-cache.test.mjs",

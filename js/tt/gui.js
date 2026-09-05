@@ -2660,9 +2660,7 @@ export class TTGui {
         });
         addTheorem.addEventListener("click", () => {
             if (!folder.open) {
-                const workspace = this.syncTheoremWorkspaceFromDom(true);
-                const mutation = workspace.setFolderOpen(folder.id, true);
-                this.applyTheoremWorkspaceSnapshot(mutation.snapshot);
+                return;
             }
             this.renderTheoremStructure();
             this.updateInhabitList(undefined, folder);

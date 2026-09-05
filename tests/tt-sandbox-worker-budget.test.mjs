@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 
+import { Core } from "../js/tt/core.js";
+import { TTCoreEngine } from "../js/tt/engine.js";
 import { SandboxEnvironment } from "../js/tt/sandbox.js";
 import { SandboxWorkerSession } from "../js/tt/sandbox-worker.js";
 import {
@@ -49,6 +51,35 @@ const timeBudgetResult = timeBudgetSession.handle({
 });
 assert.equal(timeBudgetResult.status, "budget-exhausted");
 assert.match(timeBudgetResult.error, /时间预算|资源上限/);
+
+// A sandbox Worker owns a separate Core instance. Its validation timeout must
+// override a short game-wide Core timeout without mutating that global value.
+const previousCoreTimeout = Core.timeout;
+try {
+    Core.timeout = 0;
+    const isolatedTimeoutEnvironment = new SandboxEnvironment({
+        validationTimeoutMs: 5_000
+    });
+    const isolatedTimeoutResult = isolatedTimeoutEnvironment.add("ScopedTimeoutA : U");
+    assert.equal(isolatedTimeoutResult.ok, true, isolatedTimeoutResult.error);
+    assert.equal(Core.timeout, 0,
+        "sandbox validation must not leak its local timeout into the game Core");
+} finally {
+    Core.timeout = previousCoreTimeout;
+}
+
+const deadlineEngine = new TTCoreEngine();
+deadlineEngine.configure({ unlockedTypes: ["True"] });
+const expired = deadlineEngine.core.withTimeoutBudget(
+    5_000,
+    Date.now() - 1,
+    () => deadlineEngine.check("true : True")
+);
+assert.equal(expired.ok, false);
+assert.equal(expired.timeout, true,
+    "an absolute sandbox deadline must stop nested Core checks without restarting the budget");
+assert.equal(deadlineEngine.check("true : True").ok, true,
+    "the request deadline must be restored after the bounded operation finishes");
 
 const cancelledSession = new SandboxWorkerSession();
 cancelledSession.cancel(4);

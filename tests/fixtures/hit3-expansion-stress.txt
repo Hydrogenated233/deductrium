@@ -1,0 +1,5 @@
+hit Xk : U
+| b : Xk
+| l : b=b
+| path2 f : ((l▪l)▪l)=((l▪l)▪l)
+| path3 c : ((f▪f)▪f)=((f▪f)▪f)

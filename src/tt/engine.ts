@@ -18,6 +18,8 @@ export type TTCoreConfig = {
     disableSimpleEq?: boolean;
     inferDisplayMode?: "_" | "@";
     timeout?: number;
+    /** Per-Core timeout for an isolated worker; does not change Core.timeout. */
+    isolatedTimeout?: number;
     /** Finite multiplier applied to all semantic NbE node and step budgets. */
     semanticResourceScale?: number;
     language?: string;
@@ -144,6 +146,7 @@ export class TTCoreEngine {
         langMgr.lang = config.language ?? langMgr.lang;
         this.core = new Core();
         Core.timeout = config.timeout ?? Core.timeout;
+        this.core.setTimeoutOverride(config.isolatedTimeout);
         if (config.semanticResourceScale !== undefined) {
             Core.setSemanticResourceScale(config.semanticResourceScale);
         }
