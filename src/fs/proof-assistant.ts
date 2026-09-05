@@ -1622,9 +1622,16 @@ export class InferenceProofAssistant {
 
     private planRewrite(target: AST, source: AST, destination: AST, nth: number | null): RewriteStep[] {
         if (astmgr.equal(source, destination)) throw new Error(TR("rw等式两端相同，没有可执行的改写"));
+        // Concrete sources can be found independently of unrelated user
+        // metavariables in the target.  Schematic sources still require the
+        // assertion matcher’s strict unknown/capture analysis.
+        const allowUnknownOutsideMatch = Object.keys(
+            this.fs.assert.getVarNamesAndIsNots(source, {}, null)
+        ).length === 0;
         const probe = astmgr.clone(target);
         const allMatches = this.fs.assert.getSubAstMatchTimesAndReplace(
-            probe, astmgr.clone(source), astmgr.clone(destination), -1, [], [], false
+            probe, astmgr.clone(source), astmgr.clone(destination), -1, [], [], false,
+            allowUnknownOutsideMatch
         );
         if (allMatches === false) throw new Error(TR("rw无法确认替换是否会捕获变量"));
         if (!allMatches.length) throw new Error(TR("当前目标中未找到可改写项"));
@@ -1640,7 +1647,8 @@ export class InferenceProofAssistant {
             const before = astmgr.clone(current);
             const after = astmgr.clone(current);
             const matches = this.fs.assert.getSubAstMatchTimesAndReplace(
-                after, astmgr.clone(source), astmgr.clone(destination), index, [], [], false
+                after, astmgr.clone(source), astmgr.clone(destination), index, [], [], false,
+                allowUnknownOutsideMatch
             );
             if (matches === false || matches.length <= index || astmgr.equal(before, after)) {
                 throw new Error(TR("rw未能替换指定出现位置"));
@@ -1655,13 +1663,15 @@ export class InferenceProofAssistant {
     private findInverseRewriteOccurrence(before: AST, after: AST, source: AST, destination: AST): number {
         const probe = astmgr.clone(after);
         const matches = this.fs.assert.getSubAstMatchTimesAndReplace(
-            probe, astmgr.clone(source), astmgr.clone(destination), -1, [], [], false
+            probe, astmgr.clone(source), astmgr.clone(destination), -1, [], [], false,
+            Object.keys(this.fs.assert.getVarNamesAndIsNots(source, {}, null)).length === 0
         );
         if (matches === false) throw new Error(TR("rw无法构造反向替换证明"));
         for (let index = 0; index < matches.length; index++) {
             const candidate = astmgr.clone(after);
             const result = this.fs.assert.getSubAstMatchTimesAndReplace(
-                candidate, astmgr.clone(source), astmgr.clone(destination), index, [], [], false
+                candidate, astmgr.clone(source), astmgr.clone(destination), index, [], [], false,
+                Object.keys(this.fs.assert.getVarNamesAndIsNots(source, {}, null)).length === 0
             );
             if (result !== false && result.length > index && astmgr.equal(candidate, before)) return index + 1;
         }
@@ -2667,6 +2677,74 @@ export class InferenceProofAssistant {
         return cost;
     }
 
+    /**
+     * Expand a fully instantiated generated assertion without asking the
+     * low-level matcher to decide a capture-prone #rp pattern.  The ordinary
+     * matcher must remain strict for user-authored rules; this helper is only
+     * used after every generated-rule replacement value has been fixed.
+     */
+    private expandGeneratedAssertionsCaptureAvoiding(ast: AST): AST {
+        if (ast.type === "fn" && ast.name === "#rp") {
+            if (!ast.nodes || ast.nodes.length !== 3) {
+                // A fourth node selects one occurrence.  Replaying that form
+                // by replacing every occurrence would change its meaning, so
+                // let the normal matcher handle it instead.
+                throw new Error(TR("生成规则包含无法安全展开的定点替换"));
+            }
+            const source = this.fs.assert.getVarName(ast.nodes[1]);
+            if (!source) throw new Error(TR("生成规则替换源不是变量"));
+            const replaced = this.substituteBoundValue(ast.nodes[0], source, ast.nodes[2]);
+            return this.expandGeneratedAssertionsCaptureAvoiding(replaced);
+        }
+        if (!ast.nodes?.length) return astmgr.clone(ast);
+        return {
+            type: ast.type,
+            name: ast.name,
+            nodes: ast.nodes.map(child => this.expandGeneratedAssertionsCaptureAvoiding(child))
+        };
+    }
+
+    /**
+     * Match a generated rule whose replacement values are already complete.
+     * `AssertionSystem.match` intentionally rejects a #rp that could capture
+     * a binder.  Generated universal lifting knows the concrete replacement,
+     * so evaluate that #rp with the same capture-avoiding substitution used by
+     * `have` and then compare the resulting propositions semantically.
+     */
+    private selectExplicitGeneratedRule(candidateName: string, deduction: Deduction,
+        target: AST, expectedConditions: AST[], explicitValues: AST[]
+    ): GeneratedRuleSelection | undefined {
+        if (deduction.replaceNames.length !== explicitValues.length) return undefined;
+        if (!this.astContainsFunction(deduction.conclusion, "#rp")
+            && !deduction.conditions.some(condition => this.astContainsFunction(condition, "#rp"))) {
+            return undefined;
+        }
+        const matchTable: ReplvarMatchTable = {};
+        deduction.replaceNames.forEach((name, index) => {
+            matchTable[name] = astmgr.clone(explicitValues[index]);
+        });
+        const instantiate = (value: AST): AST => {
+            const result = astmgr.clone(value);
+            astmgr.replaceByMatchTable(result, matchTable);
+            if (this.astContainsPrivateRuleVariable(result)) {
+                throw new Error(TR("生成规则仍包含未解析的元变量"));
+            }
+            return this.expandGeneratedAssertionsCaptureAvoiding(result);
+        };
+        const conclusion = instantiate(deduction.conclusion);
+        this.assertSameProposition(conclusion, target);
+        const conditions = deduction.conditions.map(instantiate);
+        if (conditions.length !== expectedConditions.length) return undefined;
+        for (let index = 0; index < conditions.length; index++) {
+            this.assertSameProposition(conditions[index], expectedConditions[index]);
+        }
+        return {
+            name: candidateName,
+            deduction,
+            replaceValues: explicitValues.map(value => astmgr.clone(value))
+        };
+    }
+
     private selectGeneratedRule(baseName: string, target: AST, expectedConditions: AST[],
         prefixes: string[], explicitValues: AST[] = []): GeneratedRuleSelection | undefined {
         const oldFastMetaRules = this.fs.fastmetarules;
@@ -2725,6 +2803,33 @@ export class InferenceProofAssistant {
                     candidates.push({ name: candidateName, deduction, replaceValues });
                 } catch {
                     // Invalid candidates are expected during bounded search.
+                }
+            }
+
+            // A fully explicit generated `a4`/`v...a4` application can carry
+            // a capture-prone #rp in its conclusion.  The strict matcher must
+            // reject that shape for user input, but universal qed lifting can
+            // safely evaluate it now that every replacement is concrete.
+            // Universal lifting prefixes an unconditional `a4` with one or
+            // more `v`/`u`/`c` markers (for example `va4` and `vva4`).  The
+            // capture-safe fallback applies to that whole generated family,
+            // while the suffix check keeps unrelated rules such as `a1` out.
+            if (explicitValues.length && /^[vuc<>]*a4$/.test(baseName)) {
+                for (const candidateName of this.generatedRuleCandidates(baseName, prefixes)) {
+                    if (candidates.some(candidate => candidate.name === candidateName)) continue;
+                    let deduction: Deduction | undefined;
+                    try {
+                        deduction = this.fs.deductions[candidateName] ?? this.fs.generateDeduction(candidateName);
+                        if (!deduction) continue;
+                        this.assertGeneratedDeductionMetaRules(candidateName, existingNames);
+                        const selection = this.selectExplicitGeneratedRule(
+                            candidateName, deduction, target, expectedConditions, explicitValues
+                        );
+                        if (selection) candidates.push(selection);
+                    } catch {
+                        // A candidate with incompatible binders is expected;
+                        // continue searching for the next generated prefix.
+                    }
                 }
             }
         } finally {
@@ -3658,6 +3763,14 @@ export class InferenceProofAssistant {
         const left = this.normalizeAssertionSyntax(a);
         const right = this.normalizeAssertionSyntax(b);
         if (astmgr.equal(left, right)) return;
+        // A formal child goal may retain an inert top-level #rp wrapper while
+        // the tactic-facing node has already normalized it away.  Compare
+        // those wrappers after proving that their source is absent from the
+        // body; meaningful binder conversions (where the source occurs) stay
+        // rigid and continue through the assertion-aware matcher below.
+        const strippedLeft = this.stripInertFormalReplacement(left);
+        const strippedRight = this.stripInertFormalReplacement(right);
+        if (astmgr.equal(strippedLeft, strippedRight)) return;
         // Assertion wrappers such as `#nf` are semantically transparent once
         // both sides are being compared as propositions.  `AssertionSystem.match`
         // is intentionally directional for inference, so use its symmetric

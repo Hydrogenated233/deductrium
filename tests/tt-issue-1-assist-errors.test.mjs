@@ -46,11 +46,20 @@ try {
         const snapshot = assist.start(statements.at(-1), options, history);
         assert.ok(snapshot.tactics.includes(command),
             `${command} must remain a syntax-based possibly-applicable suggestion`);
-        const after = assist.apply(command);
-        assert.equal(after.goals.length, 1,
-            `${command} must construct the transport and leave its rewritten goal`);
-        assert.doesNotMatch(parser.stringify(after.goals[0].type), /\?nbe\d+/,
-            `${command} must not expose private semantic metas in the rewritten goal`);
+        const before = JSON.stringify(snapshot);
+        if (/^rwb\s/.test(command)) {
+            const after = assist.apply(command);
+            assert.equal(after.goals.length, 1,
+                `${command} must construct the valid reverse transport and leave its rewritten goal`);
+            assert.doesNotMatch(parser.stringify(after.goals[0].type), /\?nbe\d+/,
+                `${command} must not expose private semantic metas in the rewritten goal`);
+        } else {
+            assert.throws(() => assist.apply(command),
+                /函数作用类型不匹配|类型推断无法判定类型是否相等|类型推断暂不支持/,
+                `${command} must reject the ill-typed dependent transport`);
+            assert.equal(JSON.stringify(assist.snapshot()), before,
+                `${command} rejection must leave the proof state unchanged`);
+        }
     }
 } finally {
     console.log = originalLog;

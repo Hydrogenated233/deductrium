@@ -484,7 +484,8 @@ export class AssertionSystem {
         return res;
     }
     getSubAstMatchTimesAndReplace(
-        ast: AST, subAst: AST, newAst: AST, nth: number, scope: AST[] = [], res: AST[][] = [], right: boolean
+        ast: AST, subAst: AST, newAst: AST, nth: number, scope: AST[] = [], res: AST[][] = [], right: boolean,
+        allowUnknownOutsideMatch = false
     ): AST[][] | false {
         if (nth !== -1 && nth < res.length) return res; // completed, this short circuit is neccesary for later unknown $s 
         if (scope.length) {
@@ -517,6 +518,8 @@ export class AssertionSystem {
             // instantiation, but that uncertainty must not discard a known
             // match in a sibling node such as `$0=$2` when rewriting `$0`.
             if (ast.type === "replvar" && subAst.type === "replvar") return res;
+            if (allowUnknownOutsideMatch
+                && Object.keys(this.getVarNamesAndIsNots(subAst, {}, null)).length === 0) return res;
             // if (nth === -1 && this.astEq(ast, newAst)) return res;
             return false; // unknown
         }
@@ -537,33 +540,33 @@ export class AssertionSystem {
             if (bounded === T) return res; // can't match bounded var
             if (bounded === U) return false;
             scope.push(qp[0]);
-            return this.getSubAstMatchTimesAndReplace(qp[1], subAst, newAst, nth, scope, res, right);
+            return this.getSubAstMatchTimesAndReplace(qp[1], subAst, newAst, nth, scope, res, right, allowUnknownOutsideMatch);
         }
         const backup = astmgr.clone(ast);
         if (ast.type === "sym" && (ast.name === "{|" || ast.name === "|}")) {
             const bounded = this.astEq(ast.nodes[0], subAst);
             if (bounded === U) return false;
             if ((!right) === (ast.name === "{|")) {
-                let subres = this.getSubAstMatchTimesAndReplace(ast.nodes[1], subAst, newAst, nth, scope.slice(0), res, right);
+                let subres = this.getSubAstMatchTimesAndReplace(ast.nodes[1], subAst, newAst, nth, scope.slice(0), res, right, allowUnknownOutsideMatch);
                 if (subres === false) {
                     astmgr.assign(ast, backup);
                     return false;
                 }
                 if (bounded === T) return res; // can't match bounded var
                 scope.push(ast.nodes[0]);
-                subres = this.getSubAstMatchTimesAndReplace(ast.nodes[2], subAst, newAst, nth, scope, res, right);
+                subres = this.getSubAstMatchTimesAndReplace(ast.nodes[2], subAst, newAst, nth, scope, res, right, allowUnknownOutsideMatch);
                 if (subres === false) {
                     astmgr.assign(ast, backup);
                     return false;
                 }
             } else {
-                let subres = this.getSubAstMatchTimesAndReplace(ast.nodes[2], subAst, newAst, nth, [ast.nodes[0], ...scope], res, right);
+                let subres = this.getSubAstMatchTimesAndReplace(ast.nodes[2], subAst, newAst, nth, [ast.nodes[0], ...scope], res, right, allowUnknownOutsideMatch);
                 if (subres === false) {
                     astmgr.assign(ast, backup);
                     return false;
                 }
                 if (bounded === T) return res; // can't match bounded var
-                subres = this.getSubAstMatchTimesAndReplace(ast.nodes[1], subAst, newAst, nth, scope, res, right);
+                subres = this.getSubAstMatchTimesAndReplace(ast.nodes[1], subAst, newAst, nth, scope, res, right, allowUnknownOutsideMatch);
                 if (subres === false) {
                     astmgr.assign(ast, backup);
                     return false;
@@ -578,7 +581,7 @@ export class AssertionSystem {
             }
             if (right) {
                 for (let n = ast.nodes.length - 1; n >= 0; n--) {
-                    const subres = this.getSubAstMatchTimesAndReplace(ast.nodes[n], subAst, newAst, nth, scope.slice(0), res, right);
+                    const subres = this.getSubAstMatchTimesAndReplace(ast.nodes[n], subAst, newAst, nth, scope.slice(0), res, right, allowUnknownOutsideMatch);
                     // if unknown, don't spread, just ignore it and replace??
                     if (subres === false) {
                         // No! this time all are not sure, undo all changes, remain #rp
@@ -588,7 +591,7 @@ export class AssertionSystem {
                 }
             } else {
                 for (const n of ast.nodes) {
-                    const subres = this.getSubAstMatchTimesAndReplace(n, subAst, newAst, nth, scope.slice(0), res, right);
+                    const subres = this.getSubAstMatchTimesAndReplace(n, subAst, newAst, nth, scope.slice(0), res, right, allowUnknownOutsideMatch);
                     // if unknown, don't spread, just ignore it and replace??
                     if (subres === false) {
                         // No! this time all are not sure, undo all changes, remain #rp
@@ -837,7 +840,10 @@ export class AssertionSystem {
 
             if (eq === U) return;
             if (typeof nth === "string") return;
-            const scopes = this.getSubAstMatchTimesAndReplace(sub, src, dst, nth, undefined, undefined, right);
+            const allowUnknownOutsideMatch = Object.keys(this.getVarNamesAndIsNots(src, {}, null)).length === 0;
+            const scopes = this.getSubAstMatchTimesAndReplace(
+                sub, src, dst, nth, undefined, undefined, right, allowUnknownOutsideMatch
+            );
             if (scopes) {
                 for (const [idx, scope] of scopes.entries()) {
                     // if not match all, just verify nth

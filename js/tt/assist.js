@@ -1284,6 +1284,21 @@ export class Assist {
                 newAst = parser.parse(useTrans ?
                     `trans $fn ` + (back ? `$eq` : `(inveq $eq)`) : `ind_eq $2 (L${y}:$type.L${m}:${core.state.disableSimpleEq ? `eq $2 ` + y : `$2=${y}`}. P${m}:` + (back ? `$fn_2, $fn_y` : `$fn_y, $fn_2`) + `) (Lx:_.x) $3 $eq`);
                 Core.replaceByMatch(newAst, matched, /^\$/);
+                // A rewrite can put the selected endpoint inside a binder
+                // domain.  In that case the generated motive is dependent,
+                // and keeping the transport unchecked can make an ill-typed
+                // proof appear complete until qed.  Validate only this
+                // dependent case here; ordinary rewrites keep the fast path
+                // and are still checked when their proof is consumed.
+                if (this.hasRewriteParameterInBinderType(newAst, fnparam)) {
+                    try {
+                        core.withSilentErrors(() => core.checkType(Core.clone(newAst), goal.context, false));
+                    }
+                    catch (error) {
+                        this.goal.unshift(goal);
+                        throw error;
+                    }
+                }
                 // The equality proof and both endpoint types were checked
                 // above, while fnbody was obtained by capture-safe
                 // substitution from the live goal.  Re-synthesizing this
@@ -1333,6 +1348,15 @@ export class Assist {
         // in autofill, there will be a condition: goal is [[a]] = b or [[a]] = [[b]] or a = [[b]]
     }
     // replace "search" in ast by "varname"
+    hasRewriteParameterInBinderType(ast, parameter) {
+        if (!ast || typeof ast !== "object")
+            return false;
+        if (ast.type === "L" || ast.type === "P" || ast.type === "W" || ast.type === "S") {
+            if (ast.nodes?.[0] && Core.getFreeVars(ast.nodes[0]).has(parameter))
+                return true;
+        }
+        return (ast.nodes ?? []).some(node => this.hasRewriteParameterInBinderType(node, parameter));
+    }
     genReplaceFn(ast, search, varname, excludedNames, freevarsinSearch = Core.getFreeVars(search), scope = []) {
         if (this.exactEqualByAlphaConversion(ast, search)) {
             let bounded = false;
@@ -1465,6 +1489,37 @@ export class Assist {
             nodes: [term, theorem]
         }, [], false, undefined, false, true);
     }
+    /**
+     * `simpl` is a head-normalisation tactic. A rigid type such as a Sigma
+     * or product is already in WHNF; sending it through the semantic
+     * normaliser only to discover that fact can exceed the interactive budget
+     * and incorrectly report an unsupported expression.
+     */
+    hasHeadReduction(ast) {
+        if (!ast || typeof ast !== "object")
+            return false;
+        if (ast.type === "var") {
+            return !ast.bondVarId && !!ast.name && core.semanticKernel.hasReduction(ast.name);
+        }
+        if (ast.type === "apply") {
+            let head = ast;
+            while (head.type === "apply") {
+                head = head.nodes?.[0];
+                if (!head)
+                    break;
+            }
+            if (head?.type === "L" || core.semanticKernel.canSemanticReduce(ast))
+                return true;
+        }
+        // A proposition can be rigid at its head while containing a reducible
+        // term in an application argument (for example `eq (add 0 n) n`).
+        // `simpl` must still run in that case; otherwise a later `rfl` sees
+        // the unreduced child and reports a false mismatch.  Do not descend
+        // through rigid Sigma/product/binder nodes: those are already WHNF,
+        // and normalising their projection arguments is the unsupported path
+        // that this guard is meant to avoid.
+        return (ast.nodes ?? []).some(node => node.type === "apply" && this.hasHeadReduction(node));
+    }
     simpl(str) {
         if (str) {
             str = str.trim();
@@ -1476,6 +1531,10 @@ export class Assist {
         if (!type && str) {
             this.goal.unshift(goal);
             throw TR("未知的变量：") + str;
+        }
+        if (!this.hasHeadReduction(type ?? goal.type)) {
+            this.goal.unshift(goal);
+            return this;
         }
         try {
             this.whnf(type ?? goal.type, type ? goal.context.slice(0, goal.context.findIndex(e => e[0] === str)) : goal.context);

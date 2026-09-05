@@ -344,6 +344,10 @@ export function calcMaxReachOrd(o, base, stepInf) {
     }
     return ord2;
 }
+/** Ordinal-base rewards are monotone: a later reward may only lower the base. */
+export function lowerOrdinalBase(currentBase, rewardBase) {
+    return Math.min(currentBase, rewardBase);
+}
 export function cmp(o1, o2) {
     const len = Math.max(o1.length, o2.length);
     let res = 0; //for 0 == 0

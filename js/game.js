@@ -3,7 +3,7 @@ import { FSGui } from "./fs/gui.js";
 import { Rotor } from "./hy/algebra.js";
 import { HyperGui } from "./hy/gui.js";
 import { TileBlockType } from "./hy/maploader.js";
-import { calcMaxReachOrd, cmp, printOrd } from "./hy/ordinal.js";
+import { calcMaxReachOrd, cmp, lowerOrdinalBase, printOrd } from "./hy/ordinal.js";
 import { langMgr, TR } from "./lang.js";
 import { GameSaveLoad } from "./saveload.js";
 import { TTGui } from "./tt/gui.js";
@@ -390,22 +390,22 @@ export class Game {
                     }
                     break;
                 case "base5":
-                    this.ordBase = 4;
+                    this.ordBase = lowerOrdinalBase(this.ordBase, 4);
                     this.nextOrd = calcMaxReachOrd(this.maxOrd, this.ordBase, this.rewards.includes("stepw"));
                     this.updateProgressParam();
                     break;
                 case "base4":
-                    this.ordBase = 3;
+                    this.ordBase = lowerOrdinalBase(this.ordBase, 3);
                     this.nextOrd = calcMaxReachOrd(this.maxOrd, this.ordBase, this.rewards.includes("stepw"));
                     this.updateProgressParam();
                     break;
                 case "base3":
-                    this.ordBase = 2;
+                    this.ordBase = lowerOrdinalBase(this.ordBase, 2);
                     this.nextOrd = calcMaxReachOrd(this.maxOrd, this.ordBase, this.rewards.includes("stepw"));
                     this.updateProgressParam();
                     break;
                 case "base2":
-                    this.ordBase = 1;
+                    this.ordBase = lowerOrdinalBase(this.ordBase, 1);
                     this.nextOrd = calcMaxReachOrd(this.maxOrd, this.ordBase, this.rewards.includes("stepw"));
                     this.updateProgressParam();
                     break;
