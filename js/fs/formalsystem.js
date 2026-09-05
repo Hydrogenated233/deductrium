@@ -467,6 +467,8 @@ export class FormalSystem {
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
             ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+            ...(payload.allowIfft !== undefined ? { allowIfft: payload.allowIfft } : {}),
+            ...(payload.allowIfftEu !== undefined ? { allowIfftEu: payload.allowIfftEu } : {}),
             ...(payload.tauto ? { tauto: { checkedTheorem: astmgr.clone(payload.tauto.checkedTheorem) } } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),

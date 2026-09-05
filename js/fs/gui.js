@@ -322,7 +322,9 @@ export class FSGui {
                 history: draft.history,
                 ruleNames: this.deductions,
                 fastMetaRules: this.formalSystem.fastmetarules,
-                allowMcpt: this.metarules.includes("cpt")
+                allowMcpt: this.metarules.includes("cpt"),
+                allowIfft: this.metarules.includes("ifft"),
+                allowIfftEu: this.enableMIFFT_RP
             });
             this.inferenceProofAssistant = assistant;
             this.inferenceProofPageId = page.id;
@@ -1060,7 +1062,9 @@ export class FSGui {
                 pageId: page.id,
                 ruleNames: this.deductions,
                 fastMetaRules: this.formalSystem.fastmetarules,
-                allowMcpt: this.metarules.includes("cpt")
+                allowMcpt: this.metarules.includes("cpt"),
+                allowIfft: this.metarules.includes("ifft"),
+                allowIfftEu: this.enableMIFFT_RP
             });
             snapshot = assistant.snapshot();
         }
@@ -1303,7 +1307,9 @@ export class FSGui {
                 pageId,
                 ruleNames: this.deductions,
                 fastMetaRules: this.formalSystem.fastmetarules,
-                allowMcpt: this.metarules.includes("cpt")
+                allowMcpt: this.metarules.includes("cpt"),
+                allowIfft: this.metarules.includes("ifft"),
+                allowIfftEu: this.enableMIFFT_RP
             });
             snapshot = assistant.snapshot();
             for (let index = 0; index < entries.length; index++) {

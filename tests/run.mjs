@@ -51,6 +51,7 @@ const tests = [
     "./fs-issue-28-qed-premise.test.mjs",
     "./fs-issue-29-rw-metavariable.test.mjs",
     "./fs-issue-30-qed-nested-universal.test.mjs",
+    "./fs-issue-35-rw-iff.test.mjs",
     "./tt-issue-13-expand-surface.test.mjs",
     "./tt-system-alias-self-reference.test.mjs",
     "./tt-nbe-system-compute-rule.test.mjs",

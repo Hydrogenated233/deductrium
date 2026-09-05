@@ -41,6 +41,10 @@ export type DeferredAssistantPayload = {
     fastMetaRules?: string;
     /** Whether the proof context had the MCPT/CPT metarule unlocked. */
     allowMcpt?: boolean;
+    /** Whether iff lifting (the mifft capability) was unlocked. */
+    allowIfft?: boolean;
+    /** Whether iff lifting through unique-existence quantifiers was unlocked. */
+    allowIfftEu?: boolean;
     /** Optional atomic MCPT metadata carried by a nested tauto step. */
     tauto?: DeferredTautoPayload;
 };
@@ -495,6 +499,8 @@ export class FormalSystem {
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
             ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+            ...(payload.allowIfft !== undefined ? { allowIfft: payload.allowIfft } : {}),
+            ...(payload.allowIfftEu !== undefined ? { allowIfftEu: payload.allowIfftEu } : {}),
             ...(payload.tauto ? { tauto: { checkedTheorem: astmgr.clone(payload.tauto.checkedTheorem) } } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),

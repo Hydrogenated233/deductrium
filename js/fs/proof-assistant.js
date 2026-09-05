@@ -25,6 +25,8 @@ export class InferenceProofAssistant {
     availableRuleNames;
     availableFastMetaRules;
     allowMcpt = true;
+    allowIfft = true;
+    allowIfftEu = true;
     /**
      * Only proofs whose stated goal contains user-visible assertion syntax need
      * a second, unsimplified materialization track.  Keeping ordinary proofs on
@@ -46,6 +48,8 @@ export class InferenceProofAssistant {
         this.availableRuleNames = options.ruleNames ? new Set(options.ruleNames) : undefined;
         this.availableFastMetaRules = options.fastMetaRules;
         this.allowMcpt = options.allowMcpt !== false;
+        this.allowIfft = options.allowIfft !== false;
+        this.allowIfftEu = options.allowIfftEu !== false;
         this.theorem = null;
         this.root = null;
         if (typeof targetOrPage !== "string" || !fs.inferencePages.page(targetOrPage) || options.pageId) {
@@ -156,6 +160,9 @@ export class InferenceProofAssistant {
                 if (this.canRewriteTarget(node.target, hypothesis.proposition, false, availableRuleNames)) {
                     add(`rw ${hypothesis.name}`);
                 }
+                if (this.canRewriteIffTarget(node.target, hypothesis.proposition, false, availableRuleNames)) {
+                    add(`rw ${hypothesis.name}`);
+                }
                 const simplifyDirection = this.simplifyDirection(hypothesis.proposition);
                 if (simplifyDirection !== null
                     && this.canRewriteTarget(node.target, hypothesis.proposition, simplifyDirection, availableRuleNames)) {
@@ -229,6 +236,8 @@ export class InferenceProofAssistant {
         page?.propositions.forEach((proposition, index) => {
             addPropositionSource(`p${index}`, proposition.value, false);
             if (this.canRewriteTarget(node.target, proposition.value, false, availableRuleNames))
+                add(`rw p${index}`);
+            if (this.canRewriteIffTarget(node.target, proposition.value, false, availableRuleNames))
                 add(`rw p${index}`);
             const simplifyDirection = this.simplifyDirection(proposition.value);
             if (simplifyDirection !== null
@@ -557,6 +566,10 @@ export class InferenceProofAssistant {
                     ? { fastMetaRules: deduction.deferredPayload.fastMetaRules } : {}),
                 ...(deduction.deferredPayload.allowMcpt !== undefined
                     ? { allowMcpt: deduction.deferredPayload.allowMcpt } : {}),
+                ...(deduction.deferredPayload.allowIfft !== undefined
+                    ? { allowIfft: deduction.deferredPayload.allowIfft } : {}),
+                ...(deduction.deferredPayload.allowIfftEu !== undefined
+                    ? { allowIfftEu: deduction.deferredPayload.allowIfftEu } : {}),
                 ...(deduction.deferredPayload.tauto ? {
                     tauto: { checkedTheorem: astmgr.clone(deduction.deferredPayload.tauto.checkedTheorem) }
                 } : {}),
@@ -579,6 +592,8 @@ export class InferenceProofAssistant {
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
             ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+            ...(payload.allowIfft !== undefined ? { allowIfft: payload.allowIfft } : {}),
+            ...(payload.allowIfftEu !== undefined ? { allowIfftEu: payload.allowIfftEu } : {}),
             ...(payload.tauto ? { tauto: { checkedTheorem: astmgr.clone(payload.tauto.checkedTheorem) } } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
@@ -651,6 +666,11 @@ export class InferenceProofAssistant {
             obtainEmpRule: node.obtainEmpRule,
             obtainEeRule: node.obtainEeRule,
             revertSource: this.cloneSource(node.revertSource),
+            rwBefore: node.rwBefore ? astmgr.clone(node.rwBefore) : undefined,
+            rwAfter: node.rwAfter ? astmgr.clone(node.rwAfter) : undefined,
+            rwSourceTerm: node.rwSourceTerm ? astmgr.clone(node.rwSourceTerm) : undefined,
+            rwDestinationTerm: node.rwDestinationTerm ? astmgr.clone(node.rwDestinationTerm) : undefined,
+            rwReverse: node.rwReverse,
             introBindings: this.cloneHypotheses(node.introBindings)
         };
     }
@@ -774,6 +794,8 @@ export class InferenceProofAssistant {
             ...(this.availableRuleNames ? { ruleNames: [...this.availableRuleNames] } : {}),
             ...(this.availableFastMetaRules !== undefined ? { fastMetaRules: this.availableFastMetaRules } : {}),
             allowMcpt: this.allowMcpt,
+            allowIfft: this.allowIfft,
+            allowIfftEu: this.allowIfftEu,
             premises: premises.map(premise => ({
                 pageId: premise.pageId,
                 index: premise.index,
@@ -1391,8 +1413,12 @@ export class InferenceProofAssistant {
             throw new Error(TR("rw目前只支持假设或页面等式；请先用have实例化推理规则"));
         }
         const equality = this.getSourceProposition(source, node);
+        if (equality.type === "sym" && equality.name === "<>" && equality.nodes?.length === 2) {
+            this.rewriteWithIffSource(sourceText, reverse, nth, source, equality);
+            return;
+        }
         if (equality.type !== "sym" || equality.name !== "=" || equality.nodes?.length !== 2) {
-            throw new Error(TR("rw来源必须是等式"));
+            throw new Error(TR("rw来源必须是等式或等价命题"));
         }
         const sourceTerm = reverse ? equality.nodes[1] : equality.nodes[0];
         const destinationTerm = reverse ? equality.nodes[0] : equality.nodes[1];
@@ -1423,6 +1449,164 @@ export class InferenceProofAssistant {
                 this.exact(sourceText);
             }
             this.assertSameProposition(this.requireCurrentNode().target, step.after);
+        }
+    }
+    canRewriteIffTarget(target, proposition, reverse, available = this.availableRuleNames) {
+        if (!this.allowIfft || !this.resolveStrategyRule(reverse ? ".<>1" : ".<>2", available)) {
+            return false;
+        }
+        if (proposition.type !== "sym" || proposition.name !== "<>" || proposition.nodes?.length !== 2) {
+            return false;
+        }
+        const source = reverse ? proposition.nodes[1] : proposition.nodes[0];
+        const destination = reverse ? proposition.nodes[0] : proposition.nodes[1];
+        try {
+            const steps = this.planRewrite(target, source, destination, null);
+            return steps.length > 0 && steps.every(step => {
+                try {
+                    const pair = this.findRewritePair(step.before, step.after, source, destination);
+                    this.assertIffContextSupported(step.before, step.after, pair.source, pair.destination, available);
+                    return true;
+                }
+                catch {
+                    return false;
+                }
+            });
+        }
+        catch {
+            return false;
+        }
+    }
+    /**
+     * Rewrite through a local/page iff proposition.  The draft keeps this as
+     * one atomic node; materialization derives the contextual iff lazily from
+     * the existing `.<>r*` rules and then selects the required direction.
+     */
+    rewriteWithIffSource(sourceText, reverse, nth, source, iff) {
+        if (!this.allowIfft) {
+            throw new Error(TR("rw等价改写需要解锁互推替换元定理(ifft)"));
+        }
+        const left = iff.nodes?.[0];
+        const right = iff.nodes?.[1];
+        if (!left || !right)
+            throw new Error(TR("rw来源等价命题结构无效"));
+        const sourceTerm = reverse ? right : left;
+        const destinationTerm = reverse ? left : right;
+        const directionRule = reverse ? ".<>1" : ".<>2";
+        if (!this.resolveStrategyRule(directionRule)) {
+            this.missingStrategyRule(directionRule, "rw等价改写需要解锁互推方向规则或提供等价推理规则");
+        }
+        const steps = this.planRewrite(this.requireCurrentNode().target, sourceTerm, destinationTerm, nth);
+        const pairs = steps.map(step => {
+            const pair = this.findRewritePair(step.before, step.after, sourceTerm, destinationTerm);
+            this.assertIffContextSupported(step.before, step.after, pair.source, pair.destination);
+            return pair;
+        });
+        for (let index = 0; index < steps.length; index++) {
+            const step = steps[index];
+            const pair = pairs[index];
+            const node = this.requireCurrentNode();
+            this.assertSameProposition(node.target, step.before);
+            const child = this.makeNode(step.after, this.cloneHypotheses(node.hypotheses), step.after);
+            node.kind = "rwIff";
+            node.source = this.cloneSource(source);
+            node.rwBefore = astmgr.clone(step.before);
+            node.rwAfter = astmgr.clone(step.after);
+            node.rwSourceTerm = astmgr.clone(pair.source);
+            node.rwDestinationTerm = astmgr.clone(pair.destination);
+            node.rwReverse = reverse;
+            node.children = [child];
+            node.target = astmgr.clone(step.after);
+            node.formalTarget = astmgr.clone(step.after);
+        }
+    }
+    /** Find the concrete subtree changed by one planned replacement. */
+    findRewritePair(before, after, source, destination) {
+        const paths = [];
+        const collect = (ast, path) => {
+            paths.push(path);
+            ast.nodes?.forEach((_, index) => collect(ast.nodes[index], [...path, index]));
+        };
+        const getAt = (ast, path) => {
+            let current = ast;
+            for (const index of path)
+                current = current.nodes?.[index];
+            return current;
+        };
+        const replaceAt = (ast, path, value) => {
+            if (!path.length) {
+                astmgr.assign(ast, value);
+                return;
+            }
+            const parent = getAt(ast, path.slice(0, -1));
+            if (!parent.nodes)
+                throw new Error(TR("rw替换位置无效"));
+            parent.nodes[path[path.length - 1]] = astmgr.clone(value);
+        };
+        collect(before, []);
+        for (const path of paths) {
+            const candidate = getAt(before, path);
+            const matched = {};
+            try {
+                this.fs.assert.match(candidate, source, /^\$/, false, matched, {}, null, []);
+            }
+            catch {
+                continue;
+            }
+            const concreteDestination = astmgr.clone(destination);
+            astmgr.replaceByMatchTable(concreteDestination, matched);
+            const trial = astmgr.clone(before);
+            replaceAt(trial, path, concreteDestination);
+            if (astmgr.equal(trial, after)) {
+                return { source: astmgr.clone(candidate), destination: concreteDestination };
+            }
+        }
+        throw new Error(TR("rw无法定位等价改写位置"));
+    }
+    /** Validate the structural fragment supported by iff contextual lifting. */
+    assertIffContextSupported(before, after, baseSource, baseDestination, available = this.availableRuleNames) {
+        if (astmgr.equal(before, baseSource) && astmgr.equal(after, baseDestination))
+            return;
+        if (astmgr.equal(before, after)) {
+            const identity = this.resolveStrategyRule(".<>i", available);
+            if (!identity) {
+                const direct = this.resolveStrategyRule(".<>", available);
+                if (!direct || !this.resolveStrategyRule(".i", available)) {
+                    throw new Error(TR("rw等价改写需要解锁等价自反规则：.<>i"));
+                }
+            }
+            return;
+        }
+        if (before.type !== after.type || before.name !== after.name
+            || before.nodes?.length !== after.nodes?.length) {
+            throw new Error(TR("rw等价改写暂不支持该函数或关系上下文"));
+        }
+        if (before.type !== "sym"
+            || ![">", "<>", "&", "|", "~", "V", "E", "E!"].includes(before.name)) {
+            throw new Error(TR("rw等价改写暂不支持该函数或关系上下文"));
+        }
+        if (before.name === "V" || before.name === "E" || before.name === "E!") {
+            if (before.name === "E!" && !this.allowIfftEu) {
+                throw new Error(TR("rw等价改写跨E!需要解锁ifft-EU"));
+            }
+            if (!astmgr.equal(before.nodes?.[0], after.nodes?.[0])) {
+                throw new Error(TR("rw等价改写暂不支持绑定变量名不同的量词上下文"));
+            }
+        }
+        const contextRule = ".<>r" + before.name;
+        if (!this.resolveStrategyRule(contextRule, available)) {
+            throw new Error(TR("rw等价改写需要解锁上下文等价规则：") + contextRule);
+        }
+        for (let index = 0; index < (before.nodes?.length ?? 0); index++) {
+            if ((before.name === "V" || before.name === "E" || before.name === "E!")
+                && index === 0)
+                continue;
+            this.assertIffContextSupported(before.nodes[index], after.nodes[index], baseSource, baseDestination, available);
+        }
+        if (before.name === "V" || before.name === "E" || before.name === "E!") {
+            if (!this.resolveStrategyRule("a6", available)) {
+                throw new Error(TR("rw等价改写量词上下文需要解锁全称概括规则a6"));
+            }
         }
     }
     planRewrite(target, source, destination, nth) {
@@ -2320,6 +2504,8 @@ export class InferenceProofAssistant {
             ...(this.availableRuleNames ? { ruleNames: [...this.availableRuleNames] } : {}),
             ...(this.availableFastMetaRules !== undefined ? { fastMetaRules: this.availableFastMetaRules } : {}),
             allowMcpt: this.allowMcpt,
+            allowIfft: this.allowIfft,
+            allowIfftEu: this.allowIfftEu,
             tauto: { checkedTheorem: astmgr.clone(checkedTheorem) },
             premises
         };
@@ -2905,6 +3091,28 @@ export class InferenceProofAssistant {
         }
         return undefined;
     }
+    /**
+     * Order explicit values according to the resolved rule's actual
+     * replacement names.  User-provided equivalent rules are allowed to use
+     * different names or declaration order from the built-in schema.
+     */
+    strategyReplaceValues(rule, canonicalValues) {
+        const deduction = this.fs.deductions[rule.name];
+        if (!deduction)
+            throw new Error(TR("推理规则不存在：") + rule.name);
+        const actualToCanonical = new Map();
+        for (const [canonical, actual] of rule.metavariables) {
+            actualToCanonical.set(actual, canonical);
+        }
+        return deduction.replaceNames.map(actualName => {
+            const canonicalName = actualToCanonical.get(actualName) ?? actualName;
+            const value = canonicalValues[canonicalName];
+            if (!value) {
+                throw new Error(TR("无法从策略参数推断规则变量：") + canonicalName);
+            }
+            return astmgr.clone(value);
+        });
+    }
     strategyRuleShape(name) {
         switch (name) {
             case ".&":
@@ -2929,6 +3137,48 @@ export class InferenceProofAssistant {
                 return { conditions: [], conclusion: parser.parse("($0<>$1)>($0>$1)") };
             case ".<>2":
                 return { conditions: [], conclusion: parser.parse("($0<>$1)>($1>$0)") };
+            case ".<>i":
+                return { conditions: [], conclusion: parser.parse("$0<>$0") };
+            case ".<>r>":
+                return {
+                    conditions: [parser.parse("$0<>$1"), parser.parse("$2<>$3")],
+                    conclusion: parser.parse("($0>$2)<>($1>$3)")
+                };
+            case ".<>r<>":
+                return {
+                    conditions: [parser.parse("$0<>$1"), parser.parse("$2<>$3")],
+                    conclusion: parser.parse("($0<>$2)<>($1<>$3)")
+                };
+            case ".<>r&":
+                return {
+                    conditions: [parser.parse("$0<>$1"), parser.parse("$2<>$3")],
+                    conclusion: parser.parse("($0&$2)<>($1&$3)")
+                };
+            case ".<>r|":
+                return {
+                    conditions: [parser.parse("$0<>$1"), parser.parse("$2<>$3")],
+                    conclusion: parser.parse("($0|$2)<>($1|$3)")
+                };
+            case ".<>rn":
+                return {
+                    conditions: [parser.parse("$0<>$1")],
+                    conclusion: parser.parse("~$0<>~$1")
+                };
+            case ".<>rV":
+                return {
+                    conditions: [parser.parse("(V$x:($0<>$1))")],
+                    conclusion: parser.parse("(V$x:$0)<>(V$x:$1)")
+                };
+            case ".<>rE":
+                return {
+                    conditions: [parser.parse("(V$x:($0<>$1))")],
+                    conclusion: parser.parse("(E$x:$0)<>(E$x:$1)")
+                };
+            case ".<>rE!":
+                return {
+                    conditions: [parser.parse("(V$x:($0<>$1))")],
+                    conclusion: parser.parse("(E!$x:$0)<>(E!$x:$1)")
+                };
             case ".|m":
                 return {
                     conditions: [parser.parse("$0>$2"), parser.parse("$1>$2")],
@@ -2957,6 +3207,11 @@ export class InferenceProofAssistant {
                 return { conditions: [], conclusion: parser.parse("(~$1>~$0)>($0>$1)") };
             case "a7":
                 return { conditions: [], conclusion: parser.parse("$0=$0") };
+            case "a6":
+                return {
+                    conditions: [],
+                    conclusion: parser.parse("#nf($1,$0)>(V$0:#nf($1,$0))")
+                };
             case "a8":
                 return { conditions: [], conclusion: parser.parse("($0=$1)>($2>#rp($2,$0,$1,$3))") };
             default:
@@ -3951,6 +4206,121 @@ export class InferenceProofAssistant {
                 name: ">",
                 nodes: [astmgr.clone(premise), astmgr.clone(conclusion)]
             });
+            /** Emit an iff between two supported logical contexts. */
+            const emitIffContext = (left, right, baseLeft, baseRight, sourceAbsoluteIndex) => {
+                if (astmgr.equal(left, baseLeft) && astmgr.equal(right, baseRight)) {
+                    const sourceValue = propositionAt(sourceAbsoluteIndex).value;
+                    const sourceShape = sourceValue.type === "sym"
+                        && sourceValue.name === "<>" && sourceValue.nodes?.length === 2;
+                    if (!sourceShape || !astmgr.equal(sourceValue.nodes[0], baseLeft)
+                        || !astmgr.equal(sourceValue.nodes[1], baseRight)) {
+                        throw new Error(TR("rw等价来源与改写项不匹配"));
+                    }
+                    const identity = appendDerived(implication(sourceValue, sourceValue), {
+                        deductionIdx: ".i",
+                        conditionIdxs: [],
+                        replaceValues: [astmgr.clone(sourceValue)]
+                    });
+                    return appendDerived(sourceValue, {
+                        deductionIdx: "mp",
+                        conditionIdxs: [absolute(identity.index), sourceAbsoluteIndex],
+                        replaceValues: []
+                    });
+                }
+                if (astmgr.equal(left, right)) {
+                    const identityRule = this.resolveStrategyRule(".<>i");
+                    if (identityRule) {
+                        return appendDerived({
+                            type: "sym", name: "<>", nodes: [astmgr.clone(left), astmgr.clone(right)]
+                        }, {
+                            deductionIdx: identityRule.name,
+                            conditionIdxs: [],
+                            replaceValues: this.strategyReplaceValues(identityRule, {
+                                "$0": left
+                            })
+                        });
+                    }
+                    const direct = this.resolveStrategyRule(".<>");
+                    const introRule = this.resolveStrategyRule(".i");
+                    if (!direct)
+                        this.missingStrategyRule(".<>", "rw等价改写需要等价构造规则");
+                    if (!introRule)
+                        this.missingStrategyRule(".i", "rw等价改写需要蕴含自反规则");
+                    const forward = appendDerived(implication(left, right), {
+                        deductionIdx: introRule.name,
+                        conditionIdxs: [],
+                        replaceValues: this.strategyReplaceValues(introRule, { "$0": left })
+                    });
+                    const backward = appendDerived(implication(right, left), {
+                        deductionIdx: introRule.name,
+                        conditionIdxs: [],
+                        replaceValues: this.strategyReplaceValues(introRule, { "$0": right })
+                    });
+                    return appendDerived({
+                        type: "sym", name: "<>", nodes: [astmgr.clone(left), astmgr.clone(right)]
+                    }, {
+                        deductionIdx: direct.name,
+                        conditionIdxs: [absolute(forward.index), absolute(backward.index)],
+                        replaceValues: []
+                    });
+                }
+                if (left.type !== right.type || left.name !== right.name
+                    || left.nodes?.length !== right.nodes?.length || left.type !== "sym") {
+                    throw new Error(TR("rw等价改写暂不支持该函数或关系上下文"));
+                }
+                if (![">", "<>", "&", "|", "~", "V", "E", "E!"].includes(left.name)) {
+                    throw new Error(TR("rw等价改写暂不支持该函数或关系上下文"));
+                }
+                if (["V", "E", "E!"].includes(left.name)
+                    && !astmgr.equal(left.nodes?.[0], right.nodes?.[0])) {
+                    throw new Error(TR("rw等价改写暂不支持绑定变量名不同的量词上下文"));
+                }
+                if (left.name === "E!" && !this.allowIfftEu) {
+                    throw new Error(TR("rw等价改写跨E!需要解锁ifft-EU"));
+                }
+                const children = [];
+                if (["V", "E", "E!"].includes(left.name)) {
+                    const body = emitIffContext(left.nodes[1], right.nodes[1], baseLeft, baseRight, sourceAbsoluteIndex);
+                    const binder = left.nodes[0];
+                    const quantifiedCondition = {
+                        type: "sym", name: "V",
+                        nodes: [astmgr.clone(binder), astmgr.clone(body.proposition)]
+                    };
+                    const quantifyRule = this.resolveStrategyRule("a6");
+                    if (!quantifyRule) {
+                        throw new Error(TR("rw等价改写量词上下文需要解锁全称概括规则a6"));
+                    }
+                    const quantifyImplication = appendDerived(implication(body.proposition, quantifiedCondition), {
+                        deductionIdx: quantifyRule.name,
+                        conditionIdxs: [],
+                        replaceValues: this.strategyReplaceValues(quantifyRule, {
+                            "$0": binder,
+                            "$1": body.proposition
+                        })
+                    });
+                    children.push(appendDerived(quantifiedCondition, {
+                        deductionIdx: "mp",
+                        conditionIdxs: [absolute(quantifyImplication.index), absolute(body.index)],
+                        replaceValues: []
+                    }));
+                }
+                else {
+                    for (let index = 0; index < (left.nodes?.length ?? 0); index++) {
+                        children.push(emitIffContext(left.nodes[index], right.nodes[index], baseLeft, baseRight, sourceAbsoluteIndex));
+                    }
+                }
+                const rule = this.resolveStrategyRule(".<>r" + left.name);
+                if (!rule) {
+                    throw new Error(TR("rw等价改写需要解锁上下文等价规则：.<>r" + left.name));
+                }
+                return appendDerived({
+                    type: "sym", name: "<>", nodes: [astmgr.clone(left), astmgr.clone(right)]
+                }, {
+                    deductionIdx: rule.name,
+                    conditionIdxs: children.map(child => absolute(child.index)),
+                    replaceValues: []
+                });
+            };
             /** Discharge one implication-intro hypothesis through the generated row graph. */
             const dischargeHypothesis = (result, hypothesis, hypothesisIndex) => {
                 const hypothesisAbsolute = absolute(hypothesisIndex);
@@ -4357,6 +4727,43 @@ export class InferenceProofAssistant {
                     continuationRows.set(node.applyAtHypothesis, transformed.index);
                     return finish(emit(continuation, continuationRows));
                 }
+                if (node.kind === "rwIff") {
+                    if (node.children.length !== 1 || node.source?.kind === "rule"
+                        || !node.rwBefore || !node.rwAfter || !node.rwSourceTerm
+                        || !node.rwDestinationTerm || node.rwReverse === undefined) {
+                        throw new Error(TR("rw等价改写证明节点结构无效"));
+                    }
+                    const child = emit(node.children[0], hypothesisRows);
+                    const sourceAbsoluteIndex = sourceAbsoluteRow(node.source, hypothesisRows);
+                    const fullContextLeft = node.rwReverse ? node.rwAfter : node.rwBefore;
+                    const fullContextRight = node.rwReverse ? node.rwBefore : node.rwAfter;
+                    const context = emitIffContext(node.rwReverse ? node.rwAfter : node.rwBefore, node.rwReverse ? node.rwBefore : node.rwAfter, node.rwReverse ? node.rwDestinationTerm : node.rwSourceTerm, node.rwReverse ? node.rwSourceTerm : node.rwDestinationTerm, sourceAbsoluteIndex);
+                    const direction = node.rwReverse ? ".<>1" : ".<>2";
+                    const directionRule = this.resolveStrategyRule(direction);
+                    if (!directionRule) {
+                        this.missingStrategyRule(direction, "rw等价改写需要解锁互推方向规则或提供等价推理规则");
+                    }
+                    const directionImplication = appendDerived(implication(context.proposition, implication(node.rwAfter, node.rwBefore)), {
+                        deductionIdx: directionRule.name,
+                        conditionIdxs: [],
+                        replaceValues: this.strategyReplaceValues(directionRule, {
+                            "$0": fullContextLeft,
+                            "$1": fullContextRight
+                        })
+                    });
+                    const directed = appendDerived(implication(node.rwAfter, node.rwBefore), {
+                        deductionIdx: "mp",
+                        conditionIdxs: [absolute(directionImplication.index), absolute(context.index)],
+                        replaceValues: []
+                    });
+                    const result = appendDerived(node.rwBefore, {
+                        deductionIdx: "mp",
+                        conditionIdxs: [absolute(directed.index), absolute(child.index)],
+                        replaceValues: []
+                    });
+                    this.assertSameProposition(result.proposition, node.rwBefore);
+                    return finish(result);
+                }
                 if (node.kind === "apply") {
                     const children = node.children.map(child => emit(child, hypothesisRows));
                     if (node.source && node.source.kind !== "rule") {
@@ -4717,7 +5124,9 @@ registerDeferredAssistantMaterializer((fs, deduction) => {
             history: replayHistory,
             ...(payload.ruleNames ? { ruleNames: payload.ruleNames } : {}),
             ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
-            allowMcpt: payload.allowMcpt !== false
+            allowMcpt: payload.allowMcpt !== false,
+            allowIfft: payload.allowIfft !== false,
+            allowIfftEu: payload.allowIfftEu !== false
         });
         const replayed = assistant.materializeForDeferred();
         // `materialize()` restores the formal-system snapshot by replacing the

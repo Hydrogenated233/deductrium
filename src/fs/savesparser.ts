@@ -20,6 +20,8 @@ type SerializedAssistantPayload = {
     ruleNames?: string[];
     fastMetaRules?: string;
     allowMcpt?: boolean;
+    allowIfft?: boolean;
+    allowIfftEu?: boolean;
     tauto?: { checkedTheorem: string };
 };
 type SerilizedDeduction = [
@@ -182,6 +184,8 @@ export class SavesParser {
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
             ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+            ...(payload.allowIfft !== undefined ? { allowIfft: payload.allowIfft } : {}),
+            ...(payload.allowIfftEu !== undefined ? { allowIfftEu: payload.allowIfftEu } : {}),
             ...(payload.tauto ? { tauto: { checkedTheorem: astparser.stringifyTight(payload.tauto.checkedTheorem) } } : {}),
             premises: payload.premises.map(premise => ({
                 ...(premise.pageId ? { pageId: premise.pageId } : {}),
@@ -199,6 +203,8 @@ export class SavesParser {
                 && (!Array.isArray(payload.ruleNames) || !payload.ruleNames.every(v => typeof v === "string")))
             || (payload.fastMetaRules !== undefined && typeof payload.fastMetaRules !== "string")
             || (payload.allowMcpt !== undefined && typeof payload.allowMcpt !== "boolean")
+            || (payload.allowIfft !== undefined && typeof payload.allowIfft !== "boolean")
+            || (payload.allowIfftEu !== undefined && typeof payload.allowIfftEu !== "boolean")
             || (payload.tauto !== undefined && (!payload.tauto
                 || typeof payload.tauto.checkedTheorem !== "string"))
             || !Array.isArray(payload.premises)) {
@@ -224,6 +230,8 @@ export class SavesParser {
                 ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
                 ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
                 ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+                ...(payload.allowIfft !== undefined ? { allowIfft: payload.allowIfft } : {}),
+                ...(payload.allowIfftEu !== undefined ? { allowIfftEu: payload.allowIfftEu } : {}),
                 ...(payload.tauto ? { tauto: { checkedTheorem: astparser.parse(payload.tauto.checkedTheorem) } } : {}),
                 premises
             } satisfies DeferredAssistantPayload;
@@ -307,6 +315,8 @@ export class SavesParser {
                     && (!Array.isArray(payload.ruleNames) || !payload.ruleNames.every(v => typeof v === "string")))
                 || (payload.fastMetaRules !== undefined && typeof payload.fastMetaRules !== "string")
                 || (payload.allowMcpt !== undefined && typeof payload.allowMcpt !== "boolean")
+                || (payload.allowIfft !== undefined && typeof payload.allowIfft !== "boolean")
+                || (payload.allowIfftEu !== undefined && typeof payload.allowIfftEu !== "boolean")
                 || (payload.tauto !== undefined && (!payload.tauto
                     || typeof payload.tauto.checkedTheorem !== "string"))
                 || !Array.isArray(payload.premises)) {
@@ -332,6 +342,8 @@ export class SavesParser {
                     ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
                     ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
                     ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
+                    ...(payload.allowIfft !== undefined ? { allowIfft: payload.allowIfft } : {}),
+                    ...(payload.allowIfftEu !== undefined ? { allowIfftEu: payload.allowIfftEu } : {}),
                     ...(payload.tauto ? { tauto: { checkedTheorem: astparser.parse(payload.tauto.checkedTheorem) } } : {}),
                     premises
                 } satisfies DeferredAssistantPayload;
