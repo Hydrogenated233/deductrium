@@ -2132,14 +2132,20 @@ export class InferenceProofAssistant {
             this.obtainExistential(node, firstName, secondName, source, proposition, formalProposition);
             return;
         }
+        // Keep the same formal assertion bridge as the unsplit source.
         let facts;
         if (proposition.name === "&") {
-            facts = [[proposition.nodes[0], ".&1"], [proposition.nodes[1], ".&2"]];
+            facts = [
+                [proposition.nodes[0], formalProposition.nodes[0], ".&1"],
+                [proposition.nodes[1], formalProposition.nodes[1], ".&2"]
+            ];
         }
         else if (proposition.name === "<>") {
             facts = [
-                [parser.parse(`${parser.stringifyTight(proposition.nodes[0])}>${parser.stringifyTight(proposition.nodes[1])}`), ".<>1"],
-                [parser.parse(`${parser.stringifyTight(proposition.nodes[1])}>${parser.stringifyTight(proposition.nodes[0])}`), ".<>2"]
+                [parser.parse(`${parser.stringifyTight(proposition.nodes[0])}>${parser.stringifyTight(proposition.nodes[1])}`),
+                    parser.parse(`${parser.stringifyTight(formalProposition.nodes[0])}>${parser.stringifyTight(formalProposition.nodes[1])}`), ".<>1"],
+                [parser.parse(`${parser.stringifyTight(proposition.nodes[1])}>${parser.stringifyTight(proposition.nodes[0])}`),
+                    parser.parse(`${parser.stringifyTight(formalProposition.nodes[1])}>${parser.stringifyTight(formalProposition.nodes[0])}`), ".<>2"]
             ];
         }
         else if (proposition.name === "|") {
@@ -2148,12 +2154,12 @@ export class InferenceProofAssistant {
         else {
             throw new Error(TR("obtain来源必须是合取、等价或析取命题"));
         }
-        for (const [index, [fact, canonicalRule]] of facts.entries()) {
+        for (const [index, [fact, formalFact, canonicalRule]] of facts.entries()) {
             const rule = this.resolveStrategyRule(canonicalRule);
             if (!rule)
                 this.missingStrategyRule(canonicalRule, "obtain需要解锁消去规则或提供等价推理规则");
             const current = this.requireCurrentNode();
-            this.createHaveGoal(current, index === 0 ? firstName : secondName, astmgr.clone(fact), source.kind === "hypothesis" && index === facts.length - 1 ? source.name : undefined);
+            this.createHaveGoal(current, index === 0 ? firstName : secondName, astmgr.clone(fact), source.kind === "hypothesis" && index === facts.length - 1 ? source.name : undefined, formalFact);
             this.applyRule(rule.name);
             this.exact(sourceText);
         }
@@ -2703,6 +2709,16 @@ export class InferenceProofAssistant {
         deduction.replaceNames.forEach((name, index) => {
             matchTable[name] = astmgr.clone(explicitValues[index]);
         });
+        // Explicit binder renaming also needs the source binder and body,
+        // which are determined by the actual lifted premise.
+        if (/^[vuc<>]*\.Vcn$/.test(candidateName) && deduction.conditions.length === 1
+            && expectedConditions.length === 1) {
+            const match = this.matchConclusion(deduction, expectedConditions[0], { positional: explicitValues, named: new Map() }, deduction.conditions[0], undefined, undefined, undefined, expectedConditions);
+            this.assertRuleMatchComplete(match, candidateName);
+            for (const name of match.context.names) {
+                matchTable[name] = astmgr.clone(match.matchTable[match.context.internalByOriginal.get(name)]);
+            }
+        }
         const instantiate = (value) => {
             const result = astmgr.clone(value);
             astmgr.replaceByMatchTable(result, matchTable);
@@ -2790,7 +2806,7 @@ export class InferenceProofAssistant {
             // more `v`/`u`/`c` markers (for example `va4` and `vva4`).  The
             // capture-safe fallback applies to that whole generated family,
             // while the suffix check keeps unrelated rules such as `a1` out.
-            if (explicitValues.length && /^[vuc<>]*a4$/.test(baseName)) {
+            if (explicitValues.length && /^[vuc<>]*(a4|\.Vcn)$/.test(baseName)) {
                 for (const candidateName of this.generatedRuleCandidates(baseName, prefixes)) {
                     if (candidates.some(candidate => candidate.name === candidateName))
                         continue;
@@ -3771,6 +3787,11 @@ export class InferenceProofAssistant {
      */
     stripInertFormalRuleAssertion(ast) {
         const result = astmgr.clone(ast);
+        // A projected user schema is not an implementation-only replacement
+        // shell: $0 may contain $1 even if their literal names differ.
+        if (result.type === "fn" && result.name === "#rp"
+            && this.containsSchematicAssertion(result))
+            return result;
         if (result.type === "sym" && result.name === ">" && result.nodes?.length === 2) {
             result.nodes[0] = this.stripInertFormalReplacement(result.nodes[0]);
             return result;
@@ -3969,6 +3990,9 @@ export class InferenceProofAssistant {
         }));
     }
     substituteBound(ast, source, destination) {
+        if (ast.type === "fn" && (ast.name === "#rp" || /^#v*nf$/.test(ast.name))
+            && this.fs.assert.nf(source, ast) === 1)
+            return astmgr.clone(ast);
         if (ast.type === "replvar") {
             return ast.name === source ? { type: "replvar", name: destination } : astmgr.clone(ast);
         }
@@ -4003,6 +4027,10 @@ export class InferenceProofAssistant {
     }
     /** Capture-avoiding substitution used by direct universal `have` calls. */
     substituteBoundValue(ast, source, replacement) {
+        // nf parameters describe variable restrictions, not free occurrences.
+        if (ast.type === "fn" && (ast.name === "#rp" || /^#v*nf$/.test(ast.name))
+            && this.fs.assert.nf(source, ast) === 1)
+            return astmgr.clone(ast);
         if (ast.type === "replvar") {
             return ast.name === source ? astmgr.clone(replacement) : astmgr.clone(ast);
         }
@@ -4050,6 +4078,9 @@ export class InferenceProofAssistant {
         return fresh;
     }
     containsFreeName(ast, name) {
+        if (ast.type === "fn" && (ast.name === "#rp" || /^#v*nf$/.test(ast.name))
+            && this.fs.assert.nf(name, ast) === 1)
+            return false;
         if (ast.type === "replvar")
             return ast.name === name;
         if (!ast.nodes?.length)
@@ -4387,7 +4418,7 @@ export class InferenceProofAssistant {
                         // meaningful #nf/#rp assertion that c.Vcn/c.Ecn must see.
                         // selectGeneratedRule already normalizes ordinary rows,
                         // while retaining schematic assertions when present.
-                        const selection = this.selectGeneratedRule(row.from.deductionIdx, desired, conditions.map(condition => condition.proposition), ["c", "<", ">"]);
+                        const selection = this.selectGeneratedRule(row.from.deductionIdx, desired, conditions.map(condition => condition.proposition), ["c", "<", ">"], /^[vuc<>]*\.Vcn$/.test(row.from.deductionIdx) ? row.from.replaceValues : []);
                         if (!selection)
                             throw new Error(TR("无法生成匹配intro目标的最短条件演绎规则"));
                         const transformedResult = appendDerived(desired, {
@@ -4440,6 +4471,12 @@ export class InferenceProofAssistant {
                         if (this.containsFreeName(row.value, binding.name)) {
                             throw new Error(TR("全称变量出现在未解除的外部前提中：") + binding.name);
                         }
+                        if (this.containsSchematicAssertion(row.value)
+                            // Generalization restores the original binder, not its UI alias.
+                            && this.fs.assert.nf(binderName, this.substituteBound(row.value, binding.name, binderName)) !== 1) {
+                            throw new Error(TR("无法确认全称变量在未解除的外部前提中不自由出现：")
+                                + binding.name + "\n" + parser.stringifyTight(row.value));
+                        }
                         const body = astmgr.clone(row.value);
                         const implicationTarget = implication(body, desired);
                         const axiom = this.requireDeduction("a6");
@@ -4473,9 +4510,10 @@ export class InferenceProofAssistant {
                     try {
                         this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
                         const originalRule = this.requireDeduction(row.from.deductionIdx);
-                        const explicitValues = originalRule.conditions.length ? [] : [
-                            astmgr.clone(binder),
-                            ...row.from.replaceValues.map(value => this.substituteBound(value, binding.name, binderName))
+                        const explicitValues = [
+                            ...(originalRule.conditions.length ? [] : [astmgr.clone(binder)]),
+                            ...(originalRule.conditions.length && !/^[vuc<>]*\.Vcn$/.test(row.from.deductionIdx)
+                                ? [] : row.from.replaceValues).map(value => this.substituteBound(value, binding.name, binderName))
                         ];
                         const selection = this.selectGeneratedRule(row.from.deductionIdx, desired, conditions.map(condition => condition.proposition), ["v", "u", "c", "<", ">"], explicitValues);
                         if (!selection)
