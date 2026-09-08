@@ -1,6 +1,6 @@
 import { SavesParser as FsSavesParser } from "./fs/savesparser.js";
 import { Game } from "./game.js";
-import { calcMaxReachOrd } from "./hy/ordinal.js";
+import { calcMaxReachOrd, lowerOrdinalBase } from "./hy/ordinal.js";
 import { SavesParser as HySavesParser } from "./hy/savesparser.js";
 import { TR } from "./lang.js";
 import { SavesParser as TtSavesParser } from "./tt/savesparser.js";
@@ -221,6 +221,13 @@ export class GameSaveLoad {
         game.consumed = consumed;
         game.destructedGates = destructedGates;
         game.maxOrd = maxOrd; game.ordBase = ordBase;
+        // Older saves may contain a base raised by a later, weaker reward.
+        // Use only this save's rewards, not the pre-load game's replay state.
+        for (let base = 2; base <= 5; base++) {
+            if (rewards.includes(`base${base}`)) {
+                game.ordBase = lowerOrdinalBase(game.ordBase, base - 1);
+            }
+        }
         game.nextOrd = calcMaxReachOrd(game.maxOrd, game.ordBase, game.rewards.includes("stepw"));
         game.updateProgressParam();
     }
