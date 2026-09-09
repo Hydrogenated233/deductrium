@@ -2756,6 +2756,12 @@ export class InferenceProofAssistant {
         // an otherwise valid c-prefix rule appear to have different conditions.
         const preserveSchematicAssertions = [target, ...expectedConditions, ...explicitValues]
             .some(value => this.containsSchematicAssertion(value));
+        // Infer shared parameters from the same assertion normal form.
+        // Otherwise cmp can see #rp(P,x,u) and its expanded P[u/x] as
+        // different candidates. Use kernel expansion, never rigidly erase
+        // schematic #nf/#rp constraints, and still check the original rows.
+        const matchingTarget = this.normalizeAssertionSyntax(target);
+        const matchingConditions = expectedConditions.map(value => this.normalizeAssertionSyntax(value));
         try {
             this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
             for (const candidateName of this.generatedRuleCandidates(baseName, prefixes)) {
@@ -2765,7 +2771,7 @@ export class InferenceProofAssistant {
                     if (!deduction)
                         continue;
                     this.assertGeneratedDeductionMetaRules(candidateName, existingNames);
-                    const match = this.matchConclusion(deduction, target, { positional: explicitValues.map(value => astmgr.clone(value)), named: new Map() }, deduction.conclusion, undefined, undefined, undefined, expectedConditions);
+                    const match = this.matchConclusion(deduction, matchingTarget, { positional: explicitValues.map(value => astmgr.clone(value)), named: new Map() }, deduction.conclusion, undefined, undefined, undefined, matchingConditions);
                     this.assertRuleMatchComplete(match, candidateName);
                     const instantiate = (value) => {
                         const result = this.instantiateRuleAst(value, match.context, match.matchTable);
