@@ -4622,7 +4622,27 @@ export class InferenceProofAssistant {
         /** Generalize a completed proof graph over one introduced universal variable. */
         const quantifyResult = (result: EmitResult, binding: InferenceProofHypothesis): EmitResult => {
             if (!binding.binder) throw new Error(TR("全称变量缺少原始约束变量"));
+            const originalName = this.fs.assert.getVarName(binding.binder);
+            if (!originalName) throw new Error(TR("全称量词约束变量无效"));
+            const visited = new Set<number>();
+            const hasSchematicGraph = (index: number): boolean => {
+                if (visited.has(index)) return false;
+                visited.add(index);
+                const row = propositionAt(index);
+                return this.containsSchematicAssertion(row.value)
+                    || !!row.from?.conditionIdxs.some(hasSchematicGraph);
+            };
+            // Rule parameters share binder scopes (notably a4's source body).
+            // Generalize in the local alias, then certify the final rename,
+            // rather than renaming those parameters independently. Keep the
+            // direct path for schematic assertions: #nf($0,x) guarantees x,
+            // not a fresh alias. It also needs no extra renaming rule unlock.
+            const renameAfter = originalName !== binding.name
+                && (!this.availableRuleNames || this.availableRuleNames.has(".Vcn"))
+                && !hasSchematicGraph(absolute(result.index))
+                && !!this.resolveVisibleDeduction(".Vcn");
             const binder = astmgr.clone(binding.binder);
+            if (renameAfter) this.renameBinder(binder, originalName, binding.name);
             const binderName = this.fs.assert.getVarName(binder);
             if (!binderName) throw new Error(TR("全称量词约束变量无效"));
             const transformed = new Map<number, EmitResult>();
@@ -4654,7 +4674,6 @@ export class InferenceProofAssistant {
                         throw new Error(TR("全称变量出现在未解除的外部前提中：") + binding.name);
                     }
                     if (this.containsSchematicAssertion(row.value)
-                        // Generalization restores the original binder, not its UI alias.
                         && this.fs.assert.nf(binderName,
                             this.substituteBound(row.value, binding.name, binderName)) !== 1) {
                         throw new Error(TR("无法确认全称变量在未解除的外部前提中不自由出现：")
@@ -4721,7 +4740,19 @@ export class InferenceProofAssistant {
                 }
             };
 
-            return transform(absolute(result.index));
+            const generalized = transform(absolute(result.index));
+            if (!renameAfter) return generalized;
+            const target: AST = {
+                type: "sym", name: "V",
+                nodes: [astmgr.clone(binding.binder), this.substituteBound(
+                    result.proposition, binding.name, originalName
+                )]
+            };
+            return appendDerived(target, {
+                deductionIdx: ".Vcn",
+                conditionIdxs: [absolute(generalized.index)],
+                replaceValues: [astmgr.clone(binding.binder)]
+            });
         };
 
         /**
