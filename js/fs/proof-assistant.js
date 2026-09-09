@@ -3995,40 +3995,7 @@ export class InferenceProofAssistant {
         }));
     }
     substituteBound(ast, source, destination) {
-        if (ast.type === "fn" && (ast.name === "#rp" || /^#v*nf$/.test(ast.name))
-            && this.fs.assert.nf(source, ast) === 1)
-            return astmgr.clone(ast);
-        if (ast.type === "replvar") {
-            return ast.name === source ? { type: "replvar", name: destination } : astmgr.clone(ast);
-        }
-        if (!ast.nodes?.length)
-            return astmgr.clone(ast);
-        if (ast.type === "sym" && ["V", "E", "E!"].includes(ast.name)) {
-            const binderName = this.fs.assert.getVarName(ast.nodes[0]);
-            // A nested binder with the source name shadows the outer binder.
-            if (binderName === source)
-                return astmgr.clone(ast);
-            const binder = astmgr.clone(ast.nodes[0]);
-            let body = astmgr.clone(ast.nodes[1]);
-            // Avoid capturing the replacement variable under a nested binder.
-            // For example, substituting x -> y in V y: x = y must first rename
-            // the inner y binder.
-            if (binderName === destination && this.containsFreeName(body, source)) {
-                const fresh = this.freshBinderName(body, binderName, source, destination);
-                this.renameBoundOccurrences(body, binderName, fresh);
-                this.renameBinder(binder, binderName, fresh);
-            }
-            return {
-                type: ast.type,
-                name: ast.name,
-                nodes: [binder, this.substituteBound(body, source, destination)]
-            };
-        }
-        return {
-            type: ast.type,
-            name: ast.name,
-            nodes: ast.nodes.map(child => this.substituteBound(child, source, destination))
-        };
+        return this.substituteBoundValue(ast, source, { type: "replvar", name: destination });
     }
     /** Capture-avoiding substitution used by direct universal `have` calls. */
     substituteBoundValue(ast, source, replacement, renameBindersOnly = false) {
@@ -4041,6 +4008,24 @@ export class InferenceProofAssistant {
         }
         if (!ast.nodes?.length)
             return astmgr.clone(ast);
+        if (ast.type === "sym" && (ast.name === "{|" || ast.name === "|}")) {
+            const [binder, base, body] = ast.nodes;
+            const binderName = this.fs.assert.getVarName(binder);
+            // In both set forms the binder scopes only child 2, not the base.
+            const newBase = this.substituteBoundValue(base, source, replacement, renameBindersOnly);
+            if (binderName !== source && binderName
+                && this.containsFreeName(body, source) && this.containsFreeName(replacement, binderName)) {
+                // Set alpha-conversion needs an explicit equality proof, unlike
+                // the quantifier equivalences emitted by have applications.
+                throw new Error(TR("集合替换会捕获绑定变量，请先显式换名：") + binderName);
+            }
+            return {
+                type: ast.type, name: ast.name,
+                nodes: [astmgr.clone(binder), newBase, binderName === source
+                        ? astmgr.clone(body)
+                        : this.substituteBoundValue(body, source, replacement, renameBindersOnly)]
+            };
+        }
         if (ast.type === "sym" && ["V", "E", "E!"].includes(ast.name)) {
             const binderName = this.fs.assert.getVarName(ast.nodes[0]);
             // A nested binder with the source name shadows the outer binder.
@@ -4090,6 +4075,11 @@ export class InferenceProofAssistant {
             return ast.name === name;
         if (!ast.nodes?.length)
             return false;
+        if (ast.type === "sym" && (ast.name === "{|" || ast.name === "|}")) {
+            return this.containsFreeName(ast.nodes[1], name)
+                || (this.fs.assert.getVarName(ast.nodes[0]) !== name
+                    && this.containsFreeName(ast.nodes[2], name));
+        }
         if (ast.type === "sym" && ["V", "E", "E!"].includes(ast.name)) {
             const binderName = this.fs.assert.getVarName(ast.nodes[0]);
             if (binderName === name)
@@ -4097,19 +4087,6 @@ export class InferenceProofAssistant {
             return this.containsFreeName(ast.nodes[1], name);
         }
         return ast.nodes.some(child => this.containsFreeName(child, name));
-    }
-    freshBinderName(body, binderName, source, destination) {
-        const used = new Set([binderName, source, destination]);
-        const collect = (ast) => {
-            if (ast.type === "replvar")
-                used.add(ast.name);
-            ast.nodes?.forEach(collect);
-        };
-        collect(body);
-        let fresh = `${binderName}'`;
-        while (used.has(fresh))
-            fresh += "'";
-        return fresh;
     }
     renameBinder(ast, source, destination) {
         if (ast.type === "replvar") {
@@ -4127,6 +4104,13 @@ export class InferenceProofAssistant {
         }
         if (!ast.nodes?.length)
             return;
+        if (ast.type === "sym" && (ast.name === "{|" || ast.name === "|}")) {
+            this.renameBoundOccurrences(ast.nodes[1], source, destination);
+            if (this.fs.assert.getVarName(ast.nodes[0]) !== source) {
+                this.renameBoundOccurrences(ast.nodes[2], source, destination);
+            }
+            return;
+        }
         if (ast.type === "sym" && ["V", "E", "E!"].includes(ast.name)) {
             const binderName = this.fs.assert.getVarName(ast.nodes[0]);
             if (binderName === source)

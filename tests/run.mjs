@@ -54,6 +54,8 @@ const tests = [
     "./fs-issue-35-rw-iff.test.mjs",
     "./fs-issue-37-schematic-obtain.test.mjs",
     "./fs-issue-38-explicit-vcn-qed.test.mjs",
+    "./fs-issue-39-set-binder.test.mjs",
+    "./fs-issue-39-playthrough.test.mjs",
     "./tt-issue-13-expand-surface.test.mjs",
     "./tt-system-alias-self-reference.test.mjs",
     "./tt-nbe-system-compute-rule.test.mjs",

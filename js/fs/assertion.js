@@ -657,8 +657,8 @@ export class AssertionSystem {
                     astmgr.assign(ast, backup);
                     return false;
                 }
-                if (bounded === T)
-                    return res; // can't match bounded var
+                // The set binder scopes child 2 only. Even when it shadows
+                // subAst there, free occurrences in the base still substitute.
                 subres = this.getSubAstMatchTimesAndReplace(ast.nodes[1], subAst, newAst, nth, scope, res, right, allowUnknownOutsideMatch);
                 if (subres === false) {
                     astmgr.assign(ast, backup);
