@@ -573,7 +573,7 @@ export class AssertionSystem {
         if (scope.length) {
             const vars = this.getVarNamesAndIsNots(subAst, {}, null);
             for (const bv of scope) {
-                const nf = this.nf(bv.name, subAst, null, new Set(vars[bv.name] ?? []));
+                const nf = this.nf(bv.name, subAst, [], new Set(vars[bv.name] ?? []));
                 if (nf === U)
                     return false;
                 if (nf === F)
