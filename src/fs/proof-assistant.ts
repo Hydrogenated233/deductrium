@@ -2950,7 +2950,12 @@ export class InferenceProofAssistant {
             if (this.astContainsPrivateRuleVariable(result)) {
                 throw new Error(TR("生成规则仍包含未解析的元变量"));
             }
-            return this.expandGeneratedAssertionsCaptureAvoiding(result);
+            // .Vcn has all remaining arguments fixed by its real premise.
+            // Let the kernel expand its bridge without treating an unrelated
+            // user-schema #rp inside that premise as a concrete substitution.
+            return /^[vuc<>]*\.Vcn$/.test(candidateName)
+                ? this.normalizeAssertionSyntax(result)
+                : this.expandGeneratedAssertionsCaptureAvoiding(result);
         };
         const conclusion = instantiate(deduction.conclusion);
         this.assertSameProposition(conclusion, target);
@@ -4198,12 +4203,13 @@ export class InferenceProofAssistant {
     }
 
     /** Capture-avoiding substitution used by direct universal `have` calls. */
-    private substituteBoundValue(ast: AST, source: string, replacement: AST): AST {
+    private substituteBoundValue(ast: AST, source: string, replacement: AST,
+        renameBindersOnly = false): AST {
         // nf parameters describe variable restrictions, not free occurrences.
         if (ast.type === "fn" && (ast.name === "#rp" || /^#v*nf$/.test(ast.name))
             && this.fs.assert.nf(source, ast) === 1) return astmgr.clone(ast);
         if (ast.type === "replvar") {
-            return ast.name === source ? astmgr.clone(replacement) : astmgr.clone(ast);
+            return !renameBindersOnly && ast.name === source ? astmgr.clone(replacement) : astmgr.clone(ast);
         }
         if (!ast.nodes?.length) return astmgr.clone(ast);
         if (ast.type === "sym" && ["V", "E", "E!"].includes(ast.name)) {
@@ -4224,13 +4230,13 @@ export class InferenceProofAssistant {
             return {
                 type: ast.type,
                 name: ast.name,
-                nodes: [binder, this.substituteBoundValue(body, source, replacement)]
+                nodes: [binder, this.substituteBoundValue(body, source, replacement, renameBindersOnly)]
             };
         }
         return {
             type: ast.type,
             name: ast.name,
-            nodes: ast.nodes.map(child => this.substituteBoundValue(child, source, replacement))
+            nodes: ast.nodes.map(child => this.substituteBoundValue(child, source, replacement, renameBindersOnly))
         };
     }
 
@@ -4717,7 +4723,7 @@ export class InferenceProofAssistant {
                         deductionIdx: selection.name,
                         conditionIdxs: conditions.map(condition => absolute(condition.index)),
                         replaceValues: selection.replaceValues,
-                        info: "rigid"
+                        ...(!this.containsSchematicAssertion(desired) ? { info: "rigid" } : {})
                     });
                     transformed.set(absoluteIndex, quantified);
                     return quantified;
@@ -4728,6 +4734,71 @@ export class InferenceProofAssistant {
             };
 
             return transform(absolute(result.index));
+        };
+
+        /**
+         * Certify the binder freshening already performed by universal `have`.
+         * Each rename is an explicit game rule, lifted through logical contexts;
+         * no alpha-equivalence is added to proposition matching.
+         */
+        const emitBinderRenaming = (left: AST, right: AST, binders: AST[] = []): EmitResult => {
+            const iff: AST = { type: "sym", name: "<>", nodes: [left, right] };
+            const desired = binders.reduceRight<AST>((body, binder) => ({
+                type: "sym", name: "V", nodes: [binder, body]
+            }), iff);
+            const derive = (name: string, conditions: EmitResult[], values: AST[]): EmitResult => {
+                const ruleName = "v".repeat(binders.length) + name;
+                const oldFastMetaRules = this.fs.fastmetarules;
+                let rule: Deduction | undefined;
+                try {
+                    this.fs.fastmetarules = this.availableFastMetaRules ?? "cvuqe><:#zZQR";
+                    rule = this.resolveVisibleDeduction(ruleName);
+                } finally {
+                    this.fs.fastmetarules = oldFastMetaRules;
+                }
+                if (!rule) throw new Error(TR("have避免变量捕获需要推理规则：") + ruleName);
+                return appendDerived(desired, {
+                    deductionIdx: ruleName,
+                    conditionIdxs: conditions.map(condition => absolute(condition.index)),
+                    replaceValues: (rule.conditions.length ? values : [...binders, ...values])
+                        .map(value => astmgr.clone(value))
+                });
+            };
+            if (astmgr.equal(left, right)) return derive(".<>i", [], [left]);
+            if (left.type !== "sym" || right.type !== "sym"
+                || left.name !== right.name || left.nodes?.length !== right.nodes?.length) {
+                throw new Error(TR("have避免变量捕获无法生成换名证明"));
+            }
+            if (["V", "E", "E!"].includes(left.name)) {
+                const [oldBinder, oldBody] = left.nodes!;
+                const [newBinder, newBody] = right.nodes!;
+                if (!astmgr.equal(oldBinder, newBinder)) {
+                    const oldName = this.fs.assert.getVarName(oldBinder);
+                    const newName = this.fs.assert.getVarName(newBinder);
+                    if (!oldName || !newName || this.fs.assert.nf(newName, oldBody) !== 1) {
+                        throw new Error(TR("have无法确认换名变量不自由出现"));
+                    }
+                    const renamed: AST = {
+                        type: "sym", name: left.name,
+                        nodes: [newBinder, this.substituteBound(oldBody, oldName, newName)]
+                    };
+                    if (astmgr.equal(renamed, right)) {
+                        return derive("." + left.name + "cn<>", [], [oldBinder, oldBody, newBinder]);
+                    }
+                    return derive(".<>t", [
+                        emitBinderRenaming(left, renamed, binders),
+                        emitBinderRenaming(renamed, right, binders)
+                    ], []);
+                }
+                return derive(".<>r" + left.name, [
+                    emitBinderRenaming(oldBody, newBody, [...binders, oldBinder])
+                ], []);
+            }
+            if (!["~", ">", "<>", "&", "|"].includes(left.name)) {
+                throw new Error(TR("have避免变量捕获暂不支持该逻辑上下文"));
+            }
+            return derive(".<>r" + (left.name === "~" ? "n" : left.name),
+                left.nodes!.map((child, index) => emitBinderRenaming(child, right.nodes![index], binders)), []);
         };
 
         /** Emit a direct `have h := source arg...` specialization. */
@@ -4767,7 +4838,33 @@ export class InferenceProofAssistant {
                     const binder = astmgr.clone(currentProposition.nodes[0]);
                     const binderName = this.fs.assert.getVarName(binder);
                     if (!binderName) throw new Error(TR("have来源命题的全称量词变量无效"));
-                    const body = astmgr.clone(currentProposition.nodes[1]);
+                    let body = astmgr.clone(currentProposition.nodes[1]);
+                    const freshBody = this.substituteBoundValue(body, binderName, argument, true);
+                    if (!astmgr.equal(body, freshBody)) {
+                        const freshSource: AST = {
+                            type: "sym", name: "V", nodes: [binder, freshBody]
+                        };
+                        const bridge = emitBinderRenaming(currentProposition, freshSource);
+                        const projection = appendDerived(implication(
+                            bridge.proposition, implication(currentProposition, freshSource)
+                        ), {
+                            deductionIdx: ".<>1", conditionIdxs: [],
+                            replaceValues: [currentProposition, freshSource]
+                        });
+                        const conversion = appendDerived(implication(currentProposition, freshSource), {
+                            deductionIdx: "mp",
+                            conditionIdxs: [absolute(projection.index), absolute(bridge.index)],
+                            replaceValues: []
+                        });
+                        const converted = appendDerived(freshSource, {
+                            deductionIdx: "mp",
+                            conditionIdxs: [absolute(conversion.index), currentRow],
+                            replaceValues: []
+                        });
+                        currentRow = absolute(converted.index);
+                        currentProposition = freshSource;
+                        body = freshBody;
+                    }
                     const specialized = this.substituteBoundValue(body, binderName, argument);
                     const elimination = appendDerived(implication(currentProposition, specialized), {
                         deductionIdx: "a4",
