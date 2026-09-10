@@ -448,7 +448,7 @@ export class SavesParser {
             // A loaded save owns the next page store; discard any live
             // assistant only after the replacement payload is known to be
             // valid.
-            gui.closeInferenceProofAssistant?.();
+            gui.closeInferenceProofAssistant?.(true);
             const savedMetarules = gui.formalSystem.fastmetarules;
             gui.formalSystem = fsdata.fs;
             gui.formalSystem.fastmetarules = savedMetarules;

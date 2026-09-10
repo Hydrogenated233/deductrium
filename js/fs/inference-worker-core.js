@@ -1,6 +1,7 @@
 import { initFormalSystem } from "./initial.js";
 import { SavesParser } from "./savesparser.js";
-/** Execute one isolated inference expansion against a serialized GUI snapshot. */
+import { InferenceProofAssistant } from "./proof-assistant.js";
+/** Execute isolated expansion or fully validated qed against a GUI snapshot. */
 export function expandInferenceSnapshot(request) {
     if (!request || typeof request.save !== "string" || !request.target) {
         throw new Error("推理层 Worker 请求无效");
@@ -12,8 +13,28 @@ export function expandInferenceSnapshot(request) {
     const saves = new SavesParser(request.creative);
     const initialized = initFormalSystem(request.creative).fs;
     const restored = saves.deserializeArr(initialized, data).fs;
-    restored.fastmetarules = "cvuqe><:#zZQRR";
-    if (request.target.kind === "proposition") {
+    restored.fastmetarules = request.target.kind === "qed"
+        ? request.fastMetaRules : "cvuqe><:#zZQRR";
+    restored.disabledMetaRules = [...(request.disabledMetaRules ?? [])];
+    let qed;
+    if (request.target.kind === "qed") {
+        const target = request.target;
+        if (restored.inferencePages.activeId !== target.pageId) {
+            throw new Error("证明助手只能写入启动时的推理表");
+        }
+        const assistant = new InferenceProofAssistant(restored, target.theorem, {
+            pageId: target.pageId,
+            history: target.history,
+            ruleNames: target.ruleNames,
+            fastMetaRules: request.fastMetaRules,
+            allowMcpt: target.allowMcpt,
+            allowIfft: target.allowIfft,
+            allowIfftEu: target.allowIfftEu
+        });
+        const result = assistant.qed(target.name);
+        qed = { committed: true, ...(result.macroName ? { macroName: result.macroName } : {}) };
+    }
+    else if (request.target.kind === "proposition") {
         if (!Number.isInteger(request.target.index) || request.target.index < 0
             || !restored.propositions[request.target.index]) {
             throw new Error("推理表定理不存在");
@@ -45,6 +66,6 @@ export function expandInferenceSnapshot(request) {
     for (const [name, deduction] of Object.entries(restored.deductions)) {
         deductions[name] = saves.serializeDeduction(deduction);
     }
-    return { save, deductions };
+    return { save, deductions, ...(qed ? { qed } : {}) };
 }
 //# sourceMappingURL=inference-worker-core.js.map

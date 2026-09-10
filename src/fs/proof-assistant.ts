@@ -2870,19 +2870,23 @@ export class InferenceProofAssistant {
         return candidates;
     }
 
-    private generatedDeductionCost(name: string, visiting = new Set<string>()): number {
+    private generatedDeductionCost(name: string, visiting = new Set<string>(),
+        costs = new Map<string, number>()): number {
+        const cached = costs.get(name);
+        if (cached !== undefined) return cached;
         const deduction = this.fs.deductions[name];
         if (!deduction) return Number.POSITIVE_INFINITY;
         if (visiting.has(name)) return Number.POSITIVE_INFINITY;
         if (!deduction.steps?.length) return 1;
-        const next = new Set(visiting);
-        next.add(name);
+        visiting.add(name);
         let cost = 1;
         for (const step of deduction.steps) {
-            const child = this.generatedDeductionCost(step.deductionIdx, next);
-            if (!Number.isFinite(child)) return Number.POSITIVE_INFINITY;
+            const child = this.generatedDeductionCost(step.deductionIdx, visiting, costs);
             cost += child;
+            if (!Number.isFinite(cost)) break;
         }
+        visiting.delete(name);
+        costs.set(name, cost);
         return cost;
     }
 
@@ -3067,8 +3071,12 @@ export class InferenceProofAssistant {
         } finally {
             this.fs.fastmetarules = oldFastMetaRules;
         }
+        // Rules can be generated or replaced between searches. Share DAG costs
+        // only within this completed candidate set, never across transactions.
+        const costs = new Map<string, number>();
         candidates.sort((left, right) => {
-            const cost = this.generatedDeductionCost(left.name) - this.generatedDeductionCost(right.name);
+            const cost = this.generatedDeductionCost(left.name, new Set(), costs)
+                - this.generatedDeductionCost(right.name, new Set(), costs);
             if (cost !== 0) return cost;
             return left.name.length - right.name.length;
         });

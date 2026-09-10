@@ -9,7 +9,6 @@ import { RuleTree } from "./metarule.js";
 import { InferencePage, SerializedInferencePages } from "./inference-pages.js";
 import {
     InferenceProofAssistant,
-    InferenceProofQedResult,
     InferenceProofSnapshot
 } from "./proof-assistant.js";
 import { SavesParser } from "./savesparser.js";
@@ -62,6 +61,7 @@ export class FSGui {
     private inferenceProofSnapshot: InferenceProofSnapshot | null = null;
     private inferenceProofPageId: string | null = null;
     private inferenceProofBusy = false;
+    private inferenceProofGeneration = 0;
     private inferenceProofTextMode = false;
     private inferenceProofTextModePreference = false;
     private inferenceProofScript = "";
@@ -340,7 +340,7 @@ export class FSGui {
     }
     /** Replace page state after loading a save, keeping the active engine array in sync. */
     loadInferencePages(serialized?: SerializedInferencePages<any>, propositions?: any[]) {
-        if (this.inferenceProofAssistant) this.closeInferenceProofAssistant();
+        if (this.inferenceProofAssistant) this.closeInferenceProofAssistant(true);
         if (serialized) this.formalSystem.restoreInferencePages(serialized as any);
         else {
             this.formalSystem.restoreInferencePages({
@@ -909,6 +909,7 @@ export class FSGui {
         const script = document.getElementById("fs-proof-script") as HTMLTextAreaElement | null;
         if (script) this.inferenceProofScriptEditor = new ProofScriptEditor(script);
         script?.addEventListener("input", () => {
+            this.cancelInferenceProofWork();
             this.inferenceProofScript = script.value;
             this.inferenceProofScriptDirty = true;
             this.persistInferenceProofDraft();
@@ -1207,15 +1208,22 @@ export class FSGui {
         }
     }
     private scheduleInferenceProofTextReplay() {
-        if (!this.inferenceProofTextMode || !this.inferenceProofAssistant) return;
+        if (!this.inferenceProofTextMode || !this.inferenceProofAssistant || this.inferenceProofBusy) return;
         if (this.inferenceProofTextReplayTimer !== null) window.clearTimeout(this.inferenceProofTextReplayTimer);
         this.inferenceProofTextReplayTimer = window.setTimeout(() => {
             this.inferenceProofTextReplayTimer = null;
             this.replayInferenceProofText(false, true);
         }, 300);
     }
-    private replayInferenceProofText(explicitRun: boolean, toCursor = false) {
-        if (!this.inferenceProofTextMode || !this.inferenceProofAssistant) return;
+    private async replayInferenceProofText(explicitRun: boolean, toCursor = false) {
+        if (!this.inferenceProofTextMode || !this.inferenceProofAssistant || this.inferenceProofBusy) return;
+        if (this.inferenceProofTextReplayTimer !== null) {
+            window.clearTimeout(this.inferenceProofTextReplayTimer);
+            this.inferenceProofTextReplayTimer = null;
+        }
+        const generation = ++this.inferenceProofGeneration;
+        const system = this.formalSystem;
+        this.setInferenceProofBusy(true);
         const script = document.getElementById("fs-proof-script") as HTMLTextAreaElement | null;
         if (script) this.inferenceProofScript = script.value;
         const source = toCursor && script ? scriptThroughCaret(script) : this.inferenceProofScript;
@@ -1236,7 +1244,10 @@ export class FSGui {
                 allowIfftEu: this.enableMIFFT_RP
             });
             snapshot = assistant.snapshot();
+            let sliceStarted = performance.now();
             for (let index = 0; index < entries.length; index++) {
+                if (generation !== this.inferenceProofGeneration || this.formalSystem !== system
+                    || this.pageStore.activeId !== pageId) return;
                 const entry = entries[index];
                 errorLine = entry.lineNumber;
                 const qed = /^qed(?:\s+([^\s]+))?$/.exec(entry.command);
@@ -1246,8 +1257,11 @@ export class FSGui {
                     if (explicitRun) {
                         this.inferenceProofAssistant = assistant;
                         this.inferenceProofSnapshot = snapshot;
-                        const result = this.finishInferenceProof(qed[1] || undefined);
-                        if (!result && this.inferenceProofAssistant) {
+                        this.renderInferenceProofTextSnapshot(snapshot, "", null, terminal);
+                        this.setInferenceProofBusy(false);
+                        const result = await this.finishInferenceProof(qed[1] || undefined);
+                        if (!result && this.inferenceProofAssistant === assistant
+                            && this.inferenceProofGeneration === generation + 1) {
                             const message = (document.getElementById("fs-proof-errmsg")?.textContent || "qed 执行失败").trim();
                             this.renderInferenceProofTextSnapshot(snapshot, message, errorLine, terminal);
                         }
@@ -1256,13 +1270,20 @@ export class FSGui {
                     break;
                 }
                 snapshot = assistant.apply(entry.command);
+                if (performance.now() - sliceStarted >= 8) {
+                    await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+                    sliceStarted = performance.now();
+                }
             }
+            if (generation !== this.inferenceProofGeneration || this.formalSystem !== system
+                || this.pageStore.activeId !== pageId) return;
             this.inferenceProofAssistant = assistant;
             this.inferenceProofSnapshot = snapshot;
             this.renderInferenceProofTextSnapshot(snapshot, "", null, terminal);
             this.persistInferenceProofDraft();
             this.onStateChange();
         } catch (error) {
+            if (generation !== this.inferenceProofGeneration) return;
             if (snapshot) {
                 this.inferenceProofAssistant = assistant;
                 this.inferenceProofSnapshot = snapshot;
@@ -1270,11 +1291,15 @@ export class FSGui {
             } else {
                 this.setInferenceProofError(error);
             }
+        } finally {
+            if (generation === this.inferenceProofGeneration) this.setInferenceProofBusy(false);
         }
     }
     private setInferenceProofError(error: unknown) {
-        const target = document.getElementById("fs-proof-errmsg");
-        if (target) target.innerText = String(error).replace(/^Error:\s*/, "");
+        for (const id of ["fs-proof-errmsg", "fs-proof-script-error"]) {
+            const target = document.getElementById(id);
+            if (target) target.innerText = String(error).replace(/^Error:\s*/, "");
+        }
     }
     applyInferenceProofCommand(command?: string): InferenceProofSnapshot | null {
         if (!this.inferenceProofAssistant || this.inferenceProofBusy) return this.inferenceProofSnapshot;
@@ -1288,10 +1313,14 @@ export class FSGui {
         // typed `qed`/`qed name` follows the same transaction as the button.
         const qedCommand = /^qed(?:\s+([^\s]+))?$/.exec(value);
         if (qedCommand) {
-            const result = this.finishInferenceProof(qedCommand[1] || undefined);
+            const assistant = this.inferenceProofAssistant;
             // Keep a failed qed command editable so the user can correct a
             // missing goal or macro-name collision without retyping it.
-            if (result && input && command === undefined) input.value = "";
+            void this.finishInferenceProof(qedCommand[1] || undefined).then(result => {
+                if (result && input && command === undefined
+                    && (!this.inferenceProofAssistant || this.inferenceProofAssistant === assistant)
+                    && input.value.trim() === value) input.value = "";
+            });
             return this.inferenceProofSnapshot;
         }
         this.inferenceProofBusy = true;
@@ -1327,21 +1356,71 @@ export class FSGui {
             this.inferenceProofBusy = false;
         }
     }
-    finishInferenceProof(name?: string): InferenceProofQedResult | null {
+    async finishInferenceProof(name?: string): Promise<{ committed: true; macroName?: string } | null> {
         if (!this.inferenceProofAssistant || this.inferenceProofBusy) return null;
         if (this.inferenceProofPageId !== this.pageStore.activeId) {
             this.setInferenceProofError(TR("证明助手只能写入启动时的推理表"));
             return null;
         }
-        this.inferenceProofBusy = true;
+        const assistant = this.inferenceProofAssistant;
+        const system = this.formalSystem;
+        const generation = ++this.inferenceProofGeneration;
+        if (this.inferenceProofTextReplayTimer !== null) {
+            window.clearTimeout(this.inferenceProofTextReplayTimer);
+            this.inferenceProofTextReplayTimer = null;
+        }
+        this.setInferenceProofBusy(true);
         try {
-            const result = this.inferenceProofAssistant.qed(name);
+            // Preview is cheap; the worker replays and validates the complete
+            // proof before any trusted page row or named macro is installed.
+            const preview = assistant.materializeQed(name);
+            const recipe = preview.steps[0].assistant!;
+            const saves = new SavesParser(this.creative);
+            const before = this.inferenceQedFingerprint(saves);
+            const history = JSON.stringify(assistant.snapshot().history);
+            const script = this.inferenceProofScript;
+            const client = this.inferenceWorkerClient ??= new InferenceWorkerClient();
+            this.setInferenceProofError(TR("正在校验证明…"));
+            const response = await client.expand({
+                save: this.inferenceWorkerSave(saves),
+                creative: this.creative,
+                fastMetaRules: recipe.fastMetaRules ?? system.fastmetarules,
+                metarules: [...this.metarules],
+                disabledMetaRules: [...system.disabledMetaRules],
+                target: {
+                    kind: "qed", theorem: recipe.theorem, history: recipe.history,
+                    pageId: recipe.pageId, name,
+                    ruleNames: recipe.ruleNames ?? [...this.deductions],
+                    allowMcpt: recipe.allowMcpt !== false,
+                    allowIfft: recipe.allowIfft !== false,
+                    allowIfftEu: recipe.allowIfftEu !== false
+                }
+            });
+            if (generation !== this.inferenceProofGeneration) return null;
+            if (this.inferenceProofAssistant !== assistant || this.formalSystem !== system
+                || history !== JSON.stringify(assistant.snapshot().history)
+                || script !== this.inferenceProofScript
+                || before !== this.inferenceQedFingerprint(saves)) {
+                throw new Error(TR("证明或存档在后台校验期间发生变化，请重新提交"));
+            }
+            const result = response.qed;
+            if (!result?.committed || result.macroName !== name) {
+                throw new Error(TR("推理层 Worker 返回的提交结果无效"));
+            }
+            const commands = new Map(this.pageStore.pages.map(page => [page.id, page.command]));
+            this.applyInferenceWorkerResult(response, saves);
+            for (const page of this.pageStore.pages) {
+                const command = commands.get(page.id);
+                if (command) page.command = command;
+            }
             if (result.macroName && !this.deductions.includes(result.macroName)) {
                 this.addToDeductions(result.macroName);
+            } else {
+                this.updateDeductionList();
             }
             this.updatePropositionList(true);
-            this.updateDeductionList();
             this.clearPersistedInferenceProofDraft();
+            this.setInferenceProofBusy(false);
             this.closeInferenceProofAssistant();
             this.hintText.innerText = result.macroName
                 ? TR("证明完成，已录制宏：") + result.macroName
@@ -1349,17 +1428,51 @@ export class FSGui {
             this.onStateChange();
             return result;
         } catch (error) {
-            this.setInferenceProofError(error);
+            if (generation === this.inferenceProofGeneration) this.setInferenceProofError(error);
             return null;
         } finally {
-            this.inferenceProofBusy = false;
+            if (generation === this.inferenceProofGeneration) this.setInferenceProofBusy(false);
         }
     }
-    closeInferenceProofAssistant() {
+    private inferenceQedFingerprint(saves: SavesParser): string {
+        return JSON.stringify({
+            save: this.inferenceWorkerSave(saves),
+            rules: Object.entries(this.formalSystem.deductions)
+                .map(([name, rule]) => [name, saves.serializeDeduction(rule)]),
+            fastMetaRules: this.formalSystem.fastmetarules,
+            disabledMetaRules: this.formalSystem.disabledMetaRules,
+            allowIfftEu: this.enableMIFFT_RP
+        });
+    }
+    private setInferenceProofBusy(busy: boolean) {
+        this.inferenceProofBusy = busy;
+        document.getElementById("fs-proof-assistant")?.setAttribute("aria-busy", String(busy));
+        for (const id of ["fs-proof-apply", "fs-proof-undo", "fs-proof-qed",
+            "fs-proof-script-run", "fs-proof-script-run-cursor", "fs-proof-text-toggle"]) {
+            const button = document.getElementById(id) as HTMLButtonElement | null;
+            if (button) button.disabled = busy;
+        }
+        const close = document.getElementById("fs-proof-close");
+        if (close) close.textContent = busy ? TR("取消") : TR("关闭");
+    }
+    private cancelInferenceProofWork() {
+        if (!this.inferenceProofBusy) return;
+        this.inferenceProofGeneration++;
+        this.inferenceWorkerClient?.terminate();
+        this.setInferenceProofBusy(false);
+        this.setInferenceProofError(TR("已取消，证明草稿已保留"));
+    }
+    closeInferenceProofAssistant(discard = false) {
+        if (this.inferenceProofBusy && !discard) {
+            this.cancelInferenceProofWork();
+            return;
+        }
         this.clearPersistedInferenceProofDraft();
         this.resetInferenceProofUi();
     }
     private resetInferenceProofUi() {
+        this.cancelInferenceProofWork();
+        this.inferenceProofGeneration++;
         if (this.inferenceProofTextReplayTimer !== null) {
             window.clearTimeout(this.inferenceProofTextReplayTimer);
             this.inferenceProofTextReplayTimer = null;
@@ -1367,7 +1480,7 @@ export class FSGui {
         this.inferenceProofAssistant = null;
         this.inferenceProofSnapshot = null;
         this.inferenceProofPageId = null;
-        this.inferenceProofBusy = false;
+        this.setInferenceProofBusy(false);
         this.inferenceProofScript = "";
         this.inferenceProofScriptDirty = false;
         document.getElementById("fs-proof-session")?.classList.add("hide");
@@ -1449,8 +1562,10 @@ export class FSGui {
             saves.deserializeDeduction(name, restored, encoded as any);
         }
         const fastMetaRules = this.formalSystem.fastmetarules;
+        const disabledMetaRules = [...this.formalSystem.disabledMetaRules];
         this.formalSystem = restored;
         this.formalSystem.fastmetarules = fastMetaRules;
+        this.formalSystem.disabledMetaRules = disabledMetaRules;
         this.pageStore = restored.inferencePages;
     }
 

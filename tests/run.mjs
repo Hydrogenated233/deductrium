@@ -59,6 +59,7 @@ const tests = [
     "./fs-issue-40-set-rewrite-quants.test.mjs",
     "./fs-issue-41-existential-pair-qed.test.mjs",
     "./fs-issue-42-existential-nf-qed.test.mjs",
+    "./fs-issue-43-qed-worker.test.mjs",
     "./tt-issue-13-expand-surface.test.mjs",
     "./tt-system-alias-self-reference.test.mjs",
     "./tt-nbe-system-compute-rule.test.mjs",

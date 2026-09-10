@@ -1,11 +1,24 @@
 import { initFormalSystem } from "./initial.js";
 import { FormalSystem } from "./formalsystem.js";
 import { SavesParser } from "./savesparser.js";
+import { AST } from "./astmgr.js";
+import { InferenceProofAssistant } from "./proof-assistant.js";
 
 export type InferenceWorkerTarget =
     | { kind: "proposition"; index: number }
     | { kind: "deduction"; name: string }
-    | { kind: "inline-proposition"; index: number };
+    | { kind: "inline-proposition"; index: number }
+    | {
+        kind: "qed";
+        theorem: AST;
+        history: string[];
+        pageId: string;
+        name?: string;
+        ruleNames: string[];
+        allowMcpt: boolean;
+        allowIfft: boolean;
+        allowIfftEu: boolean;
+    };
 
 export type InferenceWorkerRequest = {
     save: string;
@@ -13,12 +26,14 @@ export type InferenceWorkerRequest = {
     fastMetaRules: string;
     metarules: string[];
     target: InferenceWorkerTarget;
+    disabledMetaRules?: string[];
 };
 
 export type InferenceWorkerResult = {
     save: string;
     /** All deduction entries are returned so generated helper rules survive immediately. */
     deductions: Record<string, unknown>;
+    qed?: { committed: true; macroName?: string };
 };
 
 type WorkerSaveGui = {
@@ -29,7 +44,7 @@ type WorkerSaveGui = {
     pageStore: FormalSystem["inferencePages"];
 };
 
-/** Execute one isolated inference expansion against a serialized GUI snapshot. */
+/** Execute isolated expansion or fully validated qed against a GUI snapshot. */
 export function expandInferenceSnapshot(request: InferenceWorkerRequest): InferenceWorkerResult {
     if (!request || typeof request.save !== "string" || !request.target) {
         throw new Error("推理层 Worker 请求无效");
@@ -41,9 +56,28 @@ export function expandInferenceSnapshot(request: InferenceWorkerRequest): Infere
     const saves = new SavesParser(request.creative);
     const initialized = initFormalSystem(request.creative).fs;
     const restored = saves.deserializeArr(initialized, data).fs;
-    restored.fastmetarules = "cvuqe><:#zZQRR";
+    restored.fastmetarules = request.target.kind === "qed"
+        ? request.fastMetaRules : "cvuqe><:#zZQRR";
+    restored.disabledMetaRules = [...(request.disabledMetaRules ?? [])];
 
-    if (request.target.kind === "proposition") {
+    let qed: InferenceWorkerResult["qed"];
+    if (request.target.kind === "qed") {
+        const target = request.target;
+        if (restored.inferencePages.activeId !== target.pageId) {
+            throw new Error("证明助手只能写入启动时的推理表");
+        }
+        const assistant = new InferenceProofAssistant(restored, target.theorem, {
+            pageId: target.pageId,
+            history: target.history,
+            ruleNames: target.ruleNames,
+            fastMetaRules: request.fastMetaRules,
+            allowMcpt: target.allowMcpt,
+            allowIfft: target.allowIfft,
+            allowIfftEu: target.allowIfftEu
+        });
+        const result = assistant.qed(target.name);
+        qed = { committed: true, ...(result.macroName ? { macroName: result.macroName } : {}) };
+    } else if (request.target.kind === "proposition") {
         if (!Number.isInteger(request.target.index) || request.target.index < 0
             || !restored.propositions[request.target.index]) {
             throw new Error("推理表定理不存在");
@@ -74,5 +108,5 @@ export function expandInferenceSnapshot(request: InferenceWorkerRequest): Infere
     for (const [name, deduction] of Object.entries(restored.deductions)) {
         deductions[name] = saves.serializeDeduction(deduction);
     }
-    return { save, deductions };
+    return { save, deductions, ...(qed ? { qed } : {}) };
 }
