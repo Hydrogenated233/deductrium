@@ -62,6 +62,7 @@ const tests = [
     "./fs-issue-42-existential-nf-qed.test.mjs",
     "./fs-issue-43-qed-worker.test.mjs",
     "./fs-issue-44-separation-tight.test.mjs",
+    "./fs-issue-46-qed-generalization.test.mjs",
     "./tt-issue-13-expand-surface.test.mjs",
     "./tt-system-alias-self-reference.test.mjs",
     "./tt-nbe-system-compute-rule.test.mjs",

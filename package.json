@@ -30,6 +30,8 @@
     "benchmark:scoped-syntax": "node tests/benchmarks/scoped-syntax-telescope.mjs",
     "prebenchmark:fs-qed": "npm run build",
     "benchmark:fs-qed": "node tests/benchmarks/fs-qed.mjs",
+    "prebenchmark:fs-universal-qed": "npm run build",
+    "benchmark:fs-universal-qed": "node tests/benchmarks/fs-universal-qed.mjs",
     "prebenchmark:fs-qed:browser": "npm run build",
     "benchmark:fs-qed:browser": "node tests/benchmarks/fs-qed-browser.mjs",
     "prebenchmark:workspace": "npm run build",

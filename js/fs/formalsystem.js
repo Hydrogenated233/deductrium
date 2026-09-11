@@ -1484,7 +1484,6 @@ export class FormalSystem {
         if (this.deductions["u" + idx])
             return "u" + idx;
         const d = this.generateDeduction(idx);
-        this.materializeDeferredDeduction(idx);
         if (!d)
             throw TR("条件中的推理规则不存在");
         if (!d.conditions.length) {
@@ -1492,6 +1491,7 @@ export class FormalSystem {
             this.deductions["u" + idx] = this.deductions["v" + idx];
             return "u" + idx;
         }
+        this.materializeDeferredDeduction(idx);
         const s = this._findNewReplName(idx);
         for (const [idx, cond] of d.conditions.entries()) {
             if (assert.nf(s.name, cond) === -1) {
@@ -1798,7 +1798,11 @@ export class FormalSystem {
         if (this.deductions["c" + idx])
             return "c" + idx;
         const d = this.generateDeduction(idx);
-        this.materializeDeferredDeduction(idx);
+        // Closed sources need only an ordinary application followed by a1/mp.
+        // Replaying a checked deferred macro here recursively expands helpers
+        // while the assistant is merely searching conditional/quantified rules.
+        if (d?.conditions.length)
+            this.materializeDeferredDeduction(idx);
         // A user may provide an equivalent conditional axiom directly rather
         // than as a macro with recorded substeps.  The recursive construction
         // below needs d.steps, so synthesize the semantic conditional rule
@@ -1808,7 +1812,7 @@ export class FormalSystem {
         // <a1 steps while only c is unlocked). The rule itself remains a
         // valid atomic source for conditionalization, so lift its proposition
         // shape instead of dereferencing unavailable subrules.
-        const hasUnavailableSteps = !!d?.steps?.some(step => {
+        const hasUnavailableSteps = !!d?.conditions.length && !!d.steps?.some(step => {
             try {
                 return !this.generateDeduction(step.deductionIdx);
             }
@@ -1860,7 +1864,11 @@ export class FormalSystem {
         if (!d.conditions.length) {
             const oldP = this.propositions;
             try {
-                this.expandMacroWithDefaultValue(idx, null, true);
+                this.removePropositions();
+                this.deduct({
+                    deductionIdx: idx, conditionIdxs: [],
+                    replaceValues: d.replaceNames.map(name => ({ type: "replvar", name }))
+                });
                 liftIndependent(0);
                 const ret = this.addMacro("c" + idx, from);
                 this.propositions = oldP;
@@ -1938,6 +1946,11 @@ export class FormalSystem {
         if (this.deductions[">" + idx])
             return ">" + idx;
         let d = this.generateDeduction(idx);
+        if (!d)
+            throw TR("无法生成条件演绎规则，来源规则不存在：") + idx;
+        if (!d.conditions.length) {
+            throw TR("推理规则不包含假设，无法与条件匹配");
+        }
         this.materializeDeferredDeduction(idx);
         d = this.deductions[idx] ?? d;
         if (!d)
