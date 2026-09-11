@@ -11,7 +11,7 @@ import type {
 } from "./formalsystem.js";
 import { Proof } from "./proof.js";
 import { InferencePageStore } from "./inference-pages.js";
-import { migrateInferenceProofHistory } from "./proof-syntax.js";
+import { migrateInferenceProofCommand, migrateInferenceProofHistory } from "./proof-syntax.js";
 
 const astmgr = new ASTMgr();
 const parser = new ASTParser();
@@ -3949,7 +3949,9 @@ export class InferenceProofAssistant {
     }
 
     private parseProposition(target: AST | string): AST {
-        const ast = typeof target === "string" ? parser.parse(target) : astmgr.clone(target);
+        const ast = typeof target === "string"
+            ? parser.parse(migrateInferenceProofCommand(`target ${target}`).slice("target ".length))
+            : astmgr.clone(target);
         if (!ast) throw new Error(TR("空表达式"));
         this.fs.assert.checkGrammer(ast, "p");
         return ast;

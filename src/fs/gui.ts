@@ -13,6 +13,7 @@ import {
 } from "./proof-assistant.js";
 import { SavesParser } from "./savesparser.js";
 import { migrateInferenceProofCommand, migrateInferenceProofHistory } from "./proof-syntax.js";
+import { installInferenceSymbolAliases } from "./symbol-aliases.js";
 import {
     InferenceWorkerClient,
     InferenceWorkerResult,
@@ -92,6 +93,7 @@ export class FSGui {
         this.actionInput = actionInput;
         this.hintText = hintText;
         this.cmdBtns = cmdBtns;
+        installInferenceSymbolAliases(actionInput);
         this.cmd = new FSCmd(this);
         const { fs, arrD } = initFormalSystem(creative);
         this.formalSystem = fs;
@@ -875,6 +877,8 @@ export class FSGui {
         const begin = document.getElementById("fs-proof-begin");
         const target = document.getElementById("fs-proof-target") as HTMLInputElement | null;
         const input = document.getElementById("fs-proof-input") as HTMLTextAreaElement | null;
+        installInferenceSymbolAliases(target);
+        installInferenceSymbolAliases(input);
         const apply = document.getElementById("fs-proof-apply");
         const undo = document.getElementById("fs-proof-undo");
         const close = document.getElementById("fs-proof-close");
@@ -907,7 +911,10 @@ export class FSGui {
             this.toggleInferenceProofTextMode();
         });
         const script = document.getElementById("fs-proof-script") as HTMLTextAreaElement | null;
-        if (script) this.inferenceProofScriptEditor = new ProofScriptEditor(script);
+        if (script) {
+            installInferenceSymbolAliases(script);
+            this.inferenceProofScriptEditor = new ProofScriptEditor(script);
+        }
         script?.addEventListener("input", () => {
             this.cancelInferenceProofWork();
             this.inferenceProofScript = script.value;
@@ -1304,7 +1311,7 @@ export class FSGui {
     applyInferenceProofCommand(command?: string): InferenceProofSnapshot | null {
         if (!this.inferenceProofAssistant || this.inferenceProofBusy) return this.inferenceProofSnapshot;
         const input = document.getElementById("fs-proof-input") as HTMLTextAreaElement | null;
-        const value = String(command ?? input?.value ?? "").trim();
+        const value = migrateInferenceProofCommand(String(command ?? input?.value ?? "").trim());
         if (!value) {
             this.setInferenceProofError(TR("请输入证明策略"));
             return this.inferenceProofSnapshot;

@@ -36,7 +36,7 @@ const parser = new ASTParser();
 // `$`-named expressions remain valid surface terms.
 {
     const fs = initFormalSystem(true).fs;
-    const target = "(E$0:(E$1:$2))<>~(V$0:(V$1:~$2))";
+    const target = "(∃$0:(∃$1:$2))↔¬(∀$0:(∀$1:¬$2))";
     const assistant = new InferenceProofAssistant(fs, target);
     assistant.apply("have h := .nVVn $0 $1 $2");
     assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses.at(-1).proposition), target);
@@ -95,7 +95,7 @@ const parser = new ASTParser();
     const result = assistant.qed();
     assert.equal(result.committed, true);
     fs.expandMacroWithProp(fs.propositions.length - 1);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "($0>($1>$2))>($1>($0>$2))");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "($0→($1→$2))→($1→($0→$2))");
 }
 
 // Applications may mix universal specialization and implication elimination

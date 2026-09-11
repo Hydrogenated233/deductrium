@@ -34,7 +34,7 @@ assert.ok(typeHelp, "the type-theory proof assistant must expose collapsible hel
 assert.match(typeHelp[0], /<summary>策略介绍<\/summary>/);
 assert.doesNotMatch(typeHelp[0], /<details[^>]*\bopen(?:\s|=|>)/,
     "type-theory help should start collapsed");
-for (const tactic of ["intro", "exact", "apply", "destruct", "rw", "simpl", "rfl", "qed"]) {
+for (const tactic of ["intro", "exact", "apply", "cases", "rcases", "obtain", "have", "use", "rw", "simp", "rfl", "qed"]) {
     assert.match(typeHelp[0], new RegExp(`<code>${tactic}(?:</code>|\\s)`),
         `type-theory help should describe ${tactic}`);
 }

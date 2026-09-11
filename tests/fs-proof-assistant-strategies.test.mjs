@@ -18,7 +18,7 @@ const lockedRules = ["mp", "a1", "a2"];
     });
     assistant.apply("apply >s<>s");
     assert.equal(assistant.snapshot().complete, true);
-    assert.equal(parser.stringifyTight(fs.deductions[">s<>s"]?.conclusion ?? parser.parse("False")), "$0>$1");
+    assert.equal(parser.stringifyTight(fs.deductions[">s<>s"]?.conclusion ?? parser.parse("False")), "$0→$1");
 }
 
 // contradiction also searches theorem-list propositions, which remain usable
@@ -111,7 +111,7 @@ const lockedRules = ["mp", "a1", "a2"];
     assert.equal(conditionalRule.conclusion.name, ">");
     assert.equal(conditionalRule.conclusion.nodes[1]?.type, "sym");
     assert.equal(conditionalRule.conclusion.nodes[1]?.name, "=");
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A=B)>(B=A)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A=B)→(B=A)");
 }
 
 // Equality symmetry also accepts a structurally equivalent user rule when the
@@ -172,7 +172,7 @@ const lockedRules = ["mp", "a1", "a2"];
     assert.deepEqual(leftRow?.from?.assistant?.history, ["intro ha", "left", "exact ha"],
         "left must be saved as one deferred assistant step");
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A>(A|B)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A→(A∨B)");
 
     const right = new InferenceProofAssistant(fs, "B>(A|B)", {
         ruleNames: [...lockedRules, "myLeft", "myRight"]
@@ -211,19 +211,19 @@ const lockedRules = ["mp", "a1", "a2"];
     reductio.apply("by_contra hna");
     assert.equal(parser.stringifyTight(reductio.currentGoal.target), "A");
     assert.ok(reductio.currentGoal.hypotheses.some(h => h.name === "hna"
-        && parser.stringifyTight(h.proposition) === "~A"));
+        && parser.stringifyTight(h.proposition) === "¬A"));
     reductio.apply("apply step");
     reductio.apply("exact hna");
     assert.equal(reductio.snapshot().complete, true);
     reductio.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(~A>A)>A");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(¬A→A)→A");
 
     const contrapose = new InferenceProofAssistant(fs, "(~B>~A)>(A>B)", { ruleNames });
     contrapose.apply("intro h");
     assert.ok(contrapose.recommendations().includes("contrapose"));
     contrapose.apply("contrapose");
-    assert.equal(parser.stringifyTight(contrapose.currentGoal.target), "~B>~A");
+    assert.equal(parser.stringifyTight(contrapose.currentGoal.target), "¬B→¬A");
     contrapose.apply("exact h");
     assert.equal(contrapose.snapshot().complete, true);
 

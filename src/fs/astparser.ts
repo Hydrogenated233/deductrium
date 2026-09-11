@@ -7,6 +7,12 @@ export class ASTParser {
     cursor: number = 0;
     tokens: string[];
     token: string;
+    private surfaceSymbol(name: string): string {
+        return ({
+            ">": "→", "<>": "↔", "<": "⊂", "U": "∪", "I": "∩",
+            "&": "∧", "|": "∨", "/|": "∣", "*": "×", "\\": "∖"
+        } as Record<string, string>)[name] ?? name;
+    }
     stringifyTight(ast: AST, bracket: boolean = false): string {
         const nd = ast.nodes;
         if (ast.type === "fn") {
@@ -21,13 +27,13 @@ export class ASTParser {
             return bracket ? `(${c})` : c
         }
         switch (ast.name) {
-            case "~": case "!": return `${ast.name}${this.stringifyTight(nd[0], true)}`;
-            case "V": case "E": case "E!": return `(${ast.name}${this.stringifyTight(nd[0])}:${this.stringifyTight(nd[1], true)})`;
+            case "~": case "!": return `${ast.name === "~" ? "¬" : ast.name}${this.stringifyTight(nd[0], true)}`;
+            case "V": case "E": case "E!": return `(${ast.name === "V" ? "∀" : ast.name === "E!" ? "∃!" : "∃"}${this.stringifyTight(nd[0])}:${this.stringifyTight(nd[1], true)})`;
             // Keep the separator outside the complete predicate expression.
             case "{|": return `{${this.stringifyTight(nd[0])}@${this.stringifyTight(nd[1])}|${this.stringifyTight(nd[2], true)}}`;
             case "|}": return `{${this.stringifyTight(nd[2])}|${this.stringifyTight(nd[0])}@${this.stringifyTight(nd[1])}}`;
             default:
-                const sym = ast.name;
+                const sym = this.surfaceSymbol(ast.name);
                 const c = `${this.stringifyTight(nd[0], true)}${sym}${this.stringifyTight(nd[1], true)}`;
                 return bracket ? `(${c})` : c
         }
@@ -45,12 +51,12 @@ export class ASTParser {
             return `(${nd[0].nodes.map(n => this.stringify(n)).join(", ")} ${ast.name} ${nd[1].nodes.map(n => this.stringify(n)).join(", ")})`;
         }
         switch (ast.name) {
-            case "~": case "!": return `${ast.name}${this.stringify(nd[0])}`;
-            case "V": case "E": case "E!": return `(${ast.name}${this.stringify(nd[0])}: ${this.stringify(nd[1])})`;
+            case "~": case "!": return `${ast.name === "~" ? "¬" : ast.name}${this.stringify(nd[0])}`;
+            case "V": case "E": case "E!": return `(${ast.name === "V" ? "∀" : ast.name === "E!" ? "∃!" : "∃"}${this.stringify(nd[0])}: ${this.stringify(nd[1])})`;
             case "{|": return `{${this.stringify(nd[0])}@${this.stringify(nd[1])} | ${this.stringify(nd[2])}}`;
             case "|}": return `{${this.stringify(nd[2])} | ${this.stringify(nd[0])}@${this.stringify(nd[1])}}`;
             default:
-                return `(${this.stringify(nd[0])} ${ast.name} ${this.stringify(nd[1])})`;
+                return `(${this.stringify(nd[0])} ${this.surfaceSymbol(ast.name)} ${this.stringify(nd[1])})`;
         }
     }
     parse(s: string) {
@@ -58,7 +64,7 @@ export class ASTParser {
         this.tokenise(s.replaceAll("∀", "V").replaceAll("∃", "E").replaceAll("∈", "@").replaceAll("¬", "~")
             .replaceAll("→", ">").replaceAll("↔", "<>").replaceAll("⊂", "<").replaceAll("∪", "U").replaceAll("∩", "I")
             .replaceAll("∧", "&").replaceAll("∨", "|").replaceAll("ω", "omega").replaceAll("≤", "<=").replaceAll("≥", ">=").replaceAll("∣", "/|")
-            .replaceAll("ℕ", "N").replaceAll("ℤ", "Z").replaceAll("ℚ", "Q").replaceAll("ℝ", "R").replaceAll("×","*")
+            .replaceAll("ℕ", "N").replaceAll("ℤ", "Z").replaceAll("ℚ", "Q").replaceAll("ℝ", "R").replaceAll("×","*").replaceAll("∖", "\\")
         );
         this.nextSym();
         return this.meta();

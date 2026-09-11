@@ -1,6 +1,7 @@
 import { TR } from "../lang.js";
 import { ASTParser } from "./astparser.js";
 import { SavesParser } from "./savesparser.js";
+import { expandInferenceAliasesInSurface } from "./symbol-aliases.js";
 export class FSCmd {
     cmdBuffer = [];
     astparser = new ASTParser;
@@ -117,7 +118,7 @@ export class FSCmd {
             actionInput.value = lastCmd;
         }
         this.showhints([]);
-        let cmd = actionInput.value;
+        let cmd = expandInferenceAliasesInSurface(actionInput.value);
         if (cmd.includes("`"))
             cmd = cmd.replaceAll("`", "'");
         if (!cmd.trim())

@@ -18,7 +18,7 @@ const targetText = assistant => parser.stringifyTight(assistant.currentGoal.targ
     });
     assistant.apply("intro h");
     assistant.apply("rw h");
-    assert.equal(targetText(assistant), "(B>C)>(B>C)");
+    assert.equal(targetText(assistant), "(B→C)→(B→C)");
     assistant.apply("exact .i");
     assistant.qed("issue35Forward");
     assert.doesNotThrow(() => fs.expandMacroWithDefaultValue("issue35Forward"));
@@ -34,7 +34,7 @@ const targetText = assistant => parser.stringifyTight(assistant.currentGoal.targ
     });
     assistant.apply("intro h");
     assistant.apply("rw <-h");
-    assert.equal(targetText(assistant), "(A>C)>(A>C)");
+    assert.equal(targetText(assistant), "(A→C)→(A→C)");
     assistant.apply("exact .i");
     assistant.qed("issue35Reverse");
     assert.doesNotThrow(() => fs.expandMacroWithDefaultValue("issue35Reverse"));
@@ -49,7 +49,7 @@ const targetText = assistant => parser.stringifyTight(assistant.currentGoal.targ
         allowIfft: true
     });
     assistant.apply("rw p0");
-    assert.equal(targetText(assistant), "(B>C)>(B>C)");
+    assert.equal(targetText(assistant), "(B→C)→(B→C)");
     assistant.apply("exact .i");
     assistant.qed("issue35Page");
     assert.doesNotThrow(() => fs.expandMacroWithDefaultValue("issue35Page"));
@@ -64,7 +64,7 @@ const targetText = assistant => parser.stringifyTight(assistant.currentGoal.targ
     });
     assistant.apply("intro h");
     assistant.apply("rw h");
-    assert.equal(targetText(assistant), "(Vx:((B>C)>(B>C)))");
+    assert.equal(targetText(assistant), "(∀x:((B→C)→(B→C)))");
     assistant.apply("intro x");
     assistant.apply("exact .i");
     assistant.qed("issue35Quantifier");

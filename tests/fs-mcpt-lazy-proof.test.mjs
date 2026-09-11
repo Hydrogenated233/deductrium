@@ -5,7 +5,7 @@ import { initFormalSystem } from "../js/fs/initial.js";
 import { SavesParser } from "../js/fs/savesparser.js";
 
 const parser = new ASTParser();
-const proposition = "$0>$0";
+const proposition = "$0→$0";
 
 function makeFormalSystem() {
     return initFormalSystem(true).fs;

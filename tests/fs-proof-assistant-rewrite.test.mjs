@@ -38,7 +38,7 @@ function addRewriteRules(fs) {
     assistant.apply("rfl");
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A=B)>((A,B)=(A,B))");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A=B)→((A,B)=(A,B))");
 }
 
 // nth_rw uses one-based left-to-right occurrence numbering.
@@ -65,7 +65,7 @@ function addRewriteRules(fs) {
     assistant.apply("rfl");
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A=(A,A))>(A=A)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A=(A,A))→(A=A)");
 }
 
 // Reverse and sequential list rewriting share the same proof-producing core.
@@ -86,7 +86,7 @@ function addRewriteRules(fs) {
     sequence.apply("rfl");
     sequence.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A=B)>((B=C)>((A,C)=(C,C)))");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A=B)→((B=C)→((A,C)=(C,C)))");
 }
 
 // Missing and out-of-range occurrences are actionable and transactional.

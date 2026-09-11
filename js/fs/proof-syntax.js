@@ -1,7 +1,9 @@
 /** Canonical Lean-style syntax for deduction-layer proof-assistant scripts. */
+import { expandInferenceAliasesInSurface } from "./symbol-aliases.js";
 /** Convert one legacy command while loading an old draft/save. */
 export function migrateInferenceProofCommand(input) {
     let command = String(input ?? "").trim();
+    command = expandInferenceAliasesInSurface(command);
     // Old button/script output used a standalone trailing period.
     command = command.replace(/\s+\.$/, "").trim();
     // Lean uses unicode angle brackets for constructor patterns.  Keep the

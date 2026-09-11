@@ -21,7 +21,7 @@ function addRules(fs) {
     assert.equal(assistant.recommendations().some(command => command.startsWith("by_cases")), false);
     assert.throws(() => assistant.apply("by_cases h : A"), error => {
         assert.match(error.message, /需要解锁|等价推理规则/);
-        assert.match(error.message, /\.m2.*\$0>\$1,~\$0>\$1⊢\$1/);
+        assert.match(error.message, /\.m2.*\$0→\$1,¬\$0→\$1⊢\$1/);
         return true;
     });
 }
@@ -38,13 +38,13 @@ function addRules(fs) {
     assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses.at(-1).proposition), "A");
     assistant.apply("left");
     assistant.apply("exact h");
-    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses.at(-1).proposition), "~A");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses.at(-1).proposition), "¬A");
     assistant.apply("right");
     assistant.apply("exact h");
     assert.equal(assistant.snapshot().complete, true);
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A|~A");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A∨¬A");
 }
 
 // Syntax errors and name collisions roll back the whole command.

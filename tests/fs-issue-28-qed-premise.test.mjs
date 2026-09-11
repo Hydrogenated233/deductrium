@@ -25,9 +25,9 @@ const result = assistant.qed("issue28PremiseQed");
 assert.equal(result.committed, true);
 assert.deepEqual(
     fs.deductions.issue28PremiseQed.conditions.map(value => parser.stringifyTight(value)),
-    ["(V$x:($1<>$2))"]
+    ["(∀$x:($1↔$2))"]
 );
 const materialized = fs.materializeDeferredDeduction("issue28PremiseQed");
-assert.equal(parser.stringifyTight(materialized.conclusion), "#rp($1,$x,$y)<>#rp($2,$x,$y)");
+assert.equal(parser.stringifyTight(materialized.conclusion), "#rp($1,$x,$y)↔#rp($2,$x,$y)");
 
 console.log("GitHub issue #28 proof-assistant premise qed regression passed");

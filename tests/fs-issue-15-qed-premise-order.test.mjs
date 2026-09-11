@@ -49,7 +49,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
     scopedFs.deductions.issue18PageScope.conditions.map(value => parser.stringifyTight(value)),
-    ["A>B", "A", "C"]
+    ["A→B", "A", "C"]
 );
 assert.ok(scopedFs.materializeDeferredDeduction("issue18PageScope").steps?.length);
 

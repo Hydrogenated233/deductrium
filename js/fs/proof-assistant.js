@@ -4,7 +4,7 @@ import { ASTParser } from "./astparser.js";
 import { DEFERRED_ASSISTANT_STEP, registerDeferredAssistantMaterializer } from "./formalsystem.js";
 import { Proof } from "./proof.js";
 import { InferencePageStore } from "./inference-pages.js";
-import { migrateInferenceProofHistory } from "./proof-syntax.js";
+import { migrateInferenceProofCommand, migrateInferenceProofHistory } from "./proof-syntax.js";
 const astmgr = new ASTMgr();
 const parser = new ASTParser();
 const PRIVATE_RULE_METAVARIABLE_PATTERN = /^\$\$assistant_rule_/;
@@ -3739,7 +3739,9 @@ export class InferenceProofAssistant {
             + TR("；请使用") + `apply ${ruleName} ${names.map(name => `${name}=...`).join(" ")}` + TR("指定"));
     }
     parseProposition(target) {
-        const ast = typeof target === "string" ? parser.parse(target) : astmgr.clone(target);
+        const ast = typeof target === "string"
+            ? parser.parse(migrateInferenceProofCommand(`target ${target}`).slice("target ".length))
+            : astmgr.clone(target);
         if (!ast)
             throw new Error(TR("空表达式"));
         this.fs.assert.checkGrammer(ast, "p");

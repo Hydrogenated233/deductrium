@@ -12,22 +12,22 @@ const cases = [
     {
         name: "#rp positional",
         command: "apply issue16Contra (V$0:~$1) #rp($1,$0,$2)",
-        expected: ["(V$0:~$1)>~#rp($1,$0,$2)", "#rp($1,$0,$2)"]
+        expected: ["(∀$0:¬$1)→¬#rp($1,$0,$2)", "#rp($1,$0,$2)"]
     },
     {
         name: "#rp named",
         command: "apply issue16Contra $0=(V$0:~$1) $1=#rp($1,$0,$2)",
-        expected: ["(V$0:~$1)>~#rp($1,$0,$2)", "#rp($1,$0,$2)"]
+        expected: ["(∀$0:¬$1)→¬#rp($1,$0,$2)", "#rp($1,$0,$2)"]
     },
     {
         name: "#nf positional",
         command: "apply issue16Contra (V$0:~$1) #nf($1,$0)",
-        expected: ["(V$0:~$1)>~#nf($1,$0)", "#nf($1,$0)"]
+        expected: ["(∀$0:¬$1)→¬#nf($1,$0)", "#nf($1,$0)"]
     },
     {
         name: "#nf named",
         command: "apply issue16Contra $0=(V$0:~$1) $1=#nf($1,$0)",
-        expected: ["(V$0:~$1)>~#nf($1,$0)", "#nf($1,$0)"]
+        expected: ["(∀$0:¬$1)→¬#nf($1,$0)", "#nf($1,$0)"]
     }
 ];
 

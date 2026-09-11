@@ -78,7 +78,7 @@ assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), parser.stringi
     fallbackFs.expandMacroWithProp(0);
     assert.equal(fallbackFs.propositions.some(proposition => proposition.deferredKind === "cpt"), false);
     assert.ok(fallbackFs.propositions.some(proposition => /^c/.test(proposition.from?.deductionIdx ?? "")));
-    assert.equal(parser.stringifyTight(fallbackFs.propositions.at(-1).value), "A>(B>A)");
+    assert.equal(parser.stringifyTight(fallbackFs.propositions.at(-1).value), "A→(B→A)");
 
     const lockedTauto = new InferenceProofAssistant(initFormalSystem(true).fs, "A>A", { allowMcpt: false });
     assert.throws(() => lockedTauto.apply("tauto"), /未解锁MCPT/);

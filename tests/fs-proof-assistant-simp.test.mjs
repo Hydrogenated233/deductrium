@@ -42,7 +42,7 @@ function addRules(fs, includeRfl = true) {
     assert.equal(assistant.snapshot().complete, true);
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "((A,A)=A)>((A,A)=(A,A))");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "((A,A)=A)→((A,A)=(A,A))");
 }
 
 // simp only excludes unrelated local equalities and does not require rfl.

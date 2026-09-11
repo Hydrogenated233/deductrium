@@ -181,7 +181,7 @@ const saves = new SavesParser(true);
     assistant.apply("tauto");
     assistant.qed("sVe");
     assert.doesNotThrow(() => fs.metaDeductTheorem("sVe", "test"));
-    assert.equal(parser.stringifyTight(fs.deductions[">sVe"].conclusion), "A>(A&A)");
+    assert.equal(parser.stringifyTight(fs.deductions[">sVe"].conclusion), "A→(A∧A)");
 }
 
 // The same case must survive a save/load round trip: `__assistant` is not
@@ -201,7 +201,7 @@ const saves = new SavesParser(true);
     restored.fastmetarules = "cvuqe><:#zZQR";
     saves.deserializeDeduction("sVe", restored, tuple);
     assert.doesNotThrow(() => restored.metaDeductTheorem("sVe", "test"));
-    assert.equal(parser.stringifyTight(restored.deductions[">sVe"].conclusion), "A>(A&A)");
+    assert.equal(parser.stringifyTight(restored.deductions[">sVe"].conclusion), "A→(A∧A)");
 }
 
 // A universal assistant proof using an equivalence premise must expand after
@@ -235,7 +235,7 @@ const saves = new SavesParser(true);
     ]) assistant.apply(command);
     assistant.qed();
     assert.doesNotThrow(() => fs.expandMacroWithProp(1));
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(V$2:$0)<>(V$2:$1)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(∀$2:$0)↔(∀$2:$1)");
 }
 
 // The same protection applies when a normal recorded macro contains an
@@ -251,7 +251,7 @@ const saves = new SavesParser(true);
     assistant.qed();
     fs.addMacro("sVe", "test");
     assert.doesNotThrow(() => fs.metaDeductTheorem("sVe", "test"));
-    assert.equal(parser.stringifyTight(fs.deductions[">sVe"].conclusion), "A>(A&A)");
+    assert.equal(parser.stringifyTight(fs.deductions[">sVe"].conclusion), "A→(A∧A)");
 }
 
 // A saved macro may contain a nested assistant step and then be lifted through
@@ -285,7 +285,7 @@ const saves = new SavesParser(true);
     assert.doesNotThrow(() => fs.expandMacroWithDefaultValue("sVe", null));
     fs.propositions = [];
     assert.doesNotThrow(() => fs.expandMacroWithDefaultValue("sVs", null));
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(V$1:(V$0:$2))");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(∀$1:(∀$0:$2))");
 }
 
 // Existential/disjunction exchange from a saved proof can select an equivalent
@@ -403,7 +403,7 @@ const saves = new SavesParser(true);
     ]);
     assert.doesNotThrow(() => fs.expandMacroWithDefaultValue("sE|", null));
     assert.equal(parser.stringifyTight(fs.propositions.at(-1).value),
-        "(E$0:($1|$2))<>((E$0:$1)|(E$0:$2))");
+        "(∃$0:($1∨$2))↔((∃$0:$1)∨(∃$0:$2))");
 }
 
 console.log("inference proof-assistant lazy atomic regression passed");

@@ -229,7 +229,7 @@ const baseRules = ["mp", "a1", "a2"];
     assistant.apply("exact h");
     assistant.qed();
     assert.doesNotThrow(() => fs.expandMacroWithProp(0));
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A>A");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A→A");
 }
 
 {

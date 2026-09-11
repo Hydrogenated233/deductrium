@@ -6,6 +6,7 @@ import { CREATIVE_SORRY_DEDUCTION, initFormalSystem } from "./initial.js";
 import { RuleParser } from "./metarule.js";
 import { TR } from "../lang.js";
 import { InferencePageStore } from "./inference-pages.js";
+import { migrateInferenceProofHistory } from "./proof-syntax.js";
 // Ensure the synchronous replay hook is registered for CLI save consumers too;
 // the GUI is not necessarily imported by callers of SavesParser.
 import "./proof-assistant.js";
@@ -180,7 +181,7 @@ export class SavesParser {
             version: 1,
             pageId: payload.pageId,
             theorem: astparser.stringifyTight(payload.theorem),
-            history: [...payload.history],
+            history: migrateInferenceProofHistory(payload.history),
             ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
             ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
             ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),
@@ -226,7 +227,7 @@ export class SavesParser {
                 version: 1,
                 pageId: payload.pageId,
                 theorem: astparser.parse(payload.theorem),
-                history: [...payload.history],
+                history: migrateInferenceProofHistory(payload.history),
                 ...(payload.ruleNames ? { ruleNames: [...payload.ruleNames] } : {}),
                 ...(payload.fastMetaRules !== undefined ? { fastMetaRules: payload.fastMetaRules } : {}),
                 ...(payload.allowMcpt !== undefined ? { allowMcpt: payload.allowMcpt } : {}),

@@ -161,9 +161,9 @@ function makeFs() {
     const result = assistant.qed();
     assert.deepEqual(result.propositions[0].from.conditionIdxs, [0]);
     assert.equal(result.propositions[0].from.assistant.premises.length, 1);
-    assert.equal(parser.stringifyTight(result.propositions[0].from.assistant.premises[0].value), "~$1");
+    assert.equal(parser.stringifyTight(result.propositions[0].from.assistant.premises[0].value), "¬$1");
     fs.expandMacroWithProp(1);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "~($0&$1)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "¬($0∧$1)");
     assert.equal(fs.propositions.some(proposition => proposition.from?.deductionIdx.startsWith("<__tauto_")), false);
     const atomicStep = fs.deductions.__assistant.steps?.find(step => step.assistant?.tauto);
     assert.ok(atomicStep);
@@ -186,7 +186,7 @@ function makeFs() {
     assert.deepEqual(result.propositions[0].from.conditionIdxs, [0, 1]);
     assert.equal(result.propositions[0].from.assistant.premises.length, 2);
     fs.expandMacroWithProp(2);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "$0&$1");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "$0∧$1");
     assert.ok(fs.deductions.__assistant.steps?.some(step => step.assistant?.tauto));
 }
 
@@ -200,7 +200,7 @@ function makeFs() {
     assert.equal(assistant.currentGoal.hypotheses[0].kind, "variable");
     assert.equal(assistant.currentGoal.hypotheses[0].proposition, undefined,
         "a universal binder must not be presented as a proposition hypothesis");
-    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "$0>$0");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "$0→$0");
 }
 
 // `intros` introduces a named prefix atomically and can also consume every
@@ -227,7 +227,7 @@ function makeFs() {
     assert.deepEqual(assistant.currentGoal.hypotheses.map(h => h.kind), ["variable", "variable", "intro"]);
     assert.equal(assistant.currentGoal.hypotheses[0].proposition, undefined);
     assert.equal(assistant.currentGoal.hypotheses[1].proposition, undefined);
-    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses[2].proposition), "(ha=1)&(hb=1)");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.hypotheses[2].proposition), "(ha=1)∧(hb=1)");
     assert.equal(parser.stringifyTight(assistant.currentGoal.target), "ha=hb");
 }
 
@@ -309,7 +309,7 @@ function makeFs() {
     assistant.apply("apply h1");
     assert.deepEqual(
         assistant.snapshot().goals.map(goal => parser.stringifyTight(goal.target)),
-        ["~~~$>~$"]
+        ["¬¬¬$→¬$"]
     );
     assistant.apply("exact h2");
     assert.equal(assistant.snapshot().complete, true);

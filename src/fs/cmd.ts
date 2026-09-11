@@ -4,6 +4,7 @@ import { ASTParser } from "./astparser.js";
 import { Deduction } from "./formalsystem.js";
 import { FSGui } from "./gui.js";
 import { SavesParser } from "./savesparser.js";
+import { expandInferenceAliasesInSurface } from "./symbol-aliases.js";
 import type { InferenceWorkerTarget } from "./inference-worker-client.js";
 
 export class FSCmd {
@@ -117,7 +118,7 @@ export class FSCmd {
             actionInput.value = lastCmd;
         }
         this.showhints([]);
-        let cmd = actionInput.value;
+        let cmd = expandInferenceAliasesInSurface(actionInput.value);
         if (cmd.includes("`")) cmd = cmd.replaceAll("`", "'");
         if (!cmd.trim()) return;
         this.cmdBuffer.push(cmd);

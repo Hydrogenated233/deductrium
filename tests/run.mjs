@@ -22,6 +22,8 @@ const tests = [
     "./fs-proof-assistant-simp.test.mjs",
     "./fs-proof-assistant-by-cases.test.mjs",
     "./fs-proof-assistant-help.test.mjs",
+    "./fs-symbol-aliases.test.mjs",
+    "./symbol-alias-sync.test.mjs",
     "./proof-assistant-text-mode.test.mjs",
     "./fs-proof-assistant-step.test.mjs",
     "./fs-proof-assistant-ccmp.test.mjs",

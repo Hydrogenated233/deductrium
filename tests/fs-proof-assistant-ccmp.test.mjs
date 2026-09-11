@@ -28,7 +28,7 @@ function makeCcmpSystem() {
     assistant.apply("apply ccmp $0=$2");
     assert.deepEqual(
         assistant.snapshot().goals.map(goal => parser.stringifyTight(goal.target)),
-        ["$0>($1>($2>$3))", "$0>($1>$2)"]
+        ["$0→($1→($2→$3))", "$0→($1→$2)"]
     );
 }
 

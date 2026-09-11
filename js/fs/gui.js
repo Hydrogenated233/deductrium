@@ -8,6 +8,7 @@ import { ListDragger } from "./itemdragger.js";
 import { InferenceProofAssistant } from "./proof-assistant.js";
 import { SavesParser } from "./savesparser.js";
 import { migrateInferenceProofCommand, migrateInferenceProofHistory } from "./proof-syntax.js";
+import { installInferenceSymbolAliases } from "./symbol-aliases.js";
 import { InferenceWorkerClient } from "./inference-worker-client.js";
 const astmgr = new ASTMgr();
 const inferenceProofTextModeStorageKey = "deductrium-fs-proof-text-mode";
@@ -70,6 +71,7 @@ export class FSGui {
         this.actionInput = actionInput;
         this.hintText = hintText;
         this.cmdBtns = cmdBtns;
+        installInferenceSymbolAliases(actionInput);
         this.cmd = new FSCmd(this);
         const { fs, arrD } = initFormalSystem(creative);
         this.formalSystem = fs;
@@ -932,6 +934,8 @@ export class FSGui {
         const begin = document.getElementById("fs-proof-begin");
         const target = document.getElementById("fs-proof-target");
         const input = document.getElementById("fs-proof-input");
+        installInferenceSymbolAliases(target);
+        installInferenceSymbolAliases(input);
         const apply = document.getElementById("fs-proof-apply");
         const undo = document.getElementById("fs-proof-undo");
         const close = document.getElementById("fs-proof-close");
@@ -966,8 +970,10 @@ export class FSGui {
             this.toggleInferenceProofTextMode();
         });
         const script = document.getElementById("fs-proof-script");
-        if (script)
+        if (script) {
+            installInferenceSymbolAliases(script);
             this.inferenceProofScriptEditor = new ProofScriptEditor(script);
+        }
         script?.addEventListener("input", () => {
             this.cancelInferenceProofWork();
             this.inferenceProofScript = script.value;
@@ -1391,7 +1397,7 @@ export class FSGui {
         if (!this.inferenceProofAssistant || this.inferenceProofBusy)
             return this.inferenceProofSnapshot;
         const input = document.getElementById("fs-proof-input");
-        const value = String(command ?? input?.value ?? "").trim();
+        const value = migrateInferenceProofCommand(String(command ?? input?.value ?? "").trim());
         if (!value) {
             this.setInferenceProofError(TR("请输入证明策略"));
             return this.inferenceProofSnapshot;

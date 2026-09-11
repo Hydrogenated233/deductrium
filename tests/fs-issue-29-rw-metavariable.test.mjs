@@ -16,7 +16,7 @@ const ruleNames = ["mp", "a1", "a2", "d3", "issue29Symm", "issue29Subst", "issue
 const assistant = new InferenceProofAssistant(fs, "($0*3)=($0*3)", { ruleNames });
 assistant.apply("have h3 := d3");
 assistant.apply("rw h3");
-assert.equal(parser.stringifyTight(assistant.currentGoal.target), "($0*S(2))=($0*S(2))");
+assert.equal(parser.stringifyTight(assistant.currentGoal.target), "($0×S(2))=($0×S(2))");
 
 // The concrete-source exception must not turn an unknown target into a match:
 // when the target contains no `3`, `rw h3` still reports a missing occurrence.

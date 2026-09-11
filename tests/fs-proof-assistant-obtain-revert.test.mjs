@@ -79,7 +79,7 @@ function addObtainRules(fs) {
     assistant.apply("rfl");
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(Ex:(x=1))>(1=1)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(∃x:(x=1))→(1=1)");
 }
 
 // Locked elimination rules neither recommend nor execute obtain.
@@ -99,7 +99,7 @@ function addObtainRules(fs) {
     assistant.apply("intro h");
     assert.ok(assistant.recommendations().some(command => command.endsWith(":= h")));
     assistant.apply("obtain <ha,hb> := h");
-    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "B&A");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "B∧A");
     assert.deepEqual(assistant.currentGoal.hypotheses.slice(-2).map(item => [item.name, parser.stringifyTight(item.proposition)]), [
         ["ha", "A"],
         ["hb", "B"]
@@ -110,7 +110,7 @@ function addObtainRules(fs) {
     assert.equal(assistant.snapshot().complete, true);
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A&B)>(B&A)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A∧B)→(B∧A)");
 }
 
 // Equivalence obtain exposes both implication directions.
@@ -134,13 +134,13 @@ function addObtainRules(fs) {
     assert.equal(assistant.recommendations().includes("revert h"), false,
         "a direct exact/assumption candidate should suppress the fallback revert suggestion");
     assistant.apply("revert h");
-    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "A>A");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "A→A");
     assert.equal(assistant.currentGoal.hypotheses.some(item => item.name === "h"), false);
     assistant.apply("intro h2");
     assistant.apply("exact h2");
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A>A");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A→A");
 }
 
 // Revert remains available as a fallback when no direct strategy matches, but
@@ -162,12 +162,12 @@ function addObtainRules(fs) {
     assistant.apply("have hx : A");
     assistant.apply("exact ha");
     assistant.apply("revert hx");
-    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "A>(A>A)");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "A→(A→A)");
     assistant.apply("exact a1");
     assert.equal(assistant.snapshot().complete, true);
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A>(A>A)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A→(A→A)");
 }
 
 // Reverting an intro inherited from a parent proof node uses the same wrapper
@@ -179,11 +179,11 @@ function addObtainRules(fs) {
     assistant.apply("have hx : A");
     assistant.apply("exact ha");
     assistant.apply("revert ha");
-    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "A>(A>A)");
+    assert.equal(parser.stringifyTight(assistant.currentGoal.target), "A→(A→A)");
     assistant.apply("exact a1");
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A>(A>A)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "A→(A→A)");
 }
 
 // Disjunction obtain creates two independent continuation branches, then uses
@@ -205,7 +205,7 @@ function addObtainRules(fs) {
     assert.equal(assistant.snapshot().complete, true);
     assistant.qed();
     fs.expandMacroWithProp(0);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A|B)>(B|A)");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "(A∨B)→(B∨A)");
 }
 
 // The two branch names occupy separate scopes and may intentionally match.

@@ -28,7 +28,7 @@ const saves = new SavesParser(true);
     assert.equal(fs.propositions[1].from.assistant.history[1], "exact p0");
 
     fs.expandMacroWithProp(1);
-    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "~$1>$0");
+    assert.equal(parser.stringifyTight(fs.propositions.at(-1).value), "¬$1→$0");
     assert.equal(Object.keys(fs.deductions).some(name => /^__assist_/.test(name)), false);
 }
 
@@ -95,7 +95,7 @@ const saves = new SavesParser(true);
         deferredKind: "assistant"
     });
     restored.expandMacroWithProp(1);
-    assert.equal(parser.stringifyTight(restored.propositions.at(-1).value), "~$1>$0");
+    assert.equal(parser.stringifyTight(restored.propositions.at(-1).value), "¬$1→$0");
 }
 
 console.log("proof-assistant step metadata regression passed");
