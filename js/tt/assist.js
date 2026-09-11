@@ -1693,7 +1693,7 @@ export class Assist {
         return ast?.type === "var" && !ast.bondVarId
             && ast.nbeGeneratedMeta === true;
     }
-    substituteSemanticMetas(ast, metas) {
+    substituteSemanticMetas(ast, metas, freeNames = new Set([...metas.values()].flatMap(value => [...Core.getFreeVars(value)]))) {
         if (this.isPrivateSemanticMeta(ast) && metas.has(ast.name)) {
             return Core.clone(metas.get(ast.name));
         }
@@ -1704,8 +1704,27 @@ export class Assist {
             displayExplicitAt: ast.displayExplicitAt,
             nbeGeneratedMeta: ast.nbeGeneratedMeta
         };
-        if (ast.nodes)
-            result.nodes = ast.nodes.map(node => this.substituteSemanticMetas(node, metas));
+        if (ast.nodes && (ast.type === "L" || ast.type === "P" || ast.type === "S" || ast.type === "W")) {
+            let body = ast.nodes[1];
+            if (freeNames.has(ast.name)) {
+                // Meta solutions live in the caller's context, not inside the
+                // eliminator telescope. Rename before inserting them so e.g.
+                // ?B := C does not become bound by the motive parameter C.
+                const occupied = new Set([...freeNames, ...Core.getFreeVars(body), ...metas.keys()]);
+                result.name = Core.getNewName(ast.name, occupied);
+                body = Core.clone(body);
+                this.replaceFreeVar(body, ast.name, {
+                    type: "var", name: result.name, bondVarId: ast.bondVarId
+                });
+            }
+            result.nodes = [
+                this.substituteSemanticMetas(ast.nodes[0], metas, freeNames),
+                this.substituteSemanticMetas(body, metas, freeNames)
+            ];
+        }
+        else if (ast.nodes) {
+            result.nodes = ast.nodes.map(node => this.substituteSemanticMetas(node, metas, freeNames));
+        }
         return result;
     }
     constrainSemanticMetas(expected, actual, metas) {

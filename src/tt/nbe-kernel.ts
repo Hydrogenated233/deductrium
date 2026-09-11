@@ -153,7 +153,8 @@ function compile(
     state: KernelState,
     allowMetas = false,
     rigidMetas = false,
-    rigidHoles = false
+    rigidHoles = false,
+    applicationHead = false
 ): Term | null {
     if (!ast || typeof ast !== "object" || !step(state)) return null;
     if (ast.origin && typeof ast.origin === "object") return null;
@@ -175,6 +176,16 @@ function compile(
         const contextBinding = findContextBinding(ast, context);
         if (contextBinding) return { kind: "free", key: contextBinding.key };
         if (validId(ast.bondVarId)) return null;
+        // Bare U can survive as a branch argument and emerge from iota
+        // reduction. It denotes U @0, while the head of U level must remain
+        // the universe constructor rather than gaining a second level.
+        if (ast.name === "U" && !applicationHead) {
+            return {
+                kind: "application",
+                fn: { kind: "free", key: "constant:U", definitionName: "U" },
+                arg: { kind: "free", key: "constant:@0", definitionName: "@0" }
+            };
+        }
         return { kind: "free", key: `constant:${ast.name}`, definitionName: ast.name };
     }
     if (ast.type === "L") {
@@ -195,7 +206,7 @@ function compile(
         return domain && body ? { kind: "binder", binder: ast.type, name: ast.name, domain, body } : null;
     }
     if (ast.type === "apply") {
-        const fn = compile(ast.nodes?.[0], scope, context, state, allowMetas, rigidMetas, rigidHoles);
+        const fn = compile(ast.nodes?.[0], scope, context, state, allowMetas, rigidMetas, rigidHoles, true);
         const arg = compile(ast.nodes?.[1], scope, context, state, allowMetas, rigidMetas, rigidHoles);
         return fn && arg ? { kind: "application", fn, arg } : null;
     }
@@ -223,7 +234,8 @@ function compilePatternInScope(
     ast: AST,
     state: KernelState,
     topLevelWildcard: boolean,
-    scope: ScopeCursor
+    scope: ScopeCursor,
+    applicationHead = false
 ): Pattern | null {
     if (!ast || typeof ast !== "object" || !step(state)) return null;
     if (ast.type === "var") {
@@ -235,10 +247,17 @@ function compilePatternInScope(
         const boundIndex = findKernelScopeIndex(ast, scope);
         if (boundIndex >= 0) return { kind: "bound", index: boundIndex };
         if (!ast.name || validId(ast.bondVarId)) return null;
+        if (ast.name === "U" && !applicationHead) {
+            return {
+                kind: "application",
+                fn: { kind: "free", key: "constant:U" },
+                arg: { kind: "free", key: "constant:@0" }
+            };
+        }
         return { kind: "free", key: `constant:${ast.name}` };
     }
     if (ast.type === "apply") {
-        const fn = compilePatternInScope(ast.nodes?.[0], state, false, scope);
+        const fn = compilePatternInScope(ast.nodes?.[0], state, false, scope, true);
         const arg = compilePatternInScope(ast.nodes?.[1], state, false, scope);
         return fn && arg ? { kind: "application", fn, arg } : null;
     }
