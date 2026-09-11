@@ -34,6 +34,9 @@ function skipSurfaceWhitespace(source, index) {
  */
 function isSurfaceUniverseToken(token) {
     return token === "U" || token === "U@" || token === "U@:"
+        // Rewriting emits U_ for an inferred universe level. Preserve this
+        // exact shorthand while still shielding user names such as U_foo.
+        || token === "U_"
         // Internal/generated source also uses one-letter symbolic levels such
         // as `Uu`, `Uv`, and `Uw`.  Keep those compatible while treating
         // longer names (`Ufoo`) as ordinary user identifiers.

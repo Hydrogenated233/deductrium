@@ -39,6 +39,7 @@ const tests = [
     "./tt-assist-rintro-change.test.mjs",
     "./tt-assist-apply-at.test.mjs",
     "./tt-issue-34-assist-simpl.test.mjs",
+    "./tt-issue-45-qed-universe-hole.test.mjs",
     "./fs-proof-assistant-lean-style.test.mjs",
     "./fs-proof-assistant-rintro-change.test.mjs",
     "./fs-proof-assistant-apply-at.test.mjs",
