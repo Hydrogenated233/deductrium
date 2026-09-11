@@ -13,13 +13,17 @@ const commandMethods = new Set([
     "obtain", "have", "hyp", "induction", "destruct", "use", "ex", "left",
     "right", "case", "expand"
 ]);
+export const TT_ASSIST_COMMANDS = [...commandMethods]
+    .map(name => name === "construct" ? "constructor" : name).concat("qed");
 /** Lean spellings inherit the same survival unlock as their existing tactic. */
 export function isTTAssistTacticUnlocked(name, unlocked) {
     if (name === "obtain") {
         return !unlocked || unlocked.has(name)
             || unlocked.has("hyp") && unlocked.has("destruct");
     }
-    const aliases = { have: "hyp", use: "ex", rcases: "destruct" };
+    const aliases = {
+        have: "hyp", use: "ex", rcases: "destruct", cases: "destruct", induction: "destruct"
+    };
     return !unlocked || unlocked.has(name) || !!aliases[name] && unlocked.has(aliases[name]);
 }
 function isProofTargetSort(type) {
@@ -73,10 +77,10 @@ export class TTAssistEngine {
     }
     qed() {
         const assist = this.requireAssist();
-        assist.qed();
+        const proof = assist.qed();
         const explicitAtNames = new Set();
         return {
-            proof: parser.stringify(this.presentAst(assist.elem, explicitAtNames)),
+            proof: parser.stringify(this.presentAst(proof, explicitAtNames)),
             theorem: parser.stringify(this.presentAst(assist.theorem, explicitAtNames))
         };
     }

@@ -539,13 +539,7 @@ export class Assist {
     }
     /** Lean-style aliases for common structural tactics. */
     cases(spec) {
-        const value = spec?.trim() ?? "";
-        if (!value)
-            throw TR("cases需要一个变量名");
-        // `cases n with d dh` is accepted as the compact form used by the
-        // induction implementation; a bare `cases n` keeps the existing
-        // destruct behavior and generated names.
-        return /\s+with\s+/i.test(value) ? this.induction(value) : this.destruct(value);
+        return this.destruct(spec);
     }
     /** Pair patterns use the existing dependent eliminator at every level. */
     rcases(spec) {
@@ -1590,6 +1584,58 @@ export class Assist {
             name: "",
             nodes: [term, theorem]
         }, [], false, undefined, false, true);
+        // Keep the live proof tree/history unchanged. Only export a smaller
+        // beta-reduced term after checking it against the same proposition.
+        try {
+            const source = Core.clone(this.elem);
+            this.clearBondIds(source);
+            let budget = 20_000;
+            const charge = () => { if (--budget < 0)
+                throw new Error("proof simplification budget"); };
+            const size = (ast) => {
+                charge();
+                return 1 + (ast.nodes ?? []).reduce((sum, child) => sum + size(child), 0);
+            };
+            const occurrences = (ast, name) => {
+                charge();
+                if (ast.type === "var")
+                    return Number(ast.name === name);
+                if (["L", "P", "S", "W"].includes(ast.type) && ast.name === name) {
+                    return occurrences(ast.nodes[0], name);
+                }
+                return (ast.nodes ?? []).reduce((sum, child) => sum + occurrences(child, name), 0);
+            };
+            const simplify = (ast) => {
+                charge();
+                if (!ast.nodes?.length)
+                    return ast;
+                ast.nodes = ast.nodes.map(simplify);
+                if (ast.type !== "apply" || ast.nodes[0].type !== "L")
+                    return ast;
+                const [fn, argument] = ast.nodes;
+                const count = occurrences(fn.nodes[1], fn.name);
+                // Never duplicate a compound argument. This keeps proof
+                // compression from turning a small shared lemma into a tree.
+                if (count > 1 && argument.nodes?.length)
+                    return ast;
+                const body = Core.clone(fn.nodes[1]);
+                this.replaceFreeVar(body, fn.name, argument);
+                return simplify(body);
+            };
+            const beforeSize = size(source);
+            const candidate = simplify(source);
+            if (size(candidate) < beforeSize) {
+                core.withSilentErrors(() => core.checkType({
+                    type: ":", name: "", nodes: [Core.clone(candidate), Core.clone(theorem)]
+                }, [], false, undefined, false, true));
+                return candidate;
+            }
+        }
+        catch {
+            // Compression is optional; the original proof has already passed
+            // the kernel above, including its resource and completeness checks.
+        }
+        return this.elem;
     }
     /**
      * `simpl` is a head-normalisation tactic. A rigid type such as a Sigma
@@ -1954,17 +2000,53 @@ export class Assist {
      * data and induction-hypothesis bindings, e.g. `induction n with d dh`.
      * The existing destruct implementation remains the shared eliminator. */
     induction(spec) {
+        return this.destruct(spec);
+    }
+    parseElimination(spec) {
         const value = spec?.trim() ?? "";
-        const match = /^([^\s]+)(?:\s+with\s+([\s\S]+))?$/.exec(value);
-        if (!match)
-            throw TR("induction语法应为 induction 变量 [with 名称...]");
-        const names = match[2]
-            ? match[2].split(/[\s,]+/).filter(Boolean)
-            : [];
-        if (names.some(name => !/^[^\s,]+$/.test(name))) {
-            throw TR("induction分支名称无效");
+        const clauses = [];
+        let depth = 0;
+        for (let i = 0; i < value.length; i++) {
+            if ("([{⟨".includes(value[i]))
+                depth++;
+            else if (")]}⟩".includes(value[i]))
+                depth--;
+            if (depth !== 0 || i === 0 || !/\s/.test(value[i - 1]))
+                continue;
+            const match = /^(with|generalizing)(?=\s|$)/.exec(value.slice(i));
+            if (match) {
+                clauses.push({ name: match[1], start: i, end: i + match[1].length });
+                i += match[1].length - 1;
+            }
         }
-        return this.destruct(match[1], names);
+        const term = value.slice(0, clauses[0]?.start ?? value.length).trim();
+        if (!term)
+            throw TR("解构需要一个项");
+        let names = [];
+        let generalizing;
+        const seen = new Set();
+        clauses.forEach((clause, i) => {
+            if (seen.has(clause.name))
+                throw TR("重复的解构选项：") + clause.name;
+            seen.add(clause.name);
+            const text = value.slice(clause.end, clauses[i + 1]?.start ?? value.length).trim();
+            if (!text)
+                throw TR("解构选项后需要变量名：") + clause.name;
+            const entries = text === "[]" && clause.name === "generalizing" ? [] : text.split(/[\s,]+/);
+            if (new Set(entries).size !== entries.length)
+                throw TR("解构选项含重复变量");
+            for (const name of entries) {
+                const ast = parseAssistInput(name);
+                if (ast.type !== "var" || ast.name !== name || name.startsWith("?")) {
+                    throw TR("解构选项需要局部变量名：") + name;
+                }
+            }
+            if (clause.name === "with")
+                names = entries;
+            else
+                generalizing = entries;
+        });
+        return { term, names, generalizing };
     }
     renameInductionBinding(goal, branchRoot, source, destination) {
         if (!source || source === destination)
@@ -2017,11 +2099,14 @@ export class Assist {
         }
     }
     destruct(n, inductionNames = []) {
-        n = n.trim();
+        const spec = this.parseElimination(n);
+        n = spec.term;
+        if (spec.names.length)
+            inductionNames = spec.names;
+        const nast = markExplicitAtSyntax(parseAssistInput(n));
         const goal = this.goal.shift();
         if (!goal)
             throw TR("无证明目标，请使用qed命令结束证明");
-        const nast = { type: "var", name: n };
         let nType;
         // A local variable's type is already recorded in the goal context.
         // Re-synthesizing the variable as an ordinary term can desugar a
@@ -2030,13 +2115,33 @@ export class Assist {
         // though the context binding was checked when it was introduced.
         // Read the nearest binding directly and only fall back to synthesis
         // for malformed/legacy contexts that do not carry a type.
-        const binding = findContextByName(goal.context, n);
+        const binding = nast.type === "var" ? findContextByName(goal.context, nast.name) : undefined;
+        const excludedSet = new Set(goal.context.map(e => e[0]));
+        if (!binding) {
+            // Reserve bound names too: the abstracted term can occur beneath
+            // a binder in the target or a generalized hypothesis.
+            const pending = [goal.type, nast, ...goal.context.map(([, type]) => type)];
+            while (pending.length) {
+                const ast = pending.pop();
+                if (!ast)
+                    continue;
+                if (ast.name)
+                    excludedSet.add(ast.name);
+                pending.push(...ast.nodes ?? []);
+            }
+        }
+        n = binding ? binding[0] : Core.getNewName("case", excludedSet);
+        excludedSet.add(n);
         if (binding?.[1]) {
             nType = Core.clone(binding[1]);
         }
         else {
             try {
-                nType = core.checkType(nast, goal.context, false);
+                // A checked type hole elaborates implicit universes in, e.g.,
+                // a function returning Sum. Plain synthesis cannot always
+                // resolve the desugared context's implicit arguments.
+                const assertion = wrapLambda(":", "", Core.clone(nast), wrapVar("_"));
+                nType = core.checkType(assertion, goal.context, true, undefined, false, true);
             }
             catch (e) {
                 this.goal.unshift(goal);
@@ -2045,10 +2150,9 @@ export class Assist {
         }
         if (!this.isIndType(nType)) {
             this.goal.unshift(goal);
-            throw TR("只能解构解锁的归纳类型的变量");
+            throw TR("只能解构解锁的归纳类型的项");
         }
         const dynamicInductive = this.getDynamicInductiveMetadata(nType);
-        const excludedSet = new Set(goal.context.map(e => e[0]));
         Core.getFreeVars(goal.type, excludedSet);
         const isEqType = nType.nodes?.[0]?.nodes?.[0]?.name === "eq" || nType.type === "=";
         const isPushoutType = nType.type === "apply"
@@ -2110,20 +2214,51 @@ export class Assist {
         const groupParam = (isEqType || nType.nodes?.[0]?.name === "Even") ? nType.nodes[1] : null;
         const selfLoopEq = isEqType && this.exactEqualByAlphaConversion(fixedEqEndpoint, groupParam);
         // destruct with other variables in context as condition added in target C
-        const conds = [];
-        if (!Assist.disableDestructConds) {
-            for (const [k, v, id] of goal.context) {
-                if (k === n)
+        const requested = new Set(spec.generalizing ?? []);
+        for (const name of requested) {
+            if (name === n || !findContextByName(goal.context, name)) {
+                this.goal.unshift(goal);
+                throw TR("无法泛化此局部变量：") + name;
+            }
+        }
+        const required = new Set(requested);
+        // Generalization must be transitively closed: q : p=p cannot remain
+        // outside a motive which moves p into the branch.
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const [name, type] of goal.context) {
+                if (name === n || required.has(name))
                     continue;
-                if (Core.getFreeVars(v).has(n) || (groupParam && this.search(v, groupParam))) {
-                    conds.push([k, v, id]);
+                const free = Core.getFreeVars(type);
+                if ((binding ? free.has(n) : this.search(type, nast))
+                    || (groupParam && this.search(type, groupParam))
+                    || [...required].some(dependency => free.has(dependency))) {
+                    required.add(name);
+                    changed = true;
                 }
             }
         }
+        if (spec.generalizing !== undefined) {
+            const missing = [...required].filter(name => !requested.has(name));
+            if (missing.length) {
+                this.goal.unshift(goal);
+                throw TR("解构还需要泛化依赖变量：") + missing.join(", ");
+            }
+        }
+        if (Assist.disableDestructConds && spec.generalizing?.length) {
+            this.goal.unshift(goal);
+            throw TR("当前未解锁依赖假设解构");
+        }
+        const conds = Assist.disableDestructConds ? []
+            : goal.context.filter(([name]) => required.has(name));
         const condsNames = conds.map(e => e[0]);
         let goalWithConds = Core.clone(goal.type);
         for (const [k, v, id] of conds) {
             goalWithConds = wrapLambda("P", k, v, goalWithConds);
+        }
+        if (!binding) {
+            goalWithConds = this.genReplaceFn(goalWithConds, nast, n, excludedSet);
         }
         if (dynamicInductive?.fullEliminatorName) {
             const motiveUniverse = this.universeLevelForType(goalWithConds, goal.context);
@@ -2234,7 +2369,7 @@ export class Assist {
                 ? dynamicInductive.constructors[i]
                 : undefined;
             const holeParams = this.restoreDynamicRecursiveBinderNames(this.flattenParamNames(indFnParamType), indexedHitConstructor);
-            holeParams.push(...condsNames);
+            holeParams.push(...condsNames.slice().reverse());
             introNums.push(holeParams);
             // mark depend
             const depend = [];
@@ -2291,7 +2426,7 @@ export class Assist {
                 // Explicit constructor names do not rename the dependent
                 // hypotheses temporarily moved into the branch motive.
                 const names = inductionNames.length === introducedNames.length - condsNames.length
-                    ? [...inductionNames, ...condsNames]
+                    ? [...inductionNames, ...condsNames.slice().reverse()]
                     : inductionNames;
                 this.renameInductionBindings(g, branchRoot, introducedNames, names);
             }

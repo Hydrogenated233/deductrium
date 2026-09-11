@@ -147,7 +147,7 @@ qed example
 Focus preserves live goal and dependency references. For a target
 `Σn:nat,n=n`, `constructor`, `· exact 0`, `· rfl` therefore updates the hidden
 second goal to `0=0`. Final `qed` checks the entire resulting term again.
-If a local name shadows a public constructor alias (for example `pair`),
+If a retained local name shadows a public constructor alias (for example `pair`),
 the printed proof retains the corresponding `@pair` kernel application.
 It must not shorten that application into a reference to the local fact.
 Regression tests reload exported definitions into a fresh checking session.
@@ -157,3 +157,63 @@ such as `<;>`, named `case ... =>` alternatives, `all_goals`, term-level `by`
 inside arbitrary expressions, and `obtain ... := by` are not implemented.
 Symbol input aliases, including the branch bullet, are listed only in the
 progress panel's per-layer symbol tables.
+
+## Elimination Terms And Generalization
+
+`cases t`, `destruct t`, and `induction t` accept a checked term whose type
+has an unlocked eliminator, including applications such as `cases (f b)`.
+The motive abstracts occurrences of that term without capturing bound names.
+Source variables remain available when eliminating a compound term; eliminating
+a local variable removes that binding. Pattern `rcases h with ⟨x, hx⟩`
+still takes a local binding; use `obtain ⟨x, hx⟩ := t` for pattern elimination
+of an arbitrary term.
+
+Use `generalizing h₁ h₂` to select context bindings that move into the motive
+and are reintroduced in each branch. The selected set must contain every
+dependent binding, including transitive dependencies. An incomplete list reports
+the missing names without changing the proof state. Independent bindings may
+also be selected. Omit the clause for automatic dependent generalization,
+or write `generalizing []` to explicitly select none. Survival mode still
+requires the dependent-elimination unlock.
+
+For target `Πn:nat,Πp:n=n,Πq:p=p,True`:
+
+```text
+intros n p q
+cases n generalizing p q
+· exact true
+· exact true
+qed example
+```
+
+The `with` naming clause may come before or after `generalizing`.
+For example, `induction n generalizing p q with d ih` names the successor
+data and induction hypothesis; dependent hypotheses are reintroduced in
+dependency order.
+
+## Qed Proof Compression
+
+After checking the completed proof, `qed name` performs a bounded, optional
+beta simplification on an export copy. It removes unused local lemma
+applications and inlines single-use bindings, but does not duplicate compound
+proofs used more than once or unfold global definitions. A smaller candidate
+must pass the kernel again against the unchanged theorem. If compression
+cannot finish or validate, the already-checked original proof is retained.
+Live goals, command history, undo, and save formats are unchanged.
+
+## Completion In Both Assistants
+
+The command input and multiline editor share the completion controller.
+Typing a prefix offers tactics, current local names, visible theorem names,
+and the current layer's backslash symbol aliases. Empty argument positions
+also offer names; `Ctrl+Space` explicitly opens command completion on an
+empty line. Arrow keys select, `Tab` or `Enter` accepts, and `Escape` dismisses.
+Accepting a candidate does not execute a tactic. An Enter after dismissal
+retains the input's normal behavior.
+
+With no candidate, multiline `Tab` indents and `Shift+Tab` unindents, including
+selected lines. Composition input is not intercepted. Candidates use the
+currently checked proof snapshot, not speculative execution of incomplete
+script lines, and availability is rechecked before insertion. Completion is
+syntax assistance, not evidence that a tactic applies; execution still checks
+rule prerequisites and types.

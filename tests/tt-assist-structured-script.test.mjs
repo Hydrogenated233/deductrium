@@ -78,7 +78,22 @@ engine.apply(`by
   · exact pair
   · exact h`);
 const shadowed = checkQed();
-assert.match(shadowed.proof, /@pair/);
+assert.doesNotMatch(shadowed.proof, /λpair:/, "single-use local lemmas can be inlined");
+
+// A shared compound lemma stays bound; its kernel constructor still needs @.
+engine.start("True→(True×True)×(True×True)", options);
+engine.apply(`by
+  intro h
+  have pair : True×True := by
+    constructor
+    · exact h
+    · exact h
+  constructor
+  · exact pair
+  · exact pair`);
+const shared = checkQed();
+assert.match(shared.proof, /λpair:/);
+assert.match(shared.proof, /@pair/);
 
 // Whole scripts are accepted by the same engine interface used by the Worker.
 // At the GUI boundary each top-level block remains a separate undo entry.

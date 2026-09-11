@@ -60,7 +60,7 @@ try {
     }
     snapshot = engine.apply("intro p");
     assert.ok(!snapshot.tactics.includes("destruct p"), "equality destruct should stay hidden while locked");
-    assert.throws(() => engine.apply("destruct p"), /只能解构解锁的归纳类型的变量/);
+    assert.throws(() => engine.apply("destruct p"), /只能解构解锁的归纳类型的项/);
 
     snapshot = engine.start(equalityCancellation, options);
     for (const command of ["intro a", "intro x", "intro y", "intro z", "intro p"]) {

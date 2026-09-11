@@ -249,9 +249,9 @@ assert.ok(sandboxHiddenRowDisplay > sandboxRowDisplay,
 assert.match(guiCss.slice(sandboxHiddenRowDisplay, sandboxHiddenRowDisplay + 180),
     /display:\s*none\s*;/,
     "collapsed sandbox declarations must be removed from layout and hit testing");
-assert.match(guiCss, /\.dragging-inside\s*\{[\s\S]*?border-bottom:\s*2px solid orange/,
+assert.match(guiCss, /\.dragging-inside\s*\{[^}]*border-bottom:\s*2px solid orange/,
     "dropping into an expanded folder should reuse the normal insertion-line marker");
-assert.doesNotMatch(guiCss, /\.dragging-inside\s*\{[\s\S]*?box-shadow:/,
+assert.doesNotMatch(guiCss, /\.dragging-inside\s*\{[^}]*box-shadow:/,
     "folder nesting should not introduce a second visual drag state");
 
 console.log("sandbox drag ordering regression passed");

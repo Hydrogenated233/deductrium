@@ -4,6 +4,7 @@ import { iniSysFnList, initFormalSystem } from "./initial.js";
 import { DEFERRED_ASSISTANT_STEP, Deduction, DeductionStep, FormalSystem } from "./formalsystem.js";
 import { TR } from "../lang.js";
 import { ProofScriptEditor, scriptThroughCaret } from "../proof-editor.js";
+import { installProofCompletion, ProofCompletionContext } from "../proof-completion.js";
 import { ListDragger } from "./itemdragger.js";
 import { RuleTree } from "./metarule.js";
 import { InferencePage, SerializedInferencePages } from "./inference-pages.js";
@@ -13,7 +14,7 @@ import {
 } from "./proof-assistant.js";
 import { SavesParser } from "./savesparser.js";
 import { migrateInferenceProofCommand, migrateInferenceProofHistory } from "./proof-syntax.js";
-import { installInferenceSymbolAliases } from "./symbol-aliases.js";
+import { installInferenceSymbolAliases, INFERENCE_SYMBOL_ALIASES } from "./symbol-aliases.js";
 import {
     InferenceWorkerClient,
     InferenceWorkerResult,
@@ -879,6 +880,7 @@ export class FSGui {
         const input = document.getElementById("fs-proof-input") as HTMLTextAreaElement | null;
         installInferenceSymbolAliases(target);
         installInferenceSymbolAliases(input);
+        installProofCompletion(input, () => this.getInferenceCompletionContext());
         const apply = document.getElementById("fs-proof-apply");
         const undo = document.getElementById("fs-proof-undo");
         const close = document.getElementById("fs-proof-close");
@@ -914,6 +916,7 @@ export class FSGui {
         if (script) {
             installInferenceSymbolAliases(script);
             this.inferenceProofScriptEditor = new ProofScriptEditor(script);
+            installProofCompletion(script, () => this.getInferenceCompletionContext(), true);
         }
         script?.addEventListener("input", () => {
             this.cancelInferenceProofWork();
@@ -969,6 +972,29 @@ export class FSGui {
             });
             container.appendChild(button);
         }
+    }
+    private getInferenceCompletionContext(): ProofCompletionContext {
+        const active = this.inferenceProofAssistant && !this.inferenceProofBusy;
+        const locals = active ? this.inferenceProofSnapshot?.goals[0]?.hypotheses.map(h => h.name) ?? [] : [];
+        const page = active ? this.pageStore.page(this.inferenceProofSnapshot?.pageId) : null;
+        // Syntax completion does not run rule matching; prerequisites are
+        // checked when a command is executed, just as for manually typed text.
+        const commands = new Set([
+            "intro", "intros", "rintro", "exact", "apply", "specialize", "use",
+            "have", "obtain", "cases", "rcases", "revert", "change", "show",
+            "assumption", "constructor", "left", "right", "symm", "rfl",
+            "rw", "nth_rw", "simp", "simpa", "contradiction", "by_contra",
+            "by_cases", "contrapose", "qed"
+        ]);
+        if (this.metarules.includes("cpt")) commands.add("tauto");
+        return {
+            commands: [...commands], locals,
+            constants: active ? [
+                ...this.deductions.filter(name => Object.hasOwn(this.formalSystem.deductions, name)),
+                ...(page?.propositions.map((_, i) => `p${i}`) ?? [])
+            ] : [],
+            aliases: INFERENCE_SYMBOL_ALIASES
+        };
     }
     private renderInferenceProofTextRecommendations() {
         const container = document.getElementById("fs-proof-script-recommendations");

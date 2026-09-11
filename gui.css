@@ -1874,6 +1874,43 @@ div.wrapper.error {
     padding-left: 1.5em;
 }
 
+.proof-completions {
+    position: fixed;
+    z-index: 1000;
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid #999;
+    border-radius: 4px;
+    background: #fff;
+    color: #222;
+    box-shadow: 0 3px 12px #0002;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+.proof-completion-option {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 5px 8px;
+    cursor: pointer;
+}
+
+.proof-completion-option span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.proof-completion-option small {
+    flex-shrink: 0;
+    color: #666;
+}
+
+.proof-completion-option[aria-selected="true"] {
+    background: #d8eee4;
+}
+
 .type-symbol-alias-list code {
     white-space: nowrap;
 }

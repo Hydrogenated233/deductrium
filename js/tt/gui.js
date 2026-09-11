@@ -3,20 +3,21 @@ import { ASTParser, debugBoundVarId } from "./astparser.js";
 import { Core, assignContext, cloneCoreHitPathMetadata, wrapApply, wrapVar, wrapLambda } from "./core.js";
 import { TTCoreWorkerClient } from "./core-worker-client.js";
 import { installTrustedDeclarations } from "./engine.js";
-import { isTTAssistTacticUnlocked, TTAssistEngine } from "./assist-engine.js";
+import { isTTAssistTacticUnlocked, TT_ASSIST_COMMANDS, TTAssistEngine } from "./assist-engine.js";
 import { TTAssistWorkerClient } from "./assist-worker-client.js";
 import { Assist } from "./assist.js";
 import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { initTypeSystem } from "./initial.js";
 import { ProofScriptEditor, scriptThroughCaret } from "../proof-editor.js";
+import { installProofCompletion } from "../proof-completion.js";
 import { locateTTTacticError, parseTTTacticScript } from "./tactic-script.js";
 import { prettySandboxInductiveNamesForDisplay } from "./presentation.js";
 import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheoremIdentifier, shouldFallbackToSynchronousTheoremValidation, theoremInferenceComplete, theoremInferenceStatus, theoremInferenceTarget, theoremPreviewNeedsRefresh, theoremValidationPositionMatches, TheoremValidationCoordinator, typeTheoryValidationTimedOut } from "./theorem-validation.js";
 import { TheoremWorkspace } from "./theorem-workspace.js";
 import { applyWorkspaceLayout, createWorkspaceDragHandle, syncWorkspaceDomOrder } from "./theorem-workspace-view.js";
 import { TTProofSessionStore } from "./proof-sessions.js";
-import { installTypeTheorySymbolAliases } from "./symbol-aliases.js";
+import { installTypeTheorySymbolAliases, TYPE_THEORY_SYMBOL_ALIASES } from "./symbol-aliases.js";
 import { flattenHitPathLevels, hitPathLevelsFromCanonicalOrLegacy } from "./hit-path-levels.js";
 const parser = new ASTParser;
 const constructors = new Set();
@@ -375,6 +376,7 @@ export class TTGui {
         document.getElementById("tt-add-folder")?.addEventListener("click", () => this.addTheoremFolder());
         const input = document.getElementById("tactic-input");
         installTypeTheorySymbolAliases(input);
+        installProofCompletion(input, () => this.getTacticCompletionContext());
         input.addEventListener("keydown", (ev) => {
             if (ev.key === "Enter" || ev.key === "Escape") {
                 ev.preventDefault();
@@ -390,6 +392,7 @@ export class TTGui {
         if (scriptInput) {
             installTypeTheorySymbolAliases(scriptInput);
             this.tacticScriptEditor = new ProofScriptEditor(scriptInput);
+            installProofCompletion(scriptInput, () => this.getTacticCompletionContext(), true);
         }
         scriptInput?.addEventListener("input", () => {
             this.tacticScript = scriptInput.value;
@@ -928,6 +931,21 @@ export class TTGui {
         return parseTTTacticScript(text).map(node => ({
             command: node.source, lineNumber: node.lineNumber
         }));
+    }
+    getTacticCompletionContext() {
+        const active = this.mode instanceof Array && !this.tacticBusy;
+        const locals = active ? this.assistSnapshot?.goals[0]?.context.map(([name]) => name) ?? [] : [];
+        const workspace = active ? this.syncTheoremWorkspaceFromDom() : null;
+        const targetIndex = active ? this.getTacticDefinitionEnd() : -1;
+        const constants = active ? [
+            ...Object.keys(this.core.state.sysTypes),
+            ...this.userDefinedConsts.flatMap((definition, index) => definition && index !== targetIndex
+                && workspace.isTheoremInScope(index, this.tacticScopeFolderId) ? [definition[0]] : [])
+        ].filter(name => !name.startsWith("?")) : [];
+        return {
+            commands: TT_ASSIST_COMMANDS.filter(name => isTTAssistTacticUnlocked(name, this.unlockedTactics)),
+            locals, constants, aliases: TYPE_THEORY_SYMBOL_ALIASES
+        };
     }
     renderTacticTextRecommendations(tactics) {
         const container = document.getElementById("tactic-script-recommendations");
