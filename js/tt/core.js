@@ -1557,14 +1557,17 @@ export class Core {
         return res;
     }
     static clone(ast, cloneChecked) {
-        const checked = (cloneChecked && ast.checked) ? this.clone(ast.checked) : null;
+        // Keep recursion independent of the receiver.  Core.clone is passed
+        // as a callback by a few registration/bridge paths, where `this`
+        // would otherwise be undefined and nested ASTs would crash.
+        const checked = (cloneChecked && ast.checked) ? Core.clone(ast.checked) : null;
         const newast = {
             type: ast.type, name: ast.name, checked, err: ast.err, bondVarId: ast.bondVarId,
             displayExplicitAt: ast.displayExplicitAt,
             nbeGeneratedMeta: ast.nbeGeneratedMeta
         };
         if (ast.nodes) {
-            newast.nodes = ast.nodes.map(p => this.clone(p, cloneChecked));
+            newast.nodes = ast.nodes.map(child => Core.clone(child, cloneChecked));
         }
         return newast;
     }
@@ -1866,6 +1869,12 @@ export class Core {
      * before their constants exist would compile an unusable rule table.
      */
     registerSystemInductive(bundle) {
+        const kind = bundle?.metadata?.kind;
+        return kind === "hit3"
+            ? this.semanticKernel.withSemanticTermSharing(() => this.registerSystemInductiveImpl(bundle))
+            : this.registerSystemInductiveImpl(bundle);
+    }
+    registerSystemInductiveImpl(bundle) {
         if (!bundle?.type?.[0] || !bundle.type[1]) {
             throw new Error("归纳类型 bundle 缺少类型条目");
         }

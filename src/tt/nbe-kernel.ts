@@ -57,6 +57,118 @@ type Term =
     | { kind: "application", fn: Term, arg: Term }
     | { kind: "rigid", type: string, name: string, children: Term[] };
 
+/**
+ * Per-compilation structural interning table.  Semantic terms are immutable
+ * after compilation, so equal subtrees can safely share one object.  The
+ * table is deliberately scoped to one definition batch: it never becomes a
+ * user-visible constant or a persistent cache format.
+ */
+type TermInternTable = {
+    ids: WeakMap<object, number>;
+    nextId: number;
+    bounds: Map<number, Term>;
+    metas: Map<string, Term>;
+    frees: Map<string, Map<string | undefined, Term>>;
+    lambdas: Map<string, Map<number, Map<number, Term>>>;
+    binders: Map<string, Map<string, Map<number, Map<number, Term>>>>;
+    applications: Map<number, Map<number, Term>>;
+    rigids: Map<string, Map<string, Map<string, Term>>>;
+};
+
+function createTermInternTable(): TermInternTable {
+    return {
+        ids: new WeakMap(),
+        nextId: 1,
+        bounds: new Map(),
+        metas: new Map(),
+        frees: new Map(),
+        lambdas: new Map(),
+        binders: new Map(),
+        applications: new Map(),
+        rigids: new Map()
+    };
+}
+
+function internMap<K, V>(map: Map<K, V>, key: K, create: () => V): V {
+    const existing = map.get(key);
+    if (existing !== undefined) return existing;
+    const value = create();
+    map.set(key, value);
+    return value;
+}
+
+/**
+ * Intern one node whose direct children are already canonical.  `compile`
+ * calls this on its return path, so sharing is linear in the source size and
+ * never needs a second traversal.  User-controlled strings occupy distinct
+ * Map levels; only numeric child ids are concatenated, avoiding delimiter
+ * collisions between an AST node's type and name.
+ */
+function internTerm(term: Term, table: TermInternTable): Term {
+    const knownId = table.ids.get(term as object);
+    if (knownId !== undefined) return term;
+    const childId = (child: Term) => {
+        const id = table.ids.get(child as object);
+        if (id === undefined) {
+            throw new Error("NbE semantic term interning order is invalid");
+        }
+        return id;
+    };
+    let existing: Term | undefined;
+    switch (term.kind) {
+        case "bound":
+            existing = table.bounds.get(term.index);
+            if (!existing) table.bounds.set(term.index, term);
+            break;
+        case "meta":
+            existing = table.metas.get(term.name);
+            if (!existing) table.metas.set(term.name, term);
+            break;
+        case "free": {
+            const definitions = internMap(table.frees, term.key, () => new Map());
+            existing = definitions.get(term.definitionName);
+            if (!existing) definitions.set(term.definitionName, term);
+            break;
+        }
+        case "lambda": {
+            const domains = internMap(table.lambdas, term.name, () => new Map());
+            const bodies = internMap(domains, childId(term.domain), () => new Map());
+            existing = bodies.get(childId(term.body));
+            if (!existing) bodies.set(childId(term.body), term);
+            break;
+        }
+        case "binder": {
+            const names = internMap(table.binders, term.binder, () => new Map());
+            const domains = internMap(names, term.name, () => new Map());
+            const bodies = internMap(domains, childId(term.domain), () => new Map());
+            existing = bodies.get(childId(term.body));
+            if (!existing) bodies.set(childId(term.body), term);
+            break;
+        }
+        case "application": {
+            const args = internMap(table.applications, childId(term.fn), () => new Map());
+            existing = args.get(childId(term.arg));
+            if (!existing) args.set(childId(term.arg), term);
+            break;
+        }
+        case "rigid": {
+            const names = internMap(table.rigids, term.type, () => new Map());
+            const children = internMap(names, term.name, () => new Map());
+            const key = term.children.map(childId).join(",");
+            existing = children.get(key);
+            if (!existing) children.set(key, term);
+            break;
+        }
+    }
+    if (existing) return existing;
+    table.ids.set(term as object, table.nextId++);
+    return term;
+}
+
+function finishCompiledTerm(term: Term | null, state: KernelState): Term | null {
+    return term && state.termIntern ? internTerm(term, state.termIntern) : term;
+}
+
 type Pattern =
     | { kind: "wildcard" }
     | { kind: "capture", name: string }
@@ -112,6 +224,7 @@ type KernelState = {
     lazyDefinitions?: boolean;
     /** Definition heads hidden only for the speculative barrier probe. */
     blockedPatternDefinitions?: ReadonlySet<string>;
+    termIntern?: TermInternTable;
 };
 
 type DefinitionDependencyMap = ReadonlyMap<string, ReadonlySet<string>>;
@@ -165,28 +278,28 @@ function compile(
         // their source holes for lazy computation-rule matching.  Treat such
         // holes as opaque neutral values; quote them back as `_` below.
         if (ast.name === "_") {
-            return rigidHoles ? { kind: "free", key: "hole:_" } : null;
+            return finishCompiledTerm(rigidHoles ? { kind: "free", key: "hole:_" } : null, state);
         }
         if (ast.name.startsWith("?")) {
-            if (allowMetas) return { kind: "meta", name: ast.name };
-            return rigidMetas ? { kind: "free", key: `infer:${ast.name}` } : null;
+            if (allowMetas) return finishCompiledTerm({ kind: "meta", name: ast.name }, state);
+            return finishCompiledTerm(rigidMetas ? { kind: "free", key: `infer:${ast.name}` } : null, state);
         }
         const index = findKernelScopeIndex(ast, scope);
-        if (index >= 0) return { kind: "bound", index };
+        if (index >= 0) return finishCompiledTerm({ kind: "bound", index }, state);
         const contextBinding = findContextBinding(ast, context);
-        if (contextBinding) return { kind: "free", key: contextBinding.key };
+        if (contextBinding) return finishCompiledTerm({ kind: "free", key: contextBinding.key }, state);
         if (validId(ast.bondVarId)) return null;
         // Bare U can survive as a branch argument and emerge from iota
         // reduction. It denotes U @0, while the head of U level must remain
         // the universe constructor rather than gaining a second level.
         if (ast.name === "U" && !applicationHead) {
-            return {
+            return finishCompiledTerm({
                 kind: "application",
-                fn: { kind: "free", key: "constant:U", definitionName: "U" },
-                arg: { kind: "free", key: "constant:@0", definitionName: "@0" }
-            };
+                fn: finishCompiledTerm({ kind: "free", key: "constant:U", definitionName: "U" }, state),
+                arg: finishCompiledTerm({ kind: "free", key: "constant:@0", definitionName: "@0" }, state)
+            }, state);
         }
-        return { kind: "free", key: `constant:${ast.name}`, definitionName: ast.name };
+        return finishCompiledTerm({ kind: "free", key: `constant:${ast.name}`, definitionName: ast.name }, state);
     }
     if (ast.type === "L") {
         const domain = compile(ast.nodes?.[0], scope, context, state, allowMetas, rigidMetas, rigidHoles);
@@ -196,19 +309,19 @@ function compile(
         // legacy recursion depth; an unexpected exception aborts the request.
         const body = compile(ast.nodes?.[1], scope, context, state, allowMetas, rigidMetas, rigidHoles);
         scope.pop();
-        return domain && body ? { kind: "lambda", name: ast.name, domain, body } : null;
+        return finishCompiledTerm(domain && body ? { kind: "lambda", name: ast.name, domain, body } : null, state);
     }
     if (ast.type === "P" || ast.type === "S" || ast.type === "W") {
         const domain = compile(ast.nodes?.[0], scope, context, state, allowMetas, rigidMetas, rigidHoles);
         scope.push({ name: ast.name, id: validId(ast.bondVarId) ? ast.bondVarId : undefined });
         const body = compile(ast.nodes?.[1], scope, context, state, allowMetas, rigidMetas, rigidHoles);
         scope.pop();
-        return domain && body ? { kind: "binder", binder: ast.type, name: ast.name, domain, body } : null;
+        return finishCompiledTerm(domain && body ? { kind: "binder", binder: ast.type, name: ast.name, domain, body } : null, state);
     }
     if (ast.type === "apply") {
         const fn = compile(ast.nodes?.[0], scope, context, state, allowMetas, rigidMetas, rigidHoles, true);
         const arg = compile(ast.nodes?.[1], scope, context, state, allowMetas, rigidMetas, rigidHoles);
-        return fn && arg ? { kind: "application", fn, arg } : null;
+        return finishCompiledTerm(fn && arg ? { kind: "application", fn, arg } : null, state);
     }
     const children: Term[] = [];
     for (const child of ast.nodes ?? []) {
@@ -216,7 +329,7 @@ function compile(
         if (!compiled) return null;
         children.push(compiled);
     }
-    return { kind: "rigid", type: ast.type, name: ast.name, children };
+    return finishCompiledTerm({ kind: "rigid", type: ast.type, name: ast.name, children }, state);
 }
 
 /** Keep nested schematic holes in a computation result, but reject a bare
@@ -1437,7 +1550,8 @@ function tryNormalizeWithDefinitions(
     definitionValues: Map<string, Value>,
     computeRules: ReadonlyMap<string, readonly CompiledComputeRule[]>,
     lazyDefinitions = false,
-    definitionSources?: ReadonlyMap<string, AST>
+    definitionSources?: ReadonlyMap<string, AST>,
+    termIntern?: TermInternTable
 ): AST | null {
     const state: KernelState = {
         steps: 0,
@@ -1451,7 +1565,8 @@ function tryNormalizeWithDefinitions(
         definitionValues,
         computeRules,
         unfolding: new Set(),
-        lazyDefinitions
+        lazyDefinitions,
+        ...(termIntern ? { termIntern } : {})
     };
     const contextSnapshot = contextBindings(context);
     const bindings = contextSnapshot.bindings;
@@ -1479,7 +1594,8 @@ function tryWhnfWithDefinitions(
     definitionValues: Map<string, Value>,
     computeRules: ReadonlyMap<string, readonly CompiledComputeRule[]>,
     lazyDefinitions = false,
-    definitionSources?: ReadonlyMap<string, AST>
+    definitionSources?: ReadonlyMap<string, AST>,
+    termIntern?: TermInternTable
 ): AST | null {
     const state: KernelState = {
         steps: 0,
@@ -1493,7 +1609,8 @@ function tryWhnfWithDefinitions(
         definitionValues,
         computeRules,
         unfolding: new Set(),
-        lazyDefinitions
+        lazyDefinitions,
+        ...(termIntern ? { termIntern } : {})
     };
     const contextSnapshot = contextBindings(context);
     const bindings = contextSnapshot.bindings;
@@ -1536,7 +1653,8 @@ function tryEqualWithDefinitions(
     opaqueDefinitions: ReadonlySet<string>,
     definitionValues: Map<string, Value>,
     computeRules: ReadonlyMap<string, readonly CompiledComputeRule[]>,
-    dependencies?: DefinitionDependencyMap
+    dependencies?: DefinitionDependencyMap,
+    termIntern?: TermInternTable
 ): NbeEqualityProbeResult {
     if (options.deadline !== undefined && Date.now() >= options.deadline) {
         return "budget-exhausted";
@@ -1551,7 +1669,8 @@ function tryEqualWithDefinitions(
         opaqueDefinitions,
         definitionValues,
         computeRules,
-        unfolding: new Set()
+        unfolding: new Set(),
+        ...(termIntern ? { termIntern } : {})
     };
     const contextSnapshot = contextBindings(context);
     const leftTerm = compile(left, new ScopeCursor(), contextSnapshot, state, false, options.rigidMetas === true);
@@ -1588,7 +1707,8 @@ function tryEqualWithDefinitions(
             definitionValues: new Map(),
             computeRules,
             unfolding: new Set(),
-            blockedPatternDefinitions: barriers
+            blockedPatternDefinitions: barriers,
+            ...(termIntern ? { termIntern } : {})
         };
         const barrierResult = equalCompiledTerms(leftTerm, rightTerm, barrierState);
         chargeProbe(barrierState);
@@ -1612,7 +1732,8 @@ function tryEqualWithDefinitions(
             definitionValues: new Map(),
             computeRules,
             unfolding: new Set(),
-            lazyDefinitions: true
+            lazyDefinitions: true,
+            ...(termIntern ? { termIntern } : {})
         };
         const lazyResult = equalCompiledTerms(leftTerm, rightTerm, lazyState);
         chargeProbe(lazyState);
@@ -1623,6 +1744,7 @@ function tryEqualWithDefinitions(
 }
 
 export class SemanticNbeKernel {
+    private activeTermIntern?: TermInternTable;
     private readonly definitions = new Map<string, Term>();
     private readonly definitionValues = new Map<string, Value>();
     private readonly computeRules = new Map<string, readonly CompiledComputeRule[]>();
@@ -1633,7 +1755,23 @@ export class SemanticNbeKernel {
     private readonly reverseDependencies = new Map<string, Set<string>>();
     revision = 0;
 
+    /**
+     * Share compiled semantic subterms across one trusted operation.  The
+     * table is request-local and released in finally; no names or syntax are
+     * added to the public Core environment.
+     */
+    withSemanticTermSharing<T>(callback: () => T): T {
+        if (this.activeTermIntern) return callback();
+        this.activeTermIntern = createTermInternTable();
+        try {
+            return callback();
+        } finally {
+            this.activeTermIntern = undefined;
+        }
+    }
+
     setDefinition(name: string, ast: AST, options: NbeEqualOptions = {}) {
+        const termIntern = this.activeTermIntern ?? createTermInternTable();
         const fingerprint = sourceFingerprint(ast);
         if (this.definitionSourceFingerprints.get(name) === fingerprint) return this.definitions.has(name);
         const state: KernelState = {
@@ -1645,7 +1783,8 @@ export class SemanticNbeKernel {
             opaqueDefinitions: this.opaqueDefinitions,
             definitionValues: this.definitionValues,
             computeRules: this.computeRules,
-            unfolding: new Set()
+            unfolding: new Set(),
+            termIntern
         };
         const term = compile(
             ast,
@@ -1687,6 +1826,7 @@ export class SemanticNbeKernel {
         }
 
         const compiled = new Map<string, Term>();
+        const termIntern = this.activeTermIntern ?? createTermInternTable();
         for (const [name, ast] of sources) {
             const state: KernelState = {
                 steps: 0,
@@ -1697,7 +1837,8 @@ export class SemanticNbeKernel {
                 opaqueDefinitions: this.opaqueDefinitions,
                 definitionValues: new Map(),
                 computeRules: this.computeRules,
-                unfolding: new Set()
+                unfolding: new Set(),
+                termIntern
             };
         const term = compile(
             ast,
@@ -1709,7 +1850,9 @@ export class SemanticNbeKernel {
             options.rigidHoles === true
                 || options.rigidHoleDefinitions?.has(name) === true
         );
-            if (term && !state.exhausted) compiled.set(name, term);
+            if (term && !state.exhausted) {
+                compiled.set(name, term);
+            }
         }
         this.definitions.clear();
         for (const [name, term] of compiled) this.definitions.set(name, term);
@@ -1761,6 +1904,7 @@ export class SemanticNbeKernel {
         source: Readonly<Record<string, readonly NbeComputeRule[]>>,
         options: NbeEqualOptions = {}
     ) {
+        const termIntern = this.activeTermIntern ?? createTermInternTable();
         const compiled = new Map<string, readonly CompiledComputeRule[]>();
         let count = 0;
         for (const [name, rules] of Object.entries(source)) {
@@ -1777,7 +1921,8 @@ export class SemanticNbeKernel {
                     opaqueDefinitions: this.opaqueDefinitions,
                     definitionValues: this.definitionValues,
                     computeRules: compiled,
-                    unfolding: new Set()
+                    unfolding: new Set(),
+                    termIntern
                 };
                 const precheck: (Pattern | null)[] = [];
                 let supported = true;
@@ -1798,7 +1943,11 @@ export class SemanticNbeKernel {
                     compiledRules.push({ kind: "unsupported", arity, precheck });
                     continue;
                 }
-                compiledRules.push({ kind: "supported", arguments: argumentsPattern, result });
+                compiledRules.push({
+                    kind: "supported",
+                    arguments: argumentsPattern,
+                    result
+                });
             }
             if (compiledRules.length) {
                 compiled.set(name, compiledRules);
@@ -1837,7 +1986,8 @@ export class SemanticNbeKernel {
             this.opaqueDefinitions,
             this.definitionValues,
             this.computeRules,
-            this.dependencies
+            this.dependencies,
+            this.activeTermIntern
         );
         return result === true
             ? "equal"
@@ -1863,7 +2013,8 @@ export class SemanticNbeKernel {
             unfoldDefinitions ? this.definitionValues : new Map<string, Value>(),
             this.computeRules,
             !unfoldDefinitions,
-            !unfoldDefinitions ? this.definitionSources : undefined
+            !unfoldDefinitions ? this.definitionSources : undefined,
+            this.activeTermIntern
         );
     }
 
@@ -1879,7 +2030,10 @@ export class SemanticNbeKernel {
             new Map(),
             new Set(),
             new Map(),
-            new Map()
+            new Map(),
+            false,
+            undefined,
+            this.activeTermIntern
         );
     }
 
@@ -1899,7 +2053,8 @@ export class SemanticNbeKernel {
             unfoldDefinitions ? this.definitionValues : new Map<string, Value>(),
             this.computeRules,
             !unfoldDefinitions,
-            !unfoldDefinitions ? this.definitionSources : undefined
+            !unfoldDefinitions ? this.definitionSources : undefined,
+            this.activeTermIntern
         );
     }
 
