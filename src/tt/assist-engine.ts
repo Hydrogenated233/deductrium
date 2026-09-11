@@ -4,8 +4,26 @@ import { AST, ASTParser } from "./astparser.js";
 import { Context, Core } from "./core.js";
 import { TTCoreConfig, TTCoreEngine } from "./engine.js";
 import { compactImplicitAliasesForDisplay, markExplicitAtSyntax } from "./presentation.js";
+import { parseTTTacticScript, TTTacticNode, TTTacticScriptError } from "./tactic-script.js";
 
 const parser = new ASTParser();
+const commandMethods = new Set([
+    "intro", "intros", "rintro", "change", "show", "cases", "rcases",
+    "construct", "assumption", "simp", "simpa", "eq", "exact", "apply",
+    "specialize", "rw", "rwb", "trunc", "rfl", "simpl", "fnext", "sup",
+    "obtain", "have", "hyp", "induction", "destruct", "use", "ex", "left",
+    "right", "case", "expand"
+]);
+
+/** Lean spellings inherit the same survival unlock as their existing tactic. */
+export function isTTAssistTacticUnlocked(name: string, unlocked?: ReadonlySet<string>): boolean {
+    if (name === "obtain") {
+        return !unlocked || unlocked.has(name)
+            || unlocked.has("hyp") && unlocked.has("destruct");
+    }
+    const aliases: Record<string, string> = { have: "hyp", use: "ex", rcases: "destruct" };
+    return !unlocked || unlocked.has(name) || !!aliases[name] && unlocked.has(aliases[name]);
+}
 
 function isProofTargetSort(type: AST) {
     return (
@@ -142,21 +160,61 @@ export class TTAssistEngine {
     }
 
     private executeCommand(command: string, record: boolean) {
+        const nodes = parseTTTacticScript(command);
+        if (!nodes.length) throw new Error(TR("未知的证明策略"));
+        this.executeNodes(nodes);
+        if (record) this.history.push(command.trim());
+    }
+
+    private executeNodes(nodes: readonly TTTacticNode[]) {
+        for (const node of nodes) {
+            try {
+                if (node.kind === "tactic") {
+                    this.executeTactic(node.command);
+                } else if (node.kind === "sequence") {
+                    this.executeNodes(node.body);
+                } else {
+                    if (node.kind === "have") this.executeTactic(node.command);
+                    this.executeFocused(node.body);
+                }
+            } catch (error) {
+                if (error instanceof TTTacticScriptError) throw error;
+                throw new TTTacticScriptError(node.lineNumber,
+                    error instanceof Error ? error.message : String(error));
+            }
+        }
+    }
+
+    private executeFocused(body: readonly TTTacticNode[]) {
+        const assist = this.requireAssist();
+        if (!assist.goal.length) throw new Error(TR("无证明目标，请使用qed命令结束证明"));
+        // Keep live goal references: solving a witness may update a hidden
+        // sibling through GoalDependRel even while that sibling is unfocused.
+        const siblings = assist.goal.slice(1);
+        assist.goal = [assist.goal[0]];
+        try {
+            this.executeNodes(body);
+            if (assist.goal.length) throw new Error(TR("子证明尚未完成"));
+        } finally {
+            assist.goal.push(...siblings);
+        }
+    }
+
+    private executeTactic(command: string) {
         const assist = this.requireAssist();
         const value = command.trim();
-        const commandEnd = value.indexOf(" ");
+        const commandEnd = value.search(/\s/);
         const name = commandEnd === -1 ? value : value.slice(0, commandEnd);
         const parameter = commandEnd === -1 ? null : value.slice(commandEnd);
         if (!name || name === "qed") throw new Error(TR("未知的证明策略"));
         // `constructor` is a JavaScript class keyword, so the assistant
         // exposes its Lean-style structural implementation as `construct`.
         const tacticName = name === "constructor" ? "construct" : name;
-        const tactic = assist[tacticName];
-        if (typeof tactic !== "function" || name === "autofillTactics" || name === "markTargets") {
+        if (!commandMethods.has(tacticName)) {
             throw new Error(TR("未知的证明策略"));
         }
+        const tactic = assist[tacticName];
         tactic.call(assist, parameter);
-        if (record) this.history.push(value);
     }
 
     private snapshot(): TTAssistSnapshot {
@@ -184,6 +242,7 @@ export class TTAssistEngine {
         }
 
         const goals = assist.goal.map(goal => {
+            const localNames = new Set(goal.context.map(([name]) => name));
             // Keep a surface-shaped copy for the UI. The validation copy may
             // be desugared by Core.checkType (for example `=` to `eq` and `*`
             // to `compeq`), but that internal normalization must not leak into
@@ -214,10 +273,10 @@ export class TTAssistEngine {
             return {
                 context: goal.context.map(([name, value, id]) => [
                     name,
-                    this.presentAst(value, explicitAtNames),
+                    this.presentAst(value, explicitAtNames, localNames),
                     id
                 ]),
-                type: this.presentAst(surfaceType, explicitAtNames),
+                type: this.presentAst(surfaceType, explicitAtNames, localNames),
                 holeName: goal.ast.name
             } as TTAssistGoalSnapshot;
         });
@@ -231,11 +290,13 @@ export class TTAssistEngine {
         };
     }
 
-    private presentAst(ast: AST, explicitAtNames: ReadonlySet<string>) {
+    private presentAst(ast: AST, explicitAtNames: ReadonlySet<string>,
+        inScopeNames: ReadonlySet<string> = new Set()) {
         return compactImplicitAliasesForDisplay(
             Core.clone(ast, true),
             this.engine.core.opaque,
-            explicitAtNames
+            explicitAtNames,
+            inScopeNames
         );
     }
 

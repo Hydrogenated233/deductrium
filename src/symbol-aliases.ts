@@ -1,0 +1,41 @@
+/** Shared input spellings; each layer adds only its own syntax below these. */
+export type SymbolAlias = Readonly<{ alias: string; symbol: string }>;
+
+// Lean spellings reviewed against leanprover/vscode-lean4:
+// lean4-unicode-input/src/abbreviations.json. Existing project aliases win.
+export const COMMON_SYMBOL_ALIASES: readonly SymbolAlias[] = Object.freeze([
+    { alias: "to", symbol: "→" },
+    { alias: "arr", symbol: "→" },
+    { alias: "arrow", symbol: "→" },
+    { alias: "rarr", symbol: "→" },
+    { alias: "r", symbol: "→" },
+    { alias: "rightarrow", symbol: "→" },
+    { alias: "imp", symbol: "→" },
+    { alias: "x", symbol: "×" },
+    { alias: "times", symbol: "×" },
+    { alias: "cross", symbol: "×" },
+    { alias: "langle", symbol: "⟨" },
+    { alias: "rangle", symbol: "⟩" },
+    { alias: "alpha", symbol: "α" },
+    { alias: "beta", symbol: "β" },
+    { alias: "gamma", symbol: "γ" },
+    { alias: "delta", symbol: "δ" },
+    { alias: "epsilon", symbol: "ε" },
+    { alias: "eps", symbol: "ε" },
+    { alias: "zeta", symbol: "ζ" },
+    { alias: "eta", symbol: "η" },
+    { alias: "theta", symbol: "θ" },
+    { alias: "iota", symbol: "ι" },
+    { alias: "kappa", symbol: "κ" },
+    { alias: "mu", symbol: "μ" },
+    { alias: "nu", symbol: "ν" },
+    { alias: "xi", symbol: "ξ" },
+    { alias: "rho", symbol: "ρ" },
+    { alias: "tau", symbol: "τ" },
+    { alias: "upsilon", symbol: "υ" },
+    { alias: "phi", symbol: "φ" },
+    { alias: "chi", symbol: "χ" },
+    { alias: "psi", symbol: "ψ" },
+    { alias: "omega", symbol: "ω" },
+    { alias: "om", symbol: "ω" }
+]);

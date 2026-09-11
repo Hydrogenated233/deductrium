@@ -170,9 +170,10 @@ export function prettySandboxInductiveNamesForDisplay(ast, options = {}) {
  * Fold elaboration-only implicit prefixes back to their public aliases.
  * Explicit @ occurrences typed by the user remain untouched.
  */
-export function compactImplicitAliasesForDisplay(ast, aliases, explicitAtNames) {
+export function compactImplicitAliasesForDisplay(ast, aliases, explicitAtNames, inScopeNames = new Set()) {
     const aliasArities = new Map(aliases);
     const metadataVisited = new WeakSet();
+    const boundNames = new Set(inScopeNames);
     let hasOccurrenceMetadata = false;
     const scanMetadata = (node) => {
         if (!node || typeof node !== "object" || metadataVisited.has(node))
@@ -180,6 +181,8 @@ export function compactImplicitAliasesForDisplay(ast, aliases, explicitAtNames) 
         metadataVisited.add(node);
         if (node.displayExplicitAt)
             hasOccurrenceMetadata = true;
+        if (displayBinderTypes.has(node.type))
+            boundNames.add(node.name);
         for (const child of node.nodes ?? [])
             scanMetadata(child);
         if (node.checked)
@@ -187,6 +190,7 @@ export function compactImplicitAliasesForDisplay(ast, aliases, explicitAtNames) 
     };
     scanMetadata(ast);
     const visited = new WeakSet();
+    const preservedHeads = new WeakSet();
     const visit = (node) => {
         if (!node || typeof node !== "object" || visited.has(node))
             return;
@@ -212,6 +216,14 @@ export function compactImplicitAliasesForDisplay(ast, aliases, explicitAtNames) 
         const prefixLength = aliasArities.get(head.name.slice(1));
         if (!prefixLength || application.length < prefixLength)
             return;
+        // A public alias may be shadowed by a proof-local binder. Retain the
+        // kernel spelling conservatively throughout this display DAG so a
+        // shared application cannot be compacted outside, then captured inside,
+        // that binder when the printed proof is parsed again.
+        if (boundNames.has(head.name.slice(1))) {
+            preservedHeads.add(head);
+            return;
+        }
         let replacement = { type: "var", name: head.name.slice(1) };
         for (const argument of application.slice(prefixLength)) {
             replacement = {
@@ -237,7 +249,8 @@ export function compactImplicitAliasesForDisplay(ast, aliases, explicitAtNames) 
             hideInternalNames(child);
         if (node.checked)
             hideInternalNames(node.checked);
-        if (node.type !== "var" || node.bondVarId || node.name?.[0] !== "@")
+        if (node.type !== "var" || node.bondVarId || node.name?.[0] !== "@"
+            || preservedHeads.has(node))
             return;
         const explicitlyWritten = hasOccurrenceMetadata
             ? node.displayExplicitAt === true

@@ -9,6 +9,51 @@ let parser = new ASTParser;
 function parseAssistInput(source) {
     return parser.parseSurfaceOrLegacy(source);
 }
+/** Parse only the pattern prefix; obtain owns any following type annotation. */
+function parsePairPattern(source) {
+    let cursor = 0;
+    let nodes = 0;
+    const names = [];
+    const skipSpace = () => { while (/\s/.test(source[cursor] ?? ""))
+        cursor++; };
+    const read = (depth) => {
+        if (depth > 64 || ++nodes > 255)
+            throw TR("有序对模式过大或嵌套过深");
+        skipSpace();
+        const opening = source[cursor];
+        if (opening === "<" || opening === "⟨") {
+            cursor++;
+            const left = read(depth + 1);
+            skipSpace();
+            if (source[cursor++] !== ",")
+                throw TR("有序对模式需要两个逗号分隔的分量");
+            const right = read(depth + 1);
+            skipSpace();
+            if (source[cursor++] !== (opening === "<" ? ">" : "⟩")) {
+                throw TR("有序对模式括号不匹配");
+            }
+            return { kind: "pair", children: [left, right] };
+        }
+        const start = cursor;
+        while (cursor < source.length && !/[\s,<>⟨⟩:|]/.test(source[cursor]))
+            cursor++;
+        const name = source.slice(start, cursor);
+        if (!name)
+            throw TR("有序对模式需要局部名称或_");
+        if (name !== "_") {
+            const ast = parseAssistInput(name);
+            if (ast.type !== "var" || ast.name !== name || name.startsWith("?")) {
+                throw TR("有序对模式名称无效");
+            }
+            names.push(name);
+        }
+        return { kind: "name", name };
+    };
+    const pattern = read(0);
+    if (pattern.kind !== "pair")
+        throw TR("需要有序对模式");
+    return { pattern, names, rest: source.slice(cursor).trim() };
+}
 export class Assist {
     // the target theorem ast
     theorem;
@@ -392,8 +437,8 @@ export class Assist {
         return this;
     }
     /**
-     * Lean-style `rintro`: introduce binders and destructure one simple
-     * product/sum pattern.  The proof tree already owns the dependent
+     * Lean-style `rintro`: introduce binders and destructure nested
+     * pair patterns. The proof tree already owns the dependent
      * eliminator, so this is deliberately a thin syntax layer over `intro`
      * and `destruct` rather than a second elimination implementation.
      */
@@ -406,15 +451,20 @@ export class Assist {
                 this.intro(pattern === "_" ? "" : pattern);
                 continue;
             }
-            const pair = /^[<⟨]\s*([^,\s<>⟨⟩]+)\s*,\s*([^,\s<>⟨⟩]+)\s*[>⟩]$/.exec(pattern);
-            if (pair) {
+            if (/^[<⟨]/.test(pattern)) {
+                const parsed = parsePairPattern(pattern);
+                if (parsed.rest)
+                    throw TR("有序对模式后有多余内容");
                 const goal = this.goal[0];
                 if (!goal)
                     throw TR("无证明目标，请使用qed命令结束证明");
-                const temporary = Core.getNewName("h", new Set(goal.context.map(entry => entry[0])));
+                const temporary = Core.getNewName("h", new Set([
+                    ...goal.context.map(entry => entry[0]),
+                    ...Core.getFreeVars(goal.type),
+                    ...parsed.names
+                ]));
                 this.intro(temporary);
-                this.destruct(temporary, [pair[1], pair[2]]);
-                this.reorderContextBindings(this.goal[0], [pair[1], pair[2]]);
+                this.destructurePairPattern(temporary, parsed);
                 continue;
             }
             throw TR("rintro暂不支持该模式：") + pattern;
@@ -497,9 +547,61 @@ export class Assist {
         // destruct behavior and generated names.
         return /\s+with\s+/i.test(value) ? this.induction(value) : this.destruct(value);
     }
-    /** Lean's `rcases` spelling is equivalent for this dependent eliminator. */
+    /** Pair patterns use the existing dependent eliminator at every level. */
     rcases(spec) {
-        return this.cases(spec);
+        const value = spec?.trim() ?? "";
+        const match = /^(\S+)\s+with\s+([<⟨][\s\S]*)$/.exec(value);
+        if (!match) {
+            if (/[<>⟨⟩]/.test(value))
+                throw TR("rcases目前支持 rcases h with ⟨x, hx⟩");
+            return this.cases(value);
+        }
+        const parsed = parsePairPattern(match[2]);
+        if (parsed.rest)
+            throw TR("有序对模式后有多余内容");
+        return this.destructurePairPattern(match[1], parsed);
+    }
+    destructurePairPattern(name, parsed) {
+        const goal = this.goal[0];
+        if (!goal)
+            throw TR("无证明目标，请使用qed命令结束证明");
+        const used = new Set(goal.context.map(entry => entry[0]));
+        for (const explicit of parsed.names) {
+            if (used.has(explicit))
+                throw TR("无法引入重复名称的假设变量");
+            used.add(explicit);
+        }
+        const reserved = new Set([...used, ...Core.getFreeVars(goal.type)]);
+        const fresh = () => {
+            const name = Core.getNewName("h", reserved);
+            reserved.add(name);
+            return name;
+        };
+        const leaves = [];
+        const split = (bindingName, pattern) => {
+            if (pattern.kind === "name") {
+                leaves.push(bindingName);
+                return;
+            }
+            // Earlier eliminations may have substituted dependent sibling
+            // types. Always read the binding from the current goal.
+            const binding = findContextByName(this.goal[0].context, bindingName);
+            if (!binding || !["X", "S"].includes(binding[1].type)) {
+                throw TR("rcases有序对模式需要积类型或依赖积类型的局部变量");
+            }
+            if (Assist.disableDestructConds && this.goal[0].context.some(([name, type]) => name !== bindingName && Core.getFreeVars(type).has(bindingName))) {
+                throw TR("当前未解锁依赖假设解构");
+            }
+            const names = pattern.children.map(child => child.kind === "name" && child.name !== "_" ? child.name : fresh());
+            this.destruct(bindingName, names);
+            if (!names.every(name => this.goal[0]?.context.some(entry => entry[0] === name))) {
+                throw TR("rcases模式与解构后变量数量不匹配");
+            }
+            pattern.children.forEach((child, index) => split(names[index], child));
+        };
+        split(name, parsed.pattern);
+        this.reorderContextBindings(this.goal[0], leaves);
+        return this;
     }
     /** Construct the current goal using its canonical inductive constructor. */
     construct() {
@@ -1578,12 +1680,69 @@ export class Assist {
         L.type = "L";
         this.apply2(wrapApply(wrapVar("sup"), L));
     }
+    /** Bind a checked term, optionally eliminating a nested pair pattern. */
+    obtain(spec) {
+        const source = spec?.trim() ?? "";
+        const assignment = source.indexOf(":=");
+        if (assignment < 0 || !source.slice(assignment + 2).trim()) {
+            throw TR("obtain语法应为 obtain h [: T] := t 或 obtain ⟨x, hx⟩ [: T] := t");
+        }
+        const declaration = source.slice(0, assignment).trim();
+        if (!/^[<⟨]/.test(declaration))
+            return this.have(source);
+        const parsed = parsePairPattern(declaration);
+        if (parsed.rest && (!parsed.rest.startsWith(":") || !parsed.rest.slice(1).trim())) {
+            throw TR("obtain模式后需要类型标注或:=");
+        }
+        const goal = this.goal[0];
+        if (!goal)
+            throw TR("无证明目标，请使用qed命令结束证明");
+        // The temporary binder must not capture the target or use a requested
+        // component name. It is eliminated before the command is committed.
+        const used = new Set([
+            ...goal.context.map(entry => entry[0]),
+            ...Core.getFreeVars(goal.type),
+            ...parsed.names
+        ]);
+        const temporary = Core.getNewName("obtain", used);
+        const annotation = parsed.rest ? ` ${parsed.rest}` : "";
+        this.have(`${temporary}${annotation} := ${source.slice(assignment + 2)}`);
+        return this.destructurePairPattern(temporary, parsed);
+    }
+    /** Introduce a local lemma, optionally checking its supplied proof now. */
+    have(spec) {
+        const source = spec?.trim() ?? "";
+        const assignment = source.indexOf(":=");
+        const declaration = assignment < 0 ? source : source.slice(0, assignment).trim();
+        const proofSource = assignment < 0 ? null : source.slice(assignment + 2).trim();
+        if (!declaration || proofSource === "")
+            throw TR("have语法应为 have h : T 或 have h [: T] := t");
+        const header = parseAssistInput(declaration);
+        const name = header.type === ":" ? header.nodes[0] : header;
+        if (name.type !== "var" || name.name === "_" || name.name.startsWith("?")) {
+            throw TR("have需要一个有效的局部名称");
+        }
+        const goal = this.goal[0];
+        if (!goal)
+            throw TR("无证明目标，请使用qed命令结束证明");
+        if (goal.context.some(entry => entry[0] === name.name))
+            throw TR("无法引入重复名称的假设变量");
+        const proof = proofSource === null ? null : markExplicitAtSyntax(parseAssistInput(proofSource));
+        const type = header.type === ":" ? header.nodes[1]
+            : proof ? core.checkType(Core.clone(proof), goal.context, false) : null;
+        if (!type)
+            throw TR("have未提供类型或证明项");
+        this.hyp({ type: ":", name: "", nodes: [name, type] });
+        if (proof)
+            this.exact(proof);
+        return this;
+    }
     hyp(astr) {
         const goal = this.goal.shift();
         if (!goal)
             throw TR("无证明目标，请使用qed命令结束证明");
         try {
-            let ast = markExplicitAtSyntax(parseAssistInput(astr));
+            let ast = markExplicitAtSyntax(typeof astr === "string" ? parseAssistInput(astr) : Core.clone(astr));
             const ctxtNames = new Set(goal.context.map(e => e[0]));
             let name = Core.getNewName("hyp", ctxtNames);
             if (ast.type === ":" && ast.nodes[0].type === "var") {
@@ -1592,7 +1751,12 @@ export class Assist {
                 name = ast.nodes[0].name;
                 ast = ast.nodes[1];
             }
-            const targetType = Core.clone(goal.type.nodes?.[1] ?? goal.type);
+            const sort = core.checkType(Core.clone(ast), goal.context, false);
+            if (!(sort.type === "apply" && sort.nodes?.[0]?.type === "var" && sort.nodes[0].name === "U")
+                && !(sort.type === "var" && sort.name === "U@:" && !sort.bondVarId)) {
+                throw TR("have/hyp声明必须是类型");
+            }
+            const targetType = Core.clone(goal.type);
             const newast = wrapApply({
                 type: "L",
                 name,
@@ -1601,12 +1765,11 @@ export class Assist {
             Core.assign(goal.ast, newast, true);
             goal.ast.checked = goal.type;
             goal.ast.nodes[0].checked = { type: "->", name: "", nodes: [ast, goal.type] };
-            core.checkType(ast, goal.context, false);
             const anotherGoal = {
                 ast: goal.ast.nodes[1],
                 context: goal.context,
                 type: Core.clone(ast),
-                depend: goal.depend
+                depend: null
             };
             anotherGoal.ast.checked = anotherGoal.type;
             goal.ast = goal.ast.nodes[0].nodes[1];
@@ -1615,7 +1778,6 @@ export class Assist {
             goal.context = goal.context.slice(0);
             goal.context.unshift([name, ast, 0]);
             this.goal.unshift(goal);
-            goal.depend = null;
             this.goal.unshift(anotherGoal);
         }
         catch (e) {
@@ -1836,6 +1998,20 @@ export class Assist {
     renameInductionBindings(goal, branchRoot, introducedNames, names) {
         if (introducedNames.length !== names.length)
             return;
+        if (names.some((name, index) => name !== introducedNames[index] && introducedNames.includes(name))) {
+            // A requested name may belong to a different generated binder.
+            // Stage the whole permutation before assigning its final names.
+            const reserved = new Set([
+                ...goal.context.map(entry => entry[0]), ...names,
+                ...Core.getFreeVars(goal.type), ...Core.getFreeVars(branchRoot)
+            ]);
+            introducedNames = introducedNames.map(source => {
+                const temporary = Core.getNewName("branch", reserved);
+                reserved.add(temporary);
+                this.renameInductionBinding(goal, branchRoot, source, temporary);
+                return temporary;
+            });
+        }
         for (let index = 0; index < names.length; index++) {
             this.renameInductionBinding(goal, branchRoot, introducedNames[index], names[index]);
         }
@@ -2112,7 +2288,12 @@ export class Assist {
                 introducedNames.push(g.context[0][0]);
             });
             if (inductionNames.length) {
-                this.renameInductionBindings(g, branchRoot, introducedNames, inductionNames);
+                // Explicit constructor names do not rename the dependent
+                // hypotheses temporarily moved into the branch motive.
+                const names = inductionNames.length === introducedNames.length - condsNames.length
+                    ? [...inductionNames, ...condsNames]
+                    : inductionNames;
+                this.renameInductionBindings(g, branchRoot, introducedNames, names);
             }
             this.goal.shift();
         }
@@ -2126,6 +2307,14 @@ export class Assist {
     }
     getNewDependGoalVarName() {
         return "(%" + (this.dependVarId++) + ")";
+    }
+    /** Lean-style witness syntax; the dependent constructor stays in `ex`. */
+    use(spec) {
+        const value = spec?.trim() ?? "";
+        if (!value)
+            throw TR("use需要一个具体见证项");
+        this.ex(value);
+        return this;
     }
     ex(n) {
         const goal = this.goal.shift();

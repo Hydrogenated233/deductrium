@@ -206,20 +206,24 @@ export function prettySandboxInductiveNamesForDisplay(
 export function compactImplicitAliasesForDisplay(
     ast: AST,
     aliases: readonly (readonly [string, number])[],
-    explicitAtNames: ReadonlySet<string>
+    explicitAtNames: ReadonlySet<string>,
+    inScopeNames: ReadonlySet<string> = new Set()
 ) {
     const aliasArities = new Map(aliases);
     const metadataVisited = new WeakSet<object>();
+    const boundNames = new Set(inScopeNames);
     let hasOccurrenceMetadata = false;
     const scanMetadata = (node: AST) => {
         if (!node || typeof node !== "object" || metadataVisited.has(node)) return;
         metadataVisited.add(node);
         if (node.displayExplicitAt) hasOccurrenceMetadata = true;
+        if (displayBinderTypes.has(node.type)) boundNames.add(node.name);
         for (const child of node.nodes ?? []) scanMetadata(child);
         if (node.checked) scanMetadata(node.checked);
     };
     scanMetadata(ast);
     const visited = new WeakSet<object>();
+    const preservedHeads = new WeakSet<object>();
 
     const visit = (node: AST) => {
         if (!node || typeof node !== "object" || visited.has(node)) return;
@@ -242,6 +246,14 @@ export function compactImplicitAliasesForDisplay(
 
         const prefixLength = aliasArities.get(head.name.slice(1));
         if (!prefixLength || application.length < prefixLength) return;
+        // A public alias may be shadowed by a proof-local binder. Retain the
+        // kernel spelling conservatively throughout this display DAG so a
+        // shared application cannot be compacted outside, then captured inside,
+        // that binder when the printed proof is parsed again.
+        if (boundNames.has(head.name.slice(1))) {
+            preservedHeads.add(head);
+            return;
+        }
 
         let replacement: AST = { type: "var", name: head.name.slice(1) };
         for (const argument of application.slice(prefixLength)) {
@@ -267,7 +279,8 @@ export function compactImplicitAliasesForDisplay(
         hiddenVisited.add(node);
         for (const child of node.nodes ?? []) hideInternalNames(child);
         if (node.checked) hideInternalNames(node.checked);
-        if (node.type !== "var" || node.bondVarId || node.name?.[0] !== "@") return;
+        if (node.type !== "var" || node.bondVarId || node.name?.[0] !== "@"
+            || preservedHeads.has(node)) return;
         const explicitlyWritten = hasOccurrenceMetadata
             ? node.displayExplicitAt === true
             : explicitAtNames.has(node.name);

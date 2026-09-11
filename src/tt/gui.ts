@@ -20,13 +20,14 @@ import type { CoreSystemInductiveBundle } from "./core.js";
 import type { SandboxBridge } from "./sandbox.js";
 import type { SandboxBridgeChangeOptions } from "./sandbox-gui.js";
 import { TTDefinitionSlot } from "./core-session.js";
-import { TTAssistEngine, TTAssistOptions, TTAssistQedResult, TTAssistSnapshot } from "./assist-engine.js";
+import { isTTAssistTacticUnlocked, TTAssistEngine, TTAssistOptions, TTAssistQedResult, TTAssistSnapshot } from "./assist-engine.js";
 import { TTAssistWorkerClient } from "./assist-worker-client.js";
 import { Assist } from "./assist.js";
 import { TTWorkerMutationQueue } from "./worker-mutation-queue.js";
 import { ListDragger } from "../fs/itemdragger.js";
 import { TypeRule, initTypeSystem } from "./initial.js";
 import { ProofScriptEditor, scriptThroughCaret } from "../proof-editor.js";
+import { locateTTTacticError, parseTTTacticScript } from "./tactic-script.js";
 import {
     prettySandboxInductiveNamesForDisplay
 } from "./presentation.js";
@@ -962,13 +963,9 @@ export class TTGui {
         }
     }
     private parseTacticScript(text: string) {
-        return text.split(/\r?\n/).map((raw, index) => {
-            let command = raw.trim();
-            // Existing saved/copyable tactic lines may carry the old visual
-            // trailing period. It is presentation syntax, not an argument.
-            command = command.replace(/\s+\.$/, "").trim();
-            return { command, lineNumber: index + 1 };
-        }).filter(entry => !!entry.command);
+        return parseTTTacticScript(text).map(node => ({
+            command: node.source, lineNumber: node.lineNumber
+        }));
     }
     private renderTacticTextRecommendations(tactics: string[]) {
         const container = document.getElementById("tactic-script-recommendations");
@@ -1090,7 +1087,15 @@ export class TTGui {
         if (script) this.tacticScript = script.value;
         const target = this.mode[0];
         const source = toCursor && script ? scriptThroughCaret(script) : this.tacticScript;
-        const entries = this.parseTacticScript(source);
+        let entries: ReturnType<TTGui["parseTacticScript"]>;
+        try {
+            entries = this.parseTacticScript(source);
+        } catch (error) {
+            if (this.assistSnapshot) {
+                this.renderTacticTextSnapshot(this.assistSnapshot, String(error));
+            }
+            return;
+        }
         const requestId = ++this.tacticRequestId;
         let accepted: string[] = [];
         let snapshot: TTAssistSnapshot = null;
@@ -1137,6 +1142,7 @@ export class TTGui {
             }
             if (terminal && explicitRun) {
                 const qed = entries.at(-1)?.command.match(/^qed(?:\s+([^\s]+))?$/);
+                if (!qed) throw new Error(TR("qed命名参数必须是单个常量名"));
                 const qedName = qed?.[1];
                 if (qedName) {
                     const nameAst = parser.parseSurface(qedName);
@@ -1162,7 +1168,12 @@ export class TTGui {
                 });
                 this.tacticCaptureBlockedSessionId = this.proofSessions.activeId;
             }
-            if (this.assistSnapshot) this.renderTacticTextSnapshot(this.assistSnapshot, String(error), errorLine);
+            const blockError = errorLine === null ? null : locateTTTacticError(error, errorLine);
+            if (blockError) errorLine = blockError.lineNumber;
+            if (this.assistSnapshot) {
+                this.renderTacticTextSnapshot(this.assistSnapshot,
+                    blockError ? blockError.message : String(error), errorLine);
+            }
             this.renderTacticSessionTabs();
             this.onStateChange();
         } finally {
@@ -1292,14 +1303,14 @@ export class TTGui {
             if (requestId !== this.tacticRequestId || !(this.mode instanceof Array)) return;
             this.tacticDefinitionsRevision = this.definitionRevision;
             this.mode = [this.mode[0], ...snapshot.history];
-            if (this.tacticTextMode) {
-                this.tacticScript = snapshot.history.join("\n");
-                this.tacticScriptDirty = false;
-                const script = document.getElementById("tactic-script") as HTMLTextAreaElement | null;
-                if (script) {
-                    script.value = this.tacticScript;
-                    this.tacticScriptEditor?.refresh();
-                }
+            // Undo also replaces a hidden text draft, otherwise switching back
+            // to text mode replays the block that was just removed.
+            this.tacticScript = snapshot.history.join("\n");
+            this.tacticScriptDirty = false;
+            const script = document.getElementById("tactic-script") as HTMLTextAreaElement | null;
+            if (script) {
+                script.value = this.tacticScript;
+                this.tacticScriptEditor?.refresh();
             }
             if (this.proofSessions.activeId) {
                 this.proofSessions.update(this.proofSessions.activeId, {
@@ -4016,7 +4027,7 @@ export class TTGui {
                 return;
             }
 
-            if (this.unlockedTactics && !this.unlockedTactics.has(command)) {
+            if (!isTTAssistTacticUnlocked(command, this.unlockedTactics)) {
                 throw new Error(TR("未知的证明策略"));
             }
             const target = this.mode[0];

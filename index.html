@@ -422,10 +422,11 @@
                 <details id="tactic-help" class="tactic-help">
                         <summary>策略介绍</summary>
                         <div class="tactic-help-content">
-                            <p><code>intro</code> 引入 Π/蕴含的前提；<code>intros</code> 连续引入，<code>rintro ⟨ha,hb⟩</code> 引入后立即拆分合取或等价前提；<code>exact</code> 用证明项完成目标；<code>apply</code> 应用定理并为参数生成目标，<code>apply f at h</code> 则把局部假设 <code>h</code> 作为 <code>f</code> 的首个参数并更新其类型；<code>specialize h a</code> 实例化局部函数假设。</p>
-                            <p><code>destruct</code> 解构归纳类型、和类型或等式；Lean 风格的 <code>cases</code>/<code>rcases</code> 是同义入口，<code>induction n with d dh</code> 可为归纳步数据和归纳假设指定名称；<code>ex</code>、<code>case</code>、<code>constructor</code>、<code>left</code>/<code>right</code> 构造相应数据。</p>
-                            <p><code>rw</code>/<code>rwb</code> 改写，<code>simpl</code>/<code>simp</code> 化简，<code>simpa using h</code> 化简后使用局部证明，<code>change P</code>/<code>show P</code> 切换到定义等价的目标，<code>rfl</code> 证明定义相等，<code>expand</code> 展开定义；参数中的 <code>_</code> 由系统尝试填充。</p>
-                            <p><code>fnext</code> 处理函数外延，<code>eq</code> 使用等式推荐，<code>sup</code> 构造 W 类型；所有目标完成后使用 <code>qed</code>。</p>
+                            <p><strong>引入与应用</strong>　<code>intro x</code> 引入 Π/函数类型的参数；<code>intros x y</code> 连续引入，<code>rintro ⟨x,hx⟩</code> 引入后拆分积或依赖对，模式可以嵌套。<code>exact t</code> 用证明项完成目标，<code>assumption</code> 查找可用的局部项；<code>apply f</code> 应用定理并为参数生成目标，<code>apply f at h</code> 更新局部假设；<code>specialize h a</code> 实例化局部函数。</p>
+                            <p><strong>局部引理</strong>　<code>have h : T</code> 先证明局部类型再继续原目标；<code>have h := t</code> 推断类型，<code>have h : T := t</code> 检查给定证明项。<code>have h : T := by</code> 后接缩进子证明，子证明完成后才引入 <code>h</code>。</p>
+                            <p><strong>构造与解构</strong>　<code>constructor</code> 构造当前类型；<code>use t</code> 提供一个依赖对见证，<code>left</code>/<code>right</code> 选择和类型分支。<code>cases h</code> 解构归纳数据或等式，<code>rcases h with ⟨x,hx⟩</code> 命名积或依赖对的分量；<code>obtain ⟨x,hx⟩ := t</code> 检查并拆分一个项。<code>induction n with d dh</code> 命名归纳步数据和归纳假设。</p>
+                            <p><strong>改写与化简</strong>　<code>rw [h, ← k]</code> 顺序改写；<code>simp</code> 化简，<code>simpa using h</code> 化简后使用证明项；<code>change T</code>/<code>show T</code> 切换到定义等价的目标，<code>rfl</code> 证明定义相等，<code>expand f</code> 展开定义。<code>fnext</code> 处理函数外延，<code>eq</code> 使用等式推荐，<code>sup</code> 构造 W 类型。</p>
+                            <p><strong>结构化脚本</strong>　脚本可从 <code>by</code> 开始，使用空格缩进。<code>·</code> 聚焦下一个目标，其缩进块必须完成该目标及其子目标；<code>exact by</code> 同样要求完成当前目标。支持嵌套块和 <code>--</code> 行注释。失败时回滚当前顶层块，撤销也以顶层块为单位。参数中的 <code>_</code> 由系统尝试填充；末行 <code>qed name</code> 校验完整证明项并按指定名称保存，不以策略序列代替定理。</p>
                         </div>
                     </details>
             </div>

@@ -6,13 +6,17 @@
  * same alias table is also used for pasted text and save-boundary migration,
  * so input that arrives without a keydown event is normalized consistently.
  */
+import { COMMON_SYMBOL_ALIASES } from "../symbol-aliases.js";
 /**
  * Supported aliases, ordered from the shortest/common spelling to the more
  * descriptive spellings.  Keep this list data-only so the progress/help page
  * can render the same source of truth as the editor.
  */
 export const TYPE_THEORY_SYMBOL_ALIASES = Object.freeze([
+    ...COMMON_SYMBOL_ALIASES,
+    { alias: "cdot", symbol: "·" },
     { alias: "l", symbol: "λ" },
+    { alias: "la", symbol: "λ" },
     { alias: "lam", symbol: "λ" },
     { alias: "lambda", symbol: "λ" },
     { alias: "p", symbol: "Π" },
@@ -22,15 +26,9 @@ export const TYPE_THEORY_SYMBOL_ALIASES = Object.freeze([
     { alias: "sig", symbol: "Σ" },
     { alias: "sigma", symbol: "Σ" },
     { alias: "sum", symbol: "Σ" },
-    { alias: "x", symbol: "×" },
-    { alias: "times", symbol: "×" },
-    { alias: "cross", symbol: "×" },
     { alias: "w", symbol: "W" },
-    { alias: "to", symbol: "→" },
-    { alias: "arr", symbol: "→" },
-    { alias: "arrow", symbol: "→" },
-    { alias: "rarr", symbol: "→" },
     { alias: "eqv", symbol: "≃" },
+    { alias: "equiv", symbol: "≃" },
     { alias: "simeq", symbol: "≃" },
     { alias: "defeq", symbol: "≡" },
     { alias: "identical", symbol: "≡" },
