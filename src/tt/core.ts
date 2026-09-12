@@ -8423,6 +8423,7 @@ export class Core {
     expandDef(ast: AST, context: Context, n: string | Set<string>, count = [0, 1]): boolean {
 
         let found = false;
+        let children = ast.nodes;
         if (ast.type === "~=" && (n === "eqv" || (typeof n === "object" && n.has("eqv")))) {
             const expr = this.state.sysDefs["eqv"];
             if (count[0] === 0 || Math.abs(count[0]) === count[1]) {
@@ -8430,18 +8431,13 @@ export class Core {
                     this.instantiateDefinitionForExpansion(expr, context, ast),
                     ...ast.nodes
                 ));
-                count[1]++;
-                this.expandDef(ast.nodes[0].nodes[1], context, n, count);
-                this.expandDef(ast.nodes[1], context, n, count);
-                return true;
-            } else {
-                count[1]++;
-                found = this.expandDef(ast.nodes[0].nodes[1], context, n, count) || found;
-                found = this.expandDef(ast.nodes[1], context, n, count) || found;
-                return found;
+                // assign clones the arguments. Visit those live copies, not
+                // the inserted definition or the detached surface children.
+                children = [ast.nodes[0].nodes[1], ast.nodes[1]];
+                found = true;
             }
-        }
-        if (ast.type === "var" && !ast.bondVarId && (
+            count[1]++;
+        } else if (ast.type === "var" && !ast.bondVarId && (
             ast.name === n || (typeof n === "object" && n.has(ast.name))) && !hasContextName(context, ast.name)
         ) {
             const expr = this.state.sysDefs[ast.name] || this.state.userDefs[ast.name];
@@ -8454,19 +8450,15 @@ export class Core {
                 return false;
             }
         }
-        if (ast.nodes?.length) {
-            if (count[0] < 0) {
-                if (ast.type === "P" || ast.type === "L" || ast.type === "W" || ast.type === "S") {
-                    context = assignContext([ast.name, ast.nodes[0], 0], context);
-                }
-                found = this.expandDef(ast.nodes[1], context, n, count) || found;
-                found = this.expandDef(ast.nodes[0], context, n, count) || found;
-            } else {
-                found = this.expandDef(ast.nodes[0], context, n, count) || found;
-                if (ast.type === "P" || ast.type === "L" || ast.type === "W" || ast.type === "S") {
-                    context = assignContext([ast.name, ast.nodes[0], 0], context);
-                }
-                found = this.expandDef(ast.nodes[1], context, n, count) || found;
+        if (children?.length) {
+            const binder = ast.type === "P" || ast.type === "L" || ast.type === "W" || ast.type === "S";
+            const step = count[0] < 0 ? -1 : 1;
+            for (let i = step < 0 ? children.length - 1 : 0; i >= 0 && i < children.length; i += step) {
+                // Only the body is under the binder, even in reverse order.
+                const childContext = binder && i === 1
+                    ? assignContext([ast.name, children[0], 0], context)
+                    : context;
+                found = this.expandDef(children[i], childContext, n, count) || found;
             }
         }
         return found;

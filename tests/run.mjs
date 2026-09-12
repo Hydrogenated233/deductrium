@@ -174,6 +174,8 @@ const tests = [
     "./tt-issue-51-isset-expand.test.mjs",
     "./tt-issue-52-id2eqv-refl.test.mjs",
     "./tt-issue-53-w-roundtrip.test.mjs",
+    "./tt-issue-54-expand-traversal.test.mjs",
+    "./tt-issue-54-trunc-qed.test.mjs",
     "./proof-state.test.mjs",
     "./proof-state-gui.test.mjs",
     "./tt-assist-target-input.test.mjs",
