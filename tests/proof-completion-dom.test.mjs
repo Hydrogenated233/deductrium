@@ -99,6 +99,11 @@ try {
     input.dispatchEvent(new Event("blur"));
     assert.equal(popup.hidden, true);
     assert.equal(input.attributes.get("aria-expanded"), "false");
+    const fullscreenHost = new Element();
+    const fullscreenInput = new Element();
+    fullscreenInput.closest = selector => selector === ".proof-assistant" ? fullscreenHost : null;
+    installProofCompletion(fullscreenInput, () => context);
+    assert.equal(fullscreenHost.children.length, 1, "completion belongs to the assistant's native fullscreen subtree");
 } finally {
     if (originalDocument === undefined) delete globalThis.document;
     else globalThis.document = originalDocument;

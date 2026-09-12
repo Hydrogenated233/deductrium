@@ -5,9 +5,11 @@ import { TTProofSessionStore } from "../js/tt/proof-sessions.js";
 
 const previousDocument = globalThis.document;
 const hint = { innerText: "" };
+const target = { value: "", focus() { this.focused = true; } };
 globalThis.document = {
     getElementById(id) {
         if (id === "tactic-hint") return hint;
+        if (id === "tactic-target") return target;
         if (id === "tactic-script") return { value: "" };
         return null;
     }
@@ -40,9 +42,9 @@ try {
     assert.equal(gui.proofSessions.activeId, page.id);
     assert.equal(gui.proofSessions.active?.target, "");
     assert.deepEqual(gui.proofSessions.active?.history, []);
-    assert.equal(gui.mode, "tactic-begin");
-    assert.equal(gui.tacticSelectingTarget, true);
-    assert.ok(hint.innerText.length > 0, "a cleared page must ask the user to select a new target");
+    assert.equal(gui.mode, null, "a blank page must not capture theorem-list clicks");
+    assert.equal(target.focused, true, "a cleared page focuses its independent target input");
+    assert.equal(hint.innerText, "", "a blank page must not ask users to click a theorem row");
 
     let activatedId = null;
     gui.activateTacticSession = id => { activatedId = id; };

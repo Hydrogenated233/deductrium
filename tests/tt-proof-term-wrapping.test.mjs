@@ -32,13 +32,15 @@ assert.match(html, /<textarea id="tactic-input"[^>]*rows="1"/,
     "the active proof command must use a selectable wrapping textarea");
 assert.doesNotMatch(html, /class="[^"]*list-wrapper[^"]*tactic-assist-wrapper[^"]*"/,
     "proof-assistant controls must not add the black list-wrapper frame");
-assert.match(css, /#tactic-state \.blocked\s*\{[^}]*white-space:\s*pre-wrap[^}]*overflow-wrap:\s*anywhere/,
+assert.match(css, /#tactic-history \.blocked\s*\{[^}]*white-space:\s*pre-wrap[^}]*overflow-wrap:\s*anywhere/,
     "historical proof commands must wrap while preserving their command text");
 assert.match(gui, /input\.addEventListener\("input", \(\) => this\.resizeTacticInput\(\)\)/,
     "the active proof command must resize as it is typed");
 assert.match(gui, /input\.addEventListener\("keydown", \(ev\) => \{[\s\S]*?ev\.preventDefault\(\);[\s\S]*?getElementById\("tactic-begin"\)\.click\(\)/,
     "textarea input must keep Enter/Escape command submission without inserting a newline");
-assert.match(gui, /this\.addSpan\(statediv, command\)\.className = "blocked"/,
+assert.match(gui, /const history = document\.getElementById\("tactic-history"\)/,
+    "replayable history must live outside the state renderer");
+assert.match(gui, /this\.addSpan\(history, command\)\.className = "blocked"/,
     "a selected history line must contain the exact replayable command");
 assert.doesNotMatch(gui, /command \+ " \. "/,
     "display-only tactic separators must not be copied into the command");

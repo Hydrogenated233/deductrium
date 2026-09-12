@@ -49,7 +49,12 @@ for (const alias of ["lambda", "pi", "sigma", "equiv", "defeq", "comp"]) {
 }
 for (const text of ["Q\\and", "α\\and", "$\\alpha", "Q\\a", "\\unknown"]) {
     assert.equal(expandInferenceAliasesInSurface(text), text, "legacy differences stay literal");
+}
+for (const text of ["Q\\a", "\\unknown"]) {
     assert.equal(expandInferenceAliasAtCaret(text, text.length), null);
+}
+for (const [text, expected] of [["Q\\and", "Q∧"], ["α\\and", "α∧"], ["$\\alpha", "$α"]]) {
+    assert.equal(expandInferenceAliasAtCaret(text, text.length)?.value, expected);
 }
 assert.equal(typeTheorySymbolForAlias("l"), "λ");
 assert.equal(typeTheorySymbolForAlias("pi"), "Π");

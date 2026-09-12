@@ -39,7 +39,29 @@ globalThis.document = {
     getElementById(id) {
         if (!elements.has(id)) elements.set(id, {
             value: "", textContent: "", innerText: "", disabled: false,
-            classList: { add() {}, remove() {} }, replaceChildren() {}, setAttribute() {}
+            parentElement: null,
+            children: [],
+            classList: { add() {}, remove() {} },
+            appendChild(child) {
+                child.parentElement?.removeChild?.(child);
+                this.children.push(child);
+                child.parentElement = this;
+                return child;
+            },
+            removeChild(child) {
+                const index = this.children.indexOf(child);
+                if (index >= 0) this.children.splice(index, 1);
+                if (child.parentElement === this) child.parentElement = null;
+                return child;
+            },
+            replaceChildren(...children) {
+                for (const child of this.children) {
+                    if (child.parentElement === this) child.parentElement = null;
+                }
+                this.children = [];
+                for (const child of children) this.appendChild(child);
+            },
+            setAttribute() {}
         });
         return elements.get(id);
     }
@@ -98,6 +120,12 @@ try {
         assert.equal(original.propositions.length, 0, "worker cannot mutate live rows");
         call.resolve(response);
         assert.equal((await pending).committed, true);
+        assert.equal(elements.get("fs-proof-errmsg").parentElement,
+            elements.get("fs-proof-assistant"),
+            "reset must reattach the proof error node to its owning assistant");
+        assert.equal(elements.get("fs-proof-script-error").parentElement,
+            elements.get("fs-proof-script-output"),
+            "reset must reattach the script error node to its output");
         assert.equal(gui.inferenceProofAssistant, null);
         assert.equal(gui.inferenceProofBusy, false);
         assert.equal(gui.formalSystem.inferencePages.pages[1].command.input, "keep-other");

@@ -66,6 +66,14 @@ function isAliasBoundary(source: string, start: number): boolean {
     return start === 0 || !isNameChar(previous);
 }
 
+function isCaretAliasBoundary(source: string, start: number): boolean {
+    let slashes = 0;
+    for (let cursor = start - 1; cursor >= 0 && source[cursor] === "\\"; cursor--) slashes++;
+    // An explicit Space is unambiguous user input, so permit aliases directly
+    // after an identifier while retaining escaped-backslash protection.
+    return slashes % 2 === 0;
+}
+
 function quotedEnd(source: string, start: number, quote: string): number {
     let cursor = start + 1;
     while (cursor < source.length) {
@@ -135,7 +143,7 @@ export function expandInferenceAliasAtCaret(
     const caret = Math.max(0, Math.min(value.length, selectionStart));
     const beforeCaret = value.slice(0, caret);
     const match = /\\([A-Za-z][A-Za-z0-9]*)$/u.exec(beforeCaret);
-    if (!match || match.index === undefined || !isAliasBoundary(beforeCaret, match.index)) return null;
+    if (!match || match.index === undefined || !isCaretAliasBoundary(beforeCaret, match.index)) return null;
     const symbol = inferenceSymbolForAlias(match[0]);
     if (!symbol) return null;
     return {

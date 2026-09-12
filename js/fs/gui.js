@@ -4,6 +4,8 @@ import { iniSysFnList, initFormalSystem } from "./initial.js";
 import { DEFERRED_ASSISTANT_STEP, FormalSystem } from "./formalsystem.js";
 import { TR } from "../lang.js";
 import { ProofScriptEditor, scriptThroughCaret } from "../proof-editor.js";
+import { clearProofState, renderProofState } from "../proof-state.js";
+import { installProofFullscreen } from "../proof-fullscreen.js";
 import { installProofCompletion } from "../proof-completion.js";
 import { ListDragger } from "./itemdragger.js";
 import { InferenceProofAssistant } from "./proof-assistant.js";
@@ -932,6 +934,7 @@ export class FSGui {
     }
     /** Wire the deduction-layer assistant without sharing TT tactic controls. */
     initInferenceProofAssistant() {
+        installProofFullscreen(document.getElementById("fs-proof-assistant"), document.getElementById("fs-proof-fullscreen"));
         const begin = document.getElementById("fs-proof-begin");
         const target = document.getElementById("fs-proof-target");
         const input = document.getElementById("fs-proof-input");
@@ -1138,6 +1141,26 @@ export class FSGui {
         }
         return this.startInferenceProofAssistant(target);
     }
+    renderInferenceProofState(snapshot, host, errorNode) {
+        renderProofState(host, {
+            scope: "fs",
+            contextKey: snapshot.pageId,
+            goals: snapshot.goals.map(goal => ({
+                id: String(goal.id),
+                hypotheses: goal.hypotheses.map(hypothesis => ({
+                    name: hypothesis.name,
+                    isType: hypothesis.kind === "variable",
+                    content: () => hypothesis.proposition
+                        ? this.ast2HTML("-", hypothesis.proposition, false)
+                        : document.createTextNode(hypothesis.kind === "variable" ? TR("量词变量") : hypothesis.name)
+                })),
+                target: () => this.ast2HTML("-", goal.target, false)
+            })),
+            expected: () => this.ast2HTML("-", snapshot.theorem, false),
+            error: errorNode,
+            completedText: TR("无目标，请输入qed结束")
+        });
+    }
     renderInferenceProofSnapshot(snapshot) {
         if (this.inferenceProofTextMode) {
             this.renderInferenceProofTextSnapshot(snapshot);
@@ -1159,42 +1182,7 @@ export class FSGui {
             row.textContent = command;
             history.appendChild(row);
         }
-        state.replaceChildren();
-        if (!snapshot.goals.length) {
-            const done = document.createElement("div");
-            done.className = "fs-proof-complete";
-            done.textContent = TR("无目标，请输入qed结束");
-            state.appendChild(done);
-        }
-        for (let index = snapshot.goals.length - 1; index >= 0; index--) {
-            const goal = snapshot.goals[index];
-            const block = document.createElement("div");
-            block.className = "fs-proof-goal" + (index ? " fs-proof-goal-secondary" : "");
-            const title = document.createElement("div");
-            title.className = "fs-proof-goal-title";
-            title.textContent = index ? `${TR("目标")}${index}：` : TR("当前目标：");
-            block.appendChild(title);
-            for (const hypothesis of goal.hypotheses) {
-                const row = document.createElement("div");
-                row.className = "fs-proof-hypothesis";
-                row.appendChild(document.createTextNode(hypothesis.proposition
-                    ? `${hypothesis.name} : `
-                    : hypothesis.kind === "variable" ? `${hypothesis.name} : ${TR("量词变量")}` : hypothesis.name));
-                if (hypothesis.proposition)
-                    row.appendChild(this.ast2HTML("-", hypothesis.proposition, false));
-                block.appendChild(row);
-            }
-            const target = document.createElement("div");
-            target.className = "fs-proof-goal-target";
-            target.appendChild(this.ast2HTML("-", goal.target, false));
-            block.appendChild(target);
-            state.appendChild(block);
-        }
-        const targetLabel = document.getElementById("fs-proof-target-label");
-        if (targetLabel) {
-            targetLabel.replaceChildren(document.createTextNode(TR("目标：")));
-            targetLabel.appendChild(this.ast2HTML("-", snapshot.theorem, false));
-        }
+        this.renderInferenceProofState(snapshot, state, error);
         this.renderInferenceProofTextRecommendations();
         const input = document.getElementById("fs-proof-input");
         input?.classList.remove("hide");
@@ -1242,42 +1230,7 @@ export class FSGui {
                 : "qed 未就绪：仍有未完成的证明目标";
             errorDiv.appendChild(status);
         }
-        state.replaceChildren();
-        if (!snapshot.goals.length) {
-            const done = document.createElement("div");
-            done.className = "fs-proof-complete";
-            done.textContent = TR("无目标，请输入qed结束");
-            state.appendChild(done);
-        }
-        for (let index = snapshot.goals.length - 1; index >= 0; index--) {
-            const goal = snapshot.goals[index];
-            const block = document.createElement("div");
-            block.className = "fs-proof-goal" + (index ? " fs-proof-goal-secondary" : "");
-            const title = document.createElement("div");
-            title.className = "fs-proof-goal-title";
-            title.textContent = index ? `${TR("目标")}${index}：` : TR("当前目标：");
-            block.appendChild(title);
-            for (const hypothesis of goal.hypotheses) {
-                const row = document.createElement("div");
-                row.className = "fs-proof-hypothesis";
-                row.appendChild(document.createTextNode(hypothesis.proposition
-                    ? `${hypothesis.name} : `
-                    : hypothesis.kind === "variable" ? `${hypothesis.name} : ${TR("量词变量")}` : hypothesis.name));
-                if (hypothesis.proposition)
-                    row.appendChild(this.ast2HTML("-", hypothesis.proposition, false));
-                block.appendChild(row);
-            }
-            const target = document.createElement("div");
-            target.className = "fs-proof-goal-target";
-            target.appendChild(this.ast2HTML("-", goal.target, false));
-            block.appendChild(target);
-            state.appendChild(block);
-        }
-        const targetLabel = document.getElementById("fs-proof-target-label");
-        if (targetLabel) {
-            targetLabel.replaceChildren(document.createTextNode(TR("目标：")));
-            targetLabel.appendChild(this.ast2HTML("-", snapshot.theorem, false));
-        }
+        this.renderInferenceProofState(snapshot, state, errorDiv);
         this.renderInferenceProofTextRecommendations();
     }
     toggleInferenceProofTextMode() {
@@ -1637,11 +1590,22 @@ export class FSGui {
         if (name)
             name.value = "";
         const state = document.getElementById("fs-proof-state");
+        const scriptState = document.getElementById("fs-proof-script-state");
+        const proofError = document.getElementById("fs-proof-errmsg");
+        const scriptError = document.getElementById("fs-proof-script-error");
         const history = document.getElementById("fs-proof-history");
         if (state)
-            state.replaceChildren();
+            clearProofState(state);
+        if (scriptState)
+            clearProofState(scriptState);
         if (history)
             history.replaceChildren();
+        const assistant = document.getElementById("fs-proof-assistant");
+        const scriptOutput = document.getElementById("fs-proof-script-output");
+        if (proofError && assistant)
+            assistant.appendChild(proofError);
+        if (scriptError && scriptOutput)
+            scriptOutput.appendChild(scriptError);
         this.renderInferenceProofRecommendations();
         this.setInferenceProofError("");
     }

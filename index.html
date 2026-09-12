@@ -261,7 +261,8 @@
                     <button id="fs-proof-begin" type="button" class="inhabitat-modify" title="启动推理层证明助手">+</button>
                     <button id="fs-proof-close" type="button" class="inhabitat-modify hide" title="退出证明助手">×</button>
                     <button id="fs-proof-text-toggle" type="button" class="inhabitat-modify" title="切换文本策略编辑器">文本</button>
-                    <span id="fs-proof-target-label"></span>
+                    <button id="fs-proof-fullscreen" type="button" class="proof-fullscreen-toggle" title="全屏证明助手" aria-label="全屏证明助手" aria-pressed="false">&#x26f6;</button>
+                    <span id="fs-proof-target-label" class="hide"></span>
                 </div>
                 <div id="fs-proof-session" class="proof-assistant-session hide">
                     <div class="proof-assistant-toolbar fs-proof-toolbar">
@@ -269,7 +270,6 @@
                     </div>
                     <div id="fs-proof-history" class="fs-proof-history"></div>
                     <div id="fs-proof-state" class="proof-assistant-state fs-proof-state"></div>
-                    <div id="fs-proof-errmsg" class="proof-assistant-error fs-proof-errmsg"></div>
                     <div class="proof-assistant-input-row fs-proof-input-row">
                         <textarea id="fs-proof-input" class="hide" rows="1" autocomplete="off" placeholder="输入证明策略"></textarea>
                         <button id="fs-proof-apply" type="button">执行</button>
@@ -279,6 +279,7 @@
                     <div id="fs-proof-commands" class="proof-assistant-recommendations fs-proof-recommendations"
                         aria-label="推荐证明策略"></div>
                 </div>
+                <div id="fs-proof-errmsg" class="proof-assistant-error fs-proof-errmsg" role="alert"></div>
                     <div id="fs-proof-text-mode" class="proof-assistant-text-mode proof-text-mode hide">
                         <div class="proof-text-editor">
                             <div class="proof-code-editor">
@@ -374,8 +375,16 @@
                             <button class="inhabitat-modify" id="tactic-text-toggle" type="button"
                                 title="切换文本策略编辑器">文本</button>
                             <label id="tactic-scope-label" class="hide">引用文件夹：<select id="tactic-scope"></select></label>
+                            <button id="tactic-fullscreen" type="button" class="proof-fullscreen-toggle" title="全屏证明助手" aria-label="全屏证明助手" aria-pressed="false">&#x26f6;</button>
                         </div>
                     </div>
+                    <div class="proof-assistant-header tt-proof-target-header">
+                        <label for="tactic-target">类型层证明助手：</label>
+                        <input id="tactic-target" type="text" autocomplete="off" placeholder="输入待证命题" />
+                        <button id="tactic-target-begin" type="button" class="inhabitat-modify"
+                            title="启动类型层证明助手">+</button>
+                    </div>
+                    <div id="tactic-target-error" class="proof-assistant-error" role="alert"></div>
                     <div id="copygate"></div>
                     <div class="proof-assistant-header">
                         <label>证明策略：</label>
@@ -383,6 +392,7 @@
                     </div>
                     <div class="proof-assistant-session">
                         <div id="tactic-list">
+                            <div id="tactic-history" class="fs-proof-history"></div>
                             <div id="tactic-state" class="proof-assistant-state"></div>
                             <div class="proof-assistant-input-row">
                                 <textarea id="tactic-input" class="hide" rows="1"></textarea>
@@ -422,7 +432,10 @@
                 <details id="tactic-help" class="tactic-help">
                         <summary>策略介绍</summary>
                         <div class="tactic-help-content">
-                            <p><strong>引入与应用</strong>　<code>intro x</code> 引入 Π/函数类型的参数；<code>intros x y</code> 连续引入，<code>rintro ⟨x,hx⟩</code> 引入后拆分积或依赖对，模式可以嵌套。<code>exact t</code> 用证明项完成目标，<code>assumption</code> 查找可用的局部项；<code>apply f</code> 应用定理并为参数生成目标，<code>apply f at h</code> 更新局部假设；<code>specialize h a</code> 实例化局部函数。</p>
+                            <p><strong>引入参数</strong>　<code>intro x</code> 引入 Π/函数类型的一个参数，<code>intro x y</code> 连续引入；<code>intro</code> 或 <code>intro _</code> 自动命名一个参数。无参数的 <code>intros</code> 连续引入当前可见的全部 Π/函数参数，不自动展开定义；没有可引入参数时不改变目标。<code>intros x y</code> 等同于 <code>intro x y</code>；<code>rintro ⟨x,hx⟩</code> 引入后拆分积或依赖对，模式可以嵌套。</p>
+                            <p><strong>使用证明</strong>　<code>exact t</code> 用证明项完成目标，<code>assumption</code> 查找可用的局部项；<code>apply f</code> 应用定理并为参数生成目标，<code>apply f at h</code> 更新局部假设；<code>specialize h a</code> 实例化局部函数。</p>
+                            <p><strong>逐步补全证明</strong>　<code>refine t</code> 检查任意证明项，其中可用 <code>_</code> 或 <code>?_</code> 留出匿名孔位，不支持命名孔位。能够推断的孔位自动填充，不生成目标；其余孔位保留所在位置的局部作用域，按依赖顺序生成目标，先完成的目标会更新后续依赖类型。例如 <code>refine succ _</code> 留下一个自然数目标；<code>refine λx:nat._</code> 在函数体目标中引入 <code>x : nat</code>；<code>refine (_,_)</code> 逐步构造积或依赖对。类型不匹配或无法确定孔位类型时，整条策略失败并回滚。随 <code>apply</code> 解锁。</p>
+                            <p><strong>整理上下文</strong>　<code>clear h k</code> 删除指定局部项；若目标或保留的局部项仍依赖它们，则整条策略失败，不删除任何项。<code>revert x</code> 将变量及其完整依赖链移回目标，成为 Π 参数；<code>revert x y</code> 可指定多个变量，参数按上下文依赖顺序排列。例如 <code>n : nat</code>、<code>h : n=n</code> 下目标为 <code>True</code>，执行 <code>revert n</code> 得到 <code>Πn:nat,Πh:n=n,True</code>，再用 <code>intro m hm</code> 引入。两条策略只影响当前目标，随 <code>intro</code> 解锁。</p>
                             <p><strong>局部引理</strong>　<code>have h : T</code> 先证明局部类型再继续原目标；<code>have h := t</code> 推断类型，<code>have h : T := t</code> 检查给定证明项。<code>have h : T := by</code> 后接缩进子证明，子证明完成后才引入 <code>h</code>。</p>
                             <p><strong>构造与解构</strong>　<code>constructor</code> 构造当前类型；<code>use t</code> 提供一个依赖对见证，<code>left</code>/<code>right</code> 选择和类型分支。<code>cases t</code> 解构类型匹配的局部变量或一般项，如 <code>cases (f b)</code>；<code>rcases h with ⟨x,hx⟩</code> 命名积或依赖对的分量；<code>obtain ⟨x,hx⟩ := t</code> 检查并拆分一个项。</p>
                             <p><strong>依赖解构</strong>　<code>cases n generalizing p q</code> 指定随解构进入分支的上下文变量，必须包含完整依赖链；遗漏时报告缺少的名称。省略该选项则自动处理依赖变量，<code>generalizing []</code> 显式选择空集。<code>induction n generalizing p q with d dh</code> 还可命名归纳步数据和归纳假设。</p>

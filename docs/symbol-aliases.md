@@ -36,9 +36,12 @@ Pair brackets are for tactics' pair patterns, not new term syntax.
 ## Compatibility Boundaries
 
 The layer-specific scanners keep their original quoted-text, comment, and
-escaped-backslash behavior. Inference aliases need a left identifier boundary
-to preserve legacy set differences such as `Q\and` and `α\and`. Type-theory
-input retains adjacent composition aliases such as `a\*b`.
+escaped-backslash behavior. Pasted and submitted inference text needs a left
+identifier boundary to preserve legacy set differences such as `Q\and` and
+`α\and`. In an editor, pressing Space explicitly selects a recognized alias,
+including directly after an identifier such as `P\r`; escaped backslashes
+remain literal. Type-theory input retains adjacent composition aliases such as
+`a\*b`.
 
 New input data must have no case-insensitive duplicate names. Shared spellings,
 full help-table coverage, paste/caret conversion, layer exclusions, and legacy

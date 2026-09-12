@@ -34,7 +34,7 @@ export function completeProofInput(source, caret, context, explicit = false) {
         return empty;
     if (preceding.lastIndexOf(" with") > preceding.lastIndexOf(" generalizing"))
         return empty;
-    const localOnly = /\b(at|generalizing)\b/.test(preceding) || command === "revert";
+    const localOnly = /\b(at|generalizing)\b/.test(preceding) || ["clear", "revert"].includes(command);
     const values = commandPosition
         ? [[context.commands, "策略"]]
         : [[context.locals, "局部"], [localOnly ? [] : context.constants, "定理"]];
@@ -67,7 +67,7 @@ export function installProofCompletion(input, getContext, multiline = false) {
     popup.id = `proof-completions-${++nextPopupId}`;
     popup.setAttribute("role", "listbox");
     popup.hidden = true;
-    document.body.appendChild(popup);
+    (input.closest?.(".proof-assistant") ?? document.body).appendChild(popup);
     input.setAttribute("aria-controls", popup.id);
     input.setAttribute("aria-autocomplete", "list");
     input.setAttribute("aria-expanded", "false");

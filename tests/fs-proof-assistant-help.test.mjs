@@ -34,10 +34,24 @@ assert.ok(typeHelp, "the type-theory proof assistant must expose collapsible hel
 assert.match(typeHelp[0], /<summary>策略介绍<\/summary>/);
 assert.doesNotMatch(typeHelp[0], /<details[^>]*\bopen(?:\s|=|>)/,
     "type-theory help should start collapsed");
-for (const tactic of ["intro", "exact", "apply", "cases", "rcases", "obtain", "have", "use", "rw", "simp", "rfl", "qed"]) {
+for (const tactic of ["intro", "intros", "clear", "revert", "exact", "apply", "refine", "cases", "rcases", "obtain", "have", "use", "rw", "simp", "rfl", "qed"]) {
     assert.match(typeHelp[0], new RegExp(`<code>${tactic}(?:</code>|\\s)`),
         `type-theory help should describe ${tactic}`);
 }
+const refineHelp = typeHelp[0].match(/<p>(?:(?!<\/p>)[\s\S])*<code>refine t<\/code>[\s\S]*?<\/p>/)?.[0];
+assert.ok(refineHelp, "type-theory help should explain refine separately from exact and apply");
+for (const example of ["refine succ _", "refine λx:nat._", "refine (_,_)"]) {
+    assert.ok(refineHelp.includes(`<code>${example}</code>`), `refine help should include ${example}`);
+}
+assert.match(refineHelp, /任意.*项/);
+assert.match(refineHelp, /<code>_<\/code>.*<code>\?_<\/code>/);
+assert.match(refineHelp, /推断.*不.*目标/);
+assert.match(refineHelp, /作用域/);
+assert.match(refineHelp, /依赖顺序/);
+assert.match(refineHelp, /不支持命名孔位/);
+assert.match(refineHelp, /随 <code>apply<\/code> 解锁/);
+assert.doesNotMatch(inferenceHelp[0], /<code>refine(?:\s|<\/code>)/,
+    "type-theory refine must not be advertised as an inference-layer command");
 assert.match(css, /\.fs-proof-help\s*,\s*\.tactic-help\s*\{[^}]*max-width:\s*100%/);
 assert.match(css, /\.fs-proof-help-content\s*,[\s\S]*overflow-wrap:\s*anywhere/);
 

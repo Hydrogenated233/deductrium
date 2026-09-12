@@ -145,9 +145,11 @@ cross-fiber dependent paths remain explicit boundaries.
 **Type-theory proof page / 类型论证明页**:
 A persistent, independently recoverable proof workspace. A page may be blank or
 hold one type-theory target together with its command history, text draft,
-reference scope, and current proof state. Reopening a theorem row reuses its
-existing bound page. Successful `qed` clears the page back to a blank
-target-selection state without deleting or reordering it.
+reference scope, and current proof state. New manual goals come from an
+independent proposition input; theorem-row editing does not start a proof.
+Existing theorem-bound pages retain their identity across saves. Successful
+`qed` clears the page back to a blank proposition-input state without deleting
+or reordering it.
 
 **Type-theory proof page collection / 类型论证明页集合**:
 The ordered set of open type-theory proof pages, with exactly one active page.

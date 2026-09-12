@@ -331,13 +331,15 @@ export class Assist {
         if (!d)
             return;
         const { src, dst, varname, goals } = d;
-        this.replaceFreeVar(dst, varname, src);
+        if (dst)
+            this.replaceFreeVar(dst, varname, src);
         for (const goal of goals) {
             this.replaceFreeVar(goal.type, varname, src);
             for (const [k, v, id] of goal.context) {
                 this.replaceFreeVar(v, varname, src);
             }
         }
+        this.resolveDependGoal(d.next);
     }
     isIndType(typ) {
         const dynamic = !!this.getDynamicInductiveMetadata(typ);
@@ -400,9 +402,105 @@ export class Assist {
             return undefined;
         return application.length === 2 ? Core.clone(application[1]) : undefined;
     }
+    contextNames(spec, command) {
+        const names = spec?.trim().split(/\s+/).filter(Boolean) ?? [];
+        if (!names.length)
+            throw TR(command + "需要至少一个局部变量名");
+        const goal = this.goal[0];
+        if (!goal)
+            throw TR("无证明目标，请使用qed命令结束证明");
+        if (new Set(names).size !== names.length)
+            throw TR("局部变量名不能重复");
+        for (const name of names) {
+            if (!goal.context.some(entry => entry[0] === name)) {
+                throw TR("找不到局部变量：") + name;
+            }
+        }
+        return { goal, names };
+    }
+    /** Remove bindings only when the target and retained context do not use them. */
+    clear(spec) {
+        const { goal, names } = this.contextNames(spec, "clear");
+        const removed = new Set(names);
+        const context = goal.context.filter(([name]) => !removed.has(name));
+        const retainedTypes = [
+            ["目标", goal.type], ...context.map(([name, type]) => [name, type])
+        ];
+        for (const [owner, type] of retainedTypes) {
+            const free = Core.getFreeVars(type);
+            const dependency = names.find(name => free.has(name));
+            if (dependency)
+                throw TR("无法清除仍被依赖的局部变量：") + dependency + " (" + owner + ")";
+        }
+        goal.context = context;
+        return this;
+    }
+    /** Abstract the selected bindings and their forward dependencies. */
+    revert(spec) {
+        const { goal, names } = this.contextNames(spec, "revert");
+        const removed = new Set(names);
+        const dependencies = new Map(goal.context.map(([name, type]) => [name, Core.getFreeVars(type)]));
+        const dependents = new Map();
+        for (const [name, free] of dependencies) {
+            for (const dependency of free) {
+                const users = dependents.get(dependency) ?? [];
+                users.push(name);
+                dependents.set(dependency, users);
+            }
+        }
+        const pending = [...names];
+        for (let index = 0; index < pending.length; index++) {
+            for (const name of dependents.get(pending[index]) ?? []) {
+                if (!removed.has(name)) {
+                    removed.add(name);
+                    pending.push(name);
+                }
+            }
+        }
+        // Pair patterns may reorder the display context. Sort the selected
+        // telescope by actual dependencies, not by the displayed positions.
+        const byName = new Map(goal.context.map(binding => [binding[0], binding]));
+        const indegree = new Map([...removed].map(name => [
+            name, [...dependencies.get(name)].filter(dependency => removed.has(dependency)).length
+        ]));
+        const ordered = goal.context.slice().reverse()
+            .filter(([name]) => indegree.get(name) === 0).map(([name]) => name);
+        for (let index = 0; index < ordered.length; index++) {
+            for (const name of dependents.get(ordered[index]) ?? []) {
+                if (!removed.has(name))
+                    continue;
+                indegree.set(name, indegree.get(name) - 1);
+                if (indegree.get(name) === 0)
+                    ordered.push(name);
+            }
+        }
+        if (ordered.length !== removed.size)
+            throw TR("局部变量类型存在循环依赖，无法revert");
+        const bindings = ordered.map(name => byName.get(name));
+        let target = Core.clone(goal.type);
+        for (const [name, type] of bindings.slice().reverse()) {
+            target = wrapLambda("P", name, Core.clone(type), target);
+        }
+        this.clearBondIds(target);
+        const hole = wrapVar("(?#0)");
+        hole.checked = target;
+        let application = hole;
+        for (const [name, , id] of bindings) {
+            application = wrapApply(application, { ...wrapVar(name), bondVarId: id });
+        }
+        const originalType = goal.type;
+        // Preserve the old hole's identity for pending dependent witnesses.
+        Core.assign(goal.ast, application, true);
+        goal.ast.checked = originalType;
+        // Core.assign retains child pointers, including the fresh inner hole.
+        goal.ast = hole;
+        goal.type = target;
+        goal.context = goal.context.filter(([name]) => !removed.has(name));
+        return this;
+    }
     intro(s) {
-        s = s.trim();
-        if (s.includes(" ")) {
+        s = s?.trim() ?? "";
+        if (/\s/.test(s)) {
             return this.intros(s);
         }
         const goal = this.goal.shift();
@@ -413,7 +511,7 @@ export class Assist {
             this.goal.unshift(goal);
             throw TR("intro 只能作用于函数类型");
         }
-        s = Core.getNewName(s || tartgetType.name || "h", new Set(goal.context.map(e => e[0])));
+        s = Core.getNewName((s === "_" ? "" : s) || tartgetType.name || "h", new Set(goal.context.map(e => e[0])));
         goal.context.unshift([s, tartgetType.nodes[0], 0]);
         // goal.ast is refferd at outter level hole,  we fill the hole first
         Core.assign(goal.ast, { "type": "L", name: s, nodes: [tartgetType.nodes[0], { type: "var", name: "(?#0)" }] }, true);
@@ -431,8 +529,14 @@ export class Assist {
         return this;
     }
     intros(s) {
-        if (!s?.trim())
-            throw TR("意外的空表达式");
+        if (!this.goal.length)
+            throw TR("无证明目标，请使用qed命令结束证明");
+        if (!s?.trim()) {
+            while (this.goal[0].type.type === "P" || this.goal[0].type.type === "->") {
+                this.intro("");
+            }
+            return this;
+        }
         s.split(/[\s,]+/).map(ss => ss ? this.intro(ss) : "");
         return this;
     }
@@ -815,6 +919,215 @@ export class Assist {
             }
             throw TR("无法对类型") + parser.stringify(ast.checked) + TR("使用exact策略作用于类型") + parser.stringify(goal.type);
         }
+    }
+    /** Elaborate a template, retaining typed unsolved arguments as proof goals. */
+    refine(source) {
+        if (!source?.trim())
+            throw TR("refine需要一个证明项模板");
+        const term = markExplicitAtSyntax(parseAssistInput(source.trim()));
+        let nodeCount = 0;
+        let holeCount = 0;
+        const normalizeHoles = (node, depth = 0) => {
+            if (++nodeCount > 4096 || depth > 128)
+                throw TR("refine模板过大或嵌套过深");
+            if (node.type === "var" && node.name === "?_")
+                node.name = "_";
+            else if (node.type === "var" && node.name.startsWith("?")) {
+                throw TR("refine请使用_或?_留空，不支持命名孔位");
+            }
+            if (node.type === "var" && node.name === "_" && ++holeCount > 256) {
+                throw TR("refine孔位过多");
+            }
+            for (const child of node.nodes ?? [])
+                normalizeHoles(child, depth + 1);
+        };
+        normalizeHoles(term);
+        try {
+            return core.withSilentErrors(() => this.refineTerm(term));
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(message.replace(/\?refine\d+\b/g, "_"));
+        }
+    }
+    finishRefineGoals(goals, inherited) {
+        if (!inherited)
+            return;
+        if (!goals.length)
+            return this.resolveDependGoal(inherited);
+        const last = goals.at(-1);
+        if (!last.depend)
+            last.depend = inherited;
+        else {
+            let tail = last.depend;
+            while (tail.next)
+                tail = tail.next;
+            tail.next = inherited;
+        }
+    }
+    refineTerm(template) {
+        const goal = this.goal[0];
+        if (!goal)
+            throw TR("无证明目标，请使用qed命令结束证明");
+        if (template.type === "var" && template.name === "_")
+            return this;
+        const names = new Set();
+        const inputScopes = new Map();
+        const used = new Set([
+            ...goal.context.map(([name]) => name),
+            ...Core.getFreeVars(goal.type), ...Core.getFreeVars(template)
+        ]);
+        const localNames = new Set(goal.context.map(([name]) => name));
+        const holeName = () => {
+            if (names.size >= 256)
+                throw TR("refine孔位过多");
+            const name = "?refine" + names.size;
+            names.add(name);
+            return name;
+        };
+        const prepare = (node, scope) => {
+            if (node.type === "var" && ["_", "?_"].includes(node.name)) {
+                node.name = holeName();
+                inputScopes.set(node.name, new Set(scope));
+                return;
+            }
+            const binder = ["L", "P", "S", "W"].includes(node.type);
+            if (binder) {
+                prepare(node.nodes[0], scope);
+                const name = Core.getNewName(node.name === "_" ? "h" : node.name, new Set([...used, ...scope]));
+                localNames.add(name);
+                if (name !== node.name)
+                    this.replaceFreeVar(node.nodes[1], node.name, wrapVar(name));
+                node.name = name;
+                prepare(node.nodes[1], new Set([...scope, name]));
+            }
+            else {
+                for (const child of node.nodes ?? [])
+                    prepare(child, scope);
+            }
+        };
+        const term = Core.clone(template);
+        this.clearBondIds(term);
+        prepare(term, new Set(goal.context.map(([name]) => name)));
+        if (!names.size)
+            return this.exact(term);
+        const assertion = wrapLambda(":", "", term, Core.clone(goal.type));
+        core.checkType(assertion, goal.context, true, undefined, true, true);
+        const occurrences = new Map();
+        const collect = (node, context) => {
+            if (node.type === "var" && names.has(node.name)) {
+                const entries = occurrences.get(node.name) ?? [];
+                entries.push({ node, context });
+                occurrences.set(node.name, entries);
+            }
+            else if (node.type === "var" && (node.name === "_" || node.name.startsWith("?"))) {
+                throw TR("无法确定refine孔位类型，请补充类型或参数");
+            }
+            const binder = ["L", "P", "S", "W"].includes(node.type);
+            if (binder) {
+                localNames.add(node.name);
+                collect(node.nodes[0], context);
+                collect(node.nodes[1], [[node.name, node.nodes[0], 0], ...context]);
+            }
+            else {
+                for (const child of node.nodes ?? [])
+                    collect(child, context);
+            }
+        };
+        collect(term, goal.context);
+        const entries = new Map();
+        for (const [name, nodes] of occurrences) {
+            const type = nodes.find(({ node }) => !!node.checked)?.node.checked;
+            if (!type)
+                throw TR("无法确定refine孔位类型，请补充类型或参数");
+            // A shared hole may only use locals visible at every occurrence.
+            // Input scope also prevents elaboration from widening its scope.
+            const scope = new Set(inputScopes.get(name));
+            const bindings = new Set(nodes[0].context);
+            for (const occurrence of nodes) {
+                const visible = new Set(occurrence.context.map(([name]) => name));
+                for (const local of scope)
+                    if (!visible.has(local))
+                        scope.delete(local);
+                for (const binding of bindings) {
+                    if (!occurrence.context.includes(binding))
+                        bindings.delete(binding);
+                }
+            }
+            const context = Core.cloneContext(nodes[0].context
+                .filter(binding => scope.has(binding[0]) && bindings.has(binding)));
+            for (const local of scope) {
+                if (!context.some(([name]) => name === local))
+                    scope.delete(local);
+            }
+            const free = Core.getFreeVars(type);
+            for (const [, contextType] of context) {
+                for (const variable of Core.getFreeVars(contextType))
+                    free.add(variable);
+            }
+            if ([...free].some(variable => (variable === "_" || variable.startsWith("?")) && !occurrences.has(variable))) {
+                throw TR("无法确定refine孔位类型，请补充类型或参数");
+            }
+            if ([...free].some(variable => localNames.has(variable) && !scope.has(variable))) {
+                throw TR("refine孔位类型引用了作用域外的变量");
+            }
+            const hole = wrapVar("(?#0)");
+            const holeType = Core.clone(type);
+            this.clearBondIds(holeType);
+            for (const binding of context) {
+                binding[2] = 0;
+                this.clearBondIds(binding[1]);
+            }
+            hole.checked = holeType;
+            entries.set(name, {
+                goal: { ast: hole, type: holeType, context, depend: null },
+                marker: this.getNewDependGoalVarName(),
+                dependencies: new Set([...free].filter(variable => occurrences.has(variable)))
+            });
+        }
+        const ordered = [];
+        const pending = new Map(entries);
+        while (pending.size) {
+            const next = [...pending].find(([, entry]) => [...entry.dependencies].every(name => !pending.has(name)));
+            if (!next)
+                throw TR("refine孔位存在循环依赖，请分步构造证明");
+            ordered.push(next[1]);
+            pending.delete(next[0]);
+        }
+        for (const [name, entry] of entries) {
+            const dependents = ordered.filter(other => other.dependencies.has(name)).map(other => other.goal);
+            for (const dependent of dependents) {
+                this.replaceFreeVar(dependent.type, name, wrapVar(entry.marker));
+                for (const [, type] of dependent.context) {
+                    this.replaceFreeVar(type, name, wrapVar(entry.marker));
+                }
+            }
+            entry.goal.depend = {
+                src: entry.goal.ast, dst: null, goals: dependents, varname: entry.marker
+            };
+        }
+        const replace = (node) => {
+            const entry = node.type === "var" ? entries.get(node.name) : undefined;
+            if (entry)
+                return entry.goal.ast;
+            node.checked = null;
+            if (node.nodes)
+                node.nodes = node.nodes.map(replace);
+            return node;
+        };
+        const proof = replace(term);
+        if (ordered.some(entry => entry.goal.ast === proof))
+            return this;
+        if (!ordered.length)
+            return this.exact(proof);
+        const inherited = goal.depend;
+        const siblings = this.goal.slice(1);
+        Core.assign(goal.ast, proof, true);
+        goal.ast.checked = goal.type;
+        const remaining = ordered.map(entry => entry.goal);
+        this.goal = [...remaining, ...siblings];
+        this.finishRefineGoals(remaining, inherited);
+        return this;
     }
     containsInputHole(ast) {
         return !!ast && (ast.type === "var" && ast.name === "_"
@@ -1699,12 +2012,14 @@ export class Assist {
         if (!goal)
             throw TR("无证明目标，请使用qed命令结束证明");
         let matched;
+        let functionType;
         try {
             const t = goal.type;
             matched = Core.match(t, parser.parse("$2 = $3"), /^\$/) || Core.match(t, parser.parse("eq $2 $3"), /^\$/) || Core.match(t, parser.parse("@eq $0 $1 $2 $3"), /^\$/);
             if (!matched)
                 throw TR("无法对非相等类型使用该策略");
-            if (!this.semanticFunctionType(matched["$2"], goal.context)) {
+            functionType = this.semanticFunctionType(matched["$2"], goal.context);
+            if (!functionType) {
                 throw TR("无法对非函数相等类型使用fnext策略");
             }
             this.goal.unshift(goal);
@@ -1713,7 +2028,14 @@ export class Assist {
             this.goal.unshift(goal);
             throw e;
         }
-        this.apply(wrapApply(wrapVar("fnext")));
+        const family = Core.clone(functionType);
+        family.type = "L";
+        if (functionType.type === "->")
+            family.name = "_";
+        // A completed pointwise proof may be just `lambda x. rfl`, which
+        // cannot synthesize either endpoint. Keep the parameters in exported
+        // syntax as well as in the local check; folding the alias loses them.
+        this.apply(markExplicitAtSyntax(wrapApply(wrapVar("@fnext"), wrapVar("_"), wrapVar("_"), Core.clone(functionType.nodes[0]), family, Core.clone(matched["$2"]), Core.clone(matched["$3"]))));
     }
     sup() {
         const goal = this.goal.shift();
@@ -2648,7 +2970,15 @@ export class Assist {
                 // alpha conversion
                 const exset = Core.getFreeVars(ast.nodes[1]);
                 const nn = Core.getNewName(Core.getNewName(ast.name, freevarInDst), exset);
-                this.replaceFreeVar(ast.nodes[1], ast.name, wrapVar(nn));
+                // Keep the renamed occurrences attached to this binder.  The
+                // expansion beta reducer works on checked ASTs, so replacing
+                // by an id-less variable would turn the occurrences into free
+                // variables as soon as the result is rechecked.
+                this.replaceFreeVar(ast.nodes[1], ast.name, {
+                    type: "var",
+                    name: nn,
+                    bondVarId: ast.bondVarId
+                });
                 ast.name = nn;
             }
             this.replaceFreeVar(ast.nodes[0], src, dst, freevarInDst);

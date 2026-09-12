@@ -40,8 +40,13 @@ assert.match(html, /id="tactic-div" class="proof-assistant hide"/,
 assert.match(css, /\.proof-assistant\s*\{[\s\S]*min-width:\s*0/);
 assert.match(css, /\.proof-text-mode\s*\{[\s\S]*grid-template-columns/);
 assert.match(css, /\.proof-text-output\s*\{[\s\S]*display:\s*flex/);
-assert.match(css, /\.proof-text-output \.fs-proof-goal,[\s\S]*\.proof-text-output \.proof-text-goal/);
+assert.match(css, /\.proof-goal\s*\{[\s\S]*overflow-wrap:\s*anywhere/,
+    "button and text modes share the same goal styles");
 assert.match(css, /@media\s*\(max-width:\s*700px\)[\s\S]*\.proof-text-mode/);
+assert.match(css, /\.proof-text-actions\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
+    "both script actions must remain visible on narrow screens");
+assert.match(css, /\.proof-text-recommendations\s*\{[^}]*grid-column:\s*1 \/ -1/,
+    "recommendations must not stretch the first mobile action column");
 assert.match(css, /@media\s*\(max-width:\s*700px\)[\s\S]*#fs-proof-target/);
 assert.match(css, /@media\s*\(max-width:\s*700px\)[\s\S]*#tactic-input/);
 assert.doesNotMatch(css, /#9b7bb5|border-left:\s*2px\s+solid/,

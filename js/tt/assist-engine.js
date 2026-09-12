@@ -11,7 +11,7 @@ const commandMethods = new Set([
     "construct", "assumption", "simp", "simpa", "eq", "exact", "apply",
     "specialize", "rw", "rwb", "trunc", "rfl", "simpl", "fnext", "sup",
     "obtain", "have", "hyp", "induction", "destruct", "use", "ex", "left",
-    "right", "case", "expand"
+    "right", "case", "expand", "clear", "revert", "refine"
 ]);
 export const TT_ASSIST_COMMANDS = [...commandMethods]
     .map(name => name === "construct" ? "constructor" : name).concat("qed");
@@ -22,7 +22,8 @@ export function isTTAssistTacticUnlocked(name, unlocked) {
             || unlocked.has("hyp") && unlocked.has("destruct");
     }
     const aliases = {
-        have: "hyp", use: "ex", rcases: "destruct", cases: "destruct", induction: "destruct"
+        have: "hyp", use: "ex", rcases: "destruct", cases: "destruct", induction: "destruct",
+        intros: "intro", clear: "intro", revert: "intro", refine: "apply"
     };
     return !unlocked || unlocked.has(name) || !!aliases[name] && unlocked.has(aliases[name]);
 }
@@ -40,6 +41,8 @@ export class TTAssistEngine {
     targetSource = "";
     history = [];
     options = null;
+    goalIds = new WeakMap();
+    nextGoalId = 0;
     constructor(engine = new TTCoreEngine()) {
         this.engine = engine;
     }
@@ -88,10 +91,17 @@ export class TTAssistEngine {
         this.assist = null;
         this.targetSource = "";
         this.history = [];
+        this.goalIds = new WeakMap();
+        this.nextGoalId = 0;
     }
     createAssist() {
         if (!this.targetSource)
             throw new Error(TR("空表达式"));
+        // A replay is a new proof-session instance. Reset the deterministic
+        // counter so undo/history restoration keeps the same IDs. The GUI's
+        // contextKey separates identical IDs belonging to different proofs.
+        this.goalIds = new WeakMap();
+        this.nextGoalId = 0;
         Assist.disableMultipleApply = this.options?.disableMultipleApply ?? true;
         Assist.disableDestructConds = this.options?.disableDestructConds ?? true;
         Assist.disableDestructEq = this.options?.disableDestructEq ?? true;
@@ -115,6 +125,7 @@ export class TTAssistEngine {
         if (!isProofTargetSort(type))
             throw new Error(TR("不是命题类型"));
         this.assist = new Assist(this.engine.core, target);
+        this.registerGoals();
         this.history = [];
     }
     /** Rebuild a session from commands without consulting UI recommendations. */
@@ -187,6 +198,16 @@ export class TTAssistEngine {
         }
         const tactic = assist[tacticName];
         tactic.call(assist, parameter);
+        this.registerGoals();
+    }
+    registerGoals() {
+        if (!this.assist)
+            return;
+        for (const goal of this.assist.goal) {
+            if (!this.goalIds.has(goal)) {
+                this.goalIds.set(goal, `goal-${this.nextGoalId++}`);
+            }
+        }
     }
     snapshot() {
         const assist = this.requireAssist();
@@ -232,7 +253,8 @@ export class TTAssistEngine {
                     id
                 ]),
                 type: this.presentAst(surfaceType, explicitAtNames, localNames),
-                holeName: goal.ast.name
+                holeName: goal.ast.name,
+                id: this.goalIds.get(goal)
             };
         });
         return {

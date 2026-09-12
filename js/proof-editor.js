@@ -2,8 +2,8 @@ const PROOF_COMMANDS = new Set([
     "intro", "intros", "rintro", "induction", "destruct", "cases", "rcases", "ex", "case", "exact", "apply", "specialize", "rw", "rwb", "nth_rw",
     "change", "show",
     "simpl", "simp", "simpa", "rfl", "expand", "fnext", "eq", "sup", "qed", "have", "use", "obtain",
-    "revert", "assumption", "constructor", "left", "right", "symm", "contradiction", "by_contra",
-    "by_cases", "contrapose", "tauto"
+    "clear", "revert", "assumption", "constructor", "left", "right", "symm", "contradiction", "by_contra",
+    "by_cases", "contrapose", "tauto", "refine"
 ]);
 function escapeHtml(value) {
     return value.replace(/[&<>"']/g, character => ({
@@ -33,7 +33,7 @@ export function highlightProofScript(source) {
         let output = "";
         let offset = 0;
         let firstToken = true;
-        const tokenPattern = /--.*$|\?\?|[_]|@[A-Za-z_$][\w$]*|\$[A-Za-z0-9_$?]*|[A-Za-z_][\w!?-]*|[()[\]{},.:=|<>~*&+\-/\\▪→≃≡]/gu;
+        const tokenPattern = /--.*$|\?\?|[?]_+|[_]|@[A-Za-z_$][\w$]*|\$[A-Za-z0-9_$?]*|[A-Za-z_][\w!?-]*|[()[\]{},.:=|<>~*&+\-/\\▪→≃≡]/gu;
         for (const match of line.matchAll(tokenPattern)) {
             const index = match.index ?? 0;
             output += escapeHtml(line.slice(offset, index));
@@ -46,7 +46,7 @@ export function highlightProofScript(source) {
             if (firstToken && PROOF_COMMANDS.has(token)) {
                 output += tokenSpan("command", token);
             }
-            else if (token === "_" || token === "??" || token.startsWith("$")) {
+            else if (token === "_" || token === "??" || /^\?_+$/u.test(token) || token.startsWith("$")) {
                 output += tokenSpan("hole", token);
             }
             else if (/^[A-Za-z_@]/u.test(token)) {

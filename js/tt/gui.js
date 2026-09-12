@@ -17,7 +17,9 @@ import { canReuseTheoremResultOnBlur, findEarliestPendingTheorem, isKnownTheorem
 import { TheoremWorkspace } from "./theorem-workspace.js";
 import { applyWorkspaceLayout, createWorkspaceDragHandle, syncWorkspaceDomOrder } from "./theorem-workspace-view.js";
 import { TTProofSessionStore } from "./proof-sessions.js";
-import { installTypeTheorySymbolAliases, TYPE_THEORY_SYMBOL_ALIASES } from "./symbol-aliases.js";
+import { expandTypeTheoryAliasesInSurface, installTypeTheorySymbolAliases, TYPE_THEORY_SYMBOL_ALIASES } from "./symbol-aliases.js";
+import { clearProofState, renderProofState } from "../proof-state.js";
+import { installProofFullscreen } from "../proof-fullscreen.js";
 import { flattenHitPathLevels, hitPathLevelsFromCanonicalOrLegacy } from "./hit-path-levels.js";
 const parser = new ASTParser;
 const constructors = new Set();
@@ -143,7 +145,7 @@ export class TTGui {
     theoremItemSequence = 0;
     restoringTheoremItems = false;
     theoremDragger = new ListDragger(this.inhabitList);
-    // tactic mode: tactic-begin for waiting clicking theorem
+    // An active proof stores its target followed by accepted tactic commands.
     mode = null;
     // "_" for infered, "@" for original
     inferDisplayMode = "_";
@@ -190,7 +192,6 @@ export class TTGui {
     /** Prevent autosave from replacing a stored draft with a replay prefix. */
     tacticSessionReplayId = null;
     tacticCaptureBlockedSessionId = null;
-    tacticSelectingTarget = false;
     tacticTargetInput = null;
     tacticScopeFolderId = null;
     tacticScopeExplicit = false;
@@ -374,6 +375,8 @@ export class TTGui {
         });
         document.getElementById("tt-add-theorem")?.addEventListener("click", () => this.updateInhabitList());
         document.getElementById("tt-add-folder")?.addEventListener("click", () => this.addTheoremFolder());
+        this.initTacticTargetInput();
+        installProofFullscreen(document.getElementById("tactic-div"), document.getElementById("tactic-fullscreen"));
         const input = document.getElementById("tactic-input");
         installTypeTheorySymbolAliases(input);
         installProofCompletion(input, () => this.getTacticCompletionContext());
@@ -469,6 +472,54 @@ export class TTGui {
         });
         this.renderTacticSessionTabs();
     }
+    initTacticTargetInput() {
+        const target = document.getElementById("tactic-target");
+        const begin = document.getElementById("tactic-target-begin");
+        if (!target || !begin)
+            return;
+        installTypeTheorySymbolAliases(target);
+        let composing = false;
+        target.addEventListener("compositionstart", () => composing = true);
+        target.addEventListener("compositionend", () => composing = false);
+        target.addEventListener("input", () => {
+            document.getElementById("tactic-target-error").innerText = "";
+        });
+        target.addEventListener("keydown", event => {
+            if (composing || event.isComposing || event.keyCode === 229 || event.key !== "Enter")
+                return;
+            event.preventDefault();
+            void this.startTacticFromInput();
+        });
+        begin.addEventListener("click", () => void this.startTacticFromInput());
+    }
+    async startTacticFromInput() {
+        if (this.tacticBusy)
+            return;
+        const input = document.getElementById("tactic-target");
+        const error = document.getElementById("tactic-target-error");
+        if (!input || !error)
+            return;
+        error.innerText = "";
+        try {
+            const target = expandTypeTheoryAliasesInSurface(input.value).trim();
+            if (!target)
+                throw new Error(TR("请输入待证命题"));
+            // Reject incomplete input before switching away from an existing proof.
+            parser.parseSurface(target);
+            input.value = target;
+            await this.executeTactic(target);
+            if (this.assistSnapshot && this.mode instanceof Array) {
+                document.getElementById(this.tacticTextMode ? "tactic-script" : "tactic-input")?.focus();
+            }
+            else {
+                input.focus();
+            }
+        }
+        catch (reason) {
+            error.innerText = this.formatTacticError(reason);
+            input.focus();
+        }
+    }
     setLastGateTarget(target) {
         if (!theoremPreviewNeedsRefresh(target, this.lastGateTarget, this.definitionRevision, this.gatePreviewRevision, this.theoremStructureRevision, this.gatePreviewStructureRevision))
             return;
@@ -552,34 +603,37 @@ export class TTGui {
         }
     }
     updateTacticStateDisplay(snapshot, statediv) {
-        if (!snapshot.goals.length) {
-            this.addSpan(statediv, TR("无目标，请输入qed结束"));
-        }
-        for (let count = snapshot.goals.length - 1; count >= 0; count--) {
-            const g = snapshot.goals[count];
-            statediv.appendChild(document.createElement("hr"));
-            const goalDiv = document.createElement("div");
-            goalDiv.className = "proof-text-goal";
-            const scope = g.context.map(e => ({ type: "var", name: e[0], bondVarId: e[2] }));
-            for (const [k, v, id] of g.context) {
-                const ast = {
-                    type: ":", name: "", nodes: [{ type: "var", name: k }, v]
+        const definitionEnd = this.getInhabitatArray().length;
+        renderProofState(statediv, {
+            scope: "tt",
+            contextKey: this.proofSessions.activeId ?? "",
+            error: document.getElementById(this.tacticTextMode ? "tactic-script-error" : "tactic-errmsg"),
+            expected: () => this.ast2HTML("", snapshot.theorem, [], [], definitionEnd),
+            completedText: TR("无目标，请输入qed结束"),
+            goals: snapshot.goals.map(g => {
+                const scope = g.context.map(e => ({ type: "var", name: e[0], bondVarId: e[2] }));
+                return {
+                    id: g.id ?? g.holeName,
+                    hypotheses: g.context.slice().reverse().map(([name, type]) => ({
+                        name,
+                        isType: type.type === "var" && /^U(?:@.*)?$/.test(type.name)
+                            || type.type === "apply" && type.nodes[0].type === "var"
+                                && type.nodes[0].name === "U",
+                        content: () => this.ast2HTML("", type, scope, g.context, definitionEnd)
+                    })),
+                    target: () => this.ast2HTML("", g.type, scope, g.context, definitionEnd)
                 };
-                ast.nodes[0].checked = ast.nodes[1];
-                goalDiv.prepend(document.createElement("br"));
-                goalDiv.prepend(this.ast2HTML("", ast, scope, g.context, this.getInhabitatArray().length));
-            }
-            goalDiv.appendChild(document.createElement("br"));
-            this.addSpan(goalDiv, count ? TR("目标") + (count) + TR("：") : TR("当前目标："));
-            goalDiv.appendChild(this.ast2HTML("", g.type, scope, g.context, this.getInhabitatArray().length));
-            if (count)
-                goalDiv.classList.add("proof-text-goal-secondary");
-            goalDiv.appendChild(document.createElement("br"));
-            statediv.appendChild(goalDiv);
-        }
+            })
+        });
     }
     setTacticBusy(busy) {
         this.tacticBusy = busy;
+        const target = document.getElementById("tactic-target");
+        const begin = document.getElementById("tactic-target-begin");
+        if (target)
+            target.disabled = busy;
+        if (begin)
+            begin.disabled = busy;
         // Keep the original assistant's controls interactive. The internal
         // flag still prevents overlapping async commands.
     }
@@ -714,7 +768,7 @@ export class TTGui {
         add.className = "proof-session-add";
         add.textContent = "+";
         add.title = TR("新建证明页");
-        add.addEventListener("click", () => this.beginTacticTargetSelection(true));
+        add.addEventListener("click", () => this.beginTacticTargetInput(true));
         tabs.appendChild(add);
         tabs.ondragover = event => {
             if (event.target.closest?.(".proof-session-tab"))
@@ -739,7 +793,7 @@ export class TTGui {
             return;
         void this.activateTacticSession(id);
     }
-    beginTacticTargetSelection(createPage = false) {
+    beginTacticTargetInput(createPage = false) {
         if (this.tacticBusy)
             return;
         this.captureActiveTacticSession();
@@ -747,9 +801,7 @@ export class TTGui {
             this.proofSessions.openBlank();
         }
         this.clearTacticRuntime();
-        this.tacticSelectingTarget = true;
-        this.mode = "tactic-begin";
-        document.getElementById("tactic-hint").innerText = TR("请在定理列表中点选待证命题");
+        document.getElementById("tactic-target")?.focus();
         this.renderTacticSessionTabs();
         this.onStateChange();
     }
@@ -844,10 +896,11 @@ export class TTGui {
         session = this.proofSessions.session(id) ?? session;
         this.renderTacticSessionTabs();
         this.onStateChange();
+        const targetInput = document.getElementById("tactic-target");
+        if (targetInput)
+            targetInput.value = session.target;
         if (this.isBlankTacticSession(session)) {
-            this.tacticSelectingTarget = true;
-            this.mode = "tactic-begin";
-            document.getElementById("tactic-hint").innerText = TR("请在定理列表中点选待证命题");
+            targetInput?.focus();
             return;
         }
         const targetItem = session.kind === "theorem" && !session.detached
@@ -915,7 +968,7 @@ export class TTGui {
             this.tacticCaptureBlockedSessionId = id;
             if (snapshot)
                 this.renderAssistSnapshot(snapshot);
-            document.getElementById("tactic-errmsg").innerText = failedAt === null
+            document.getElementById(snapshot ? "tactic-errmsg" : "tactic-target-error").innerText = failedAt === null
                 ? this.formatTacticError(error)
                 : `第 ${failedAt} 行：${this.formatTacticError(error)}`;
         }
@@ -1001,13 +1054,13 @@ export class TTGui {
                 : "qed 未就绪：仍有未完成的证明目标";
             errorDiv.appendChild(done);
         }
-        state.replaceChildren();
         this.updateTacticStateDisplay(snapshot, state);
         this.renderTacticTextRecommendations(snapshot.tactics);
     }
     toggleTacticTextMode() {
         if (!(this.mode instanceof Array)) {
-            document.getElementById("tactic-errmsg").innerText = TR("请在定理列表中点选待证命题");
+            document.getElementById("tactic-target-error").innerText = TR("请先输入待证命题并启动证明");
+            document.getElementById("tactic-target")?.focus();
             return;
         }
         this.tacticTextMode = !this.tacticTextMode;
@@ -1167,6 +1220,9 @@ export class TTGui {
             if (this.assistSnapshot) {
                 this.renderTacticTextSnapshot(this.assistSnapshot, blockError ? blockError.message : String(error), errorLine);
             }
+            else {
+                document.getElementById("tactic-target-error").innerText = this.formatTacticError(error);
+            }
             this.renderTacticSessionTabs();
             this.onStateChange();
         }
@@ -1211,7 +1267,6 @@ export class TTGui {
         }
         this.tacticScript = "";
         this.tacticScriptDirty = false;
-        this.tacticSelectingTarget = false;
         this.mode = null;
         this.assistSnapshot = null;
         this.tacticDefinitionsRevision = -1;
@@ -1223,7 +1278,20 @@ export class TTGui {
         document.getElementById("tactic-autofill").innerHTML = "";
         document.getElementById("tactic-hint").innerHTML = "";
         document.getElementById("tactic-errmsg").innerText = "";
-        document.getElementById("tactic-state").innerHTML = "";
+        document.getElementById("tactic-history")?.replaceChildren();
+        clearProofState(document.getElementById("tactic-state"));
+        const scriptState = document.getElementById("tactic-script-state");
+        if (scriptState)
+            clearProofState(scriptState);
+        const scriptError = document.getElementById("tactic-script-error");
+        if (scriptError)
+            scriptError.replaceChildren();
+        const targetInput = document.getElementById("tactic-target");
+        if (targetInput)
+            targetInput.value = "";
+        const targetError = document.getElementById("tactic-target-error");
+        if (targetError)
+            targetError.innerText = "";
         document.getElementById("tactic-remove").classList.add("hide");
         document.getElementById("tactic-begin").classList.add("hide");
         document.getElementById("tactic-clear").classList.add("hide");
@@ -1263,7 +1331,7 @@ export class TTGui {
         this.captureActiveTacticSession();
         const activeId = this.proofSessions.activeId;
         if (!activeId) {
-            this.beginTacticTargetSelection();
+            this.beginTacticTargetInput();
             return;
         }
         this.proofSessions.reset(activeId);
@@ -1272,9 +1340,7 @@ export class TTGui {
         if (this.tacticCaptureBlockedSessionId === activeId)
             this.tacticCaptureBlockedSessionId = null;
         this.clearTacticRuntime();
-        this.tacticSelectingTarget = true;
-        this.mode = "tactic-begin";
-        document.getElementById("tactic-hint").innerText = TR("请在定理列表中点选待证命题");
+        document.getElementById("tactic-target")?.focus();
         this.renderTacticSessionTabs();
         this.onStateChange();
     }
@@ -1388,7 +1454,7 @@ export class TTGui {
     }
     async ensureAssistSessionCurrent() {
         if (!(this.mode instanceof Array))
-            throw new Error(TR("请在定理列表中点选待证命题"));
+            throw new Error(TR("请先输入待证命题并启动证明"));
         const workerSessionCurrent = !this.assistWorker
             || (this.assistWorkerSessionReady && this.assistWorkerGeneration === this.assistWorker.generation);
         if (this.tacticDefinitionsRevision === this.definitionRevision
@@ -1460,8 +1526,10 @@ export class TTGui {
         this.renderTacticScopeOptions();
         const hint = document.getElementById("tactic-hint");
         const statediv = document.getElementById("tactic-state");
+        const history = document.getElementById("tactic-history") ?? statediv;
         hint.innerHTML = "";
-        statediv.innerHTML = "";
+        if (history !== statediv)
+            history.replaceChildren();
         if (this.mode instanceof Array) {
             for (const command of this.mode.slice(1)) {
                 // Keep history text identical to the command accepted by the
@@ -1469,7 +1537,7 @@ export class TTGui {
                 // with a selected line, so pasting it back made a valid tactic
                 // look like an invalid command. Each blocked span is already
                 // a visual line on its own.
-                this.addSpan(statediv, command).className = "blocked";
+                this.addSpan(history, command).className = "blocked";
             }
         }
         this.updateTacticStateDisplay(snapshot, statediv);
@@ -3722,17 +3790,11 @@ export class TTGui {
             });
         };
         div.addEventListener("click", ev => {
-            if ((this.mode === "tactic-begin" || this.tacticSelectingTarget)
-                && !this.isTheoremInputDisabled(input)) {
-                this.executeTactic(input.value, input);
-            }
-            else {
-                input["editingCanReuseRenderedResult"] = true;
-                this.suspendTheoremTypeTag(input);
-                input.classList.remove("hide");
-                input.focus();
-                div.classList.add("hide");
-            }
+            input["editingCanReuseRenderedResult"] = true;
+            this.suspendTheoremTypeTag(input);
+            input.classList.remove("hide");
+            input.focus();
+            div.classList.add("hide");
         });
         button.classList.add("inhabitat-modify");
         button.innerText = "+";
@@ -4066,7 +4128,6 @@ export class TTGui {
         else {
             session = this.proofSessions.openManual({ target }, true);
         }
-        this.tacticSelectingTarget = false;
         this.renderTacticSessionTabs();
         this.onStateChange();
         await this.activateTacticSession(session.id, false);
@@ -4075,7 +4136,7 @@ export class TTGui {
         const input = document.getElementById("tactic-input");
         const hint = document.getElementById("tactic-hint");
         if (!this.mode) {
-            this.beginTacticTargetSelection();
+            this.beginTacticTargetInput();
             return;
         }
         if (!(this.mode instanceof Array) || this.tacticBusy)

@@ -56,6 +56,14 @@ function isAliasBoundary(source, start) {
     // boundary prevents `Q\a` and `Q\and` from becoming aliases.
     return start === 0 || !isNameChar(previous);
 }
+function isCaretAliasBoundary(source, start) {
+    let slashes = 0;
+    for (let cursor = start - 1; cursor >= 0 && source[cursor] === "\\"; cursor--)
+        slashes++;
+    // An explicit Space is unambiguous user input, so permit aliases directly
+    // after an identifier while retaining escaped-backslash protection.
+    return slashes % 2 === 0;
+}
 function quotedEnd(source, start, quote) {
     let cursor = start + 1;
     while (cursor < source.length) {
@@ -117,7 +125,7 @@ export function expandInferenceAliasAtCaret(value, selectionStart, selectionEnd 
     const caret = Math.max(0, Math.min(value.length, selectionStart));
     const beforeCaret = value.slice(0, caret);
     const match = /\\([A-Za-z][A-Za-z0-9]*)$/u.exec(beforeCaret);
-    if (!match || match.index === undefined || !isAliasBoundary(beforeCaret, match.index))
+    if (!match || match.index === undefined || !isCaretAliasBoundary(beforeCaret, match.index))
         return null;
     const symbol = inferenceSymbolForAlias(match[0]);
     if (!symbol)

@@ -1063,6 +1063,19 @@ function flattenApplication(ast) {
     }
     return { head, args };
 }
+function inferredPairMotive(ast, state) {
+    if (ast.type !== "apply")
+        return null;
+    const { head, args } = flattenApplication(ast);
+    if (head?.type !== "var" || head.name !== "pair" || head.bondVarId
+        || args.length !== 3 || args[0]?.type !== "L")
+        return null;
+    const motive = args[0];
+    return motive.nodes?.length === 2 && motive.nodes.every(node => isLocalMeta(node, state)
+        && state.inputMetas.has(node.name)
+        && !state.inputMetaSurfaceNames.has(node.name)
+        && !state.metaSolutions.has(node.name)) ? motive : null;
+}
 function naturalLiteralValue(ast) {
     if (ast?.type !== "var" || ast.bondVarId
         || !/^(0|[1-9][0-9]*)$/.test(ast.name ?? ""))
@@ -1168,6 +1181,16 @@ function reduceBetaHead(ast) {
     return argumentIndex < args.length
         ? makeApplication(reduced, ...args.slice(argumentIndex).map(cloneSyntax))
         : reduced;
+}
+function reduceBetaSpine(ast, budget = 32) {
+    let current = ast;
+    for (let index = 0; index < budget; index++) {
+        const next = reduceBetaHead(current);
+        if (next === current)
+            return current;
+        current = next;
+    }
+    return current;
 }
 /** Resolve beta redexes introduced by local-meta substitution without
  * unfolding named definitions. Full kernel normalization is needlessly
@@ -1478,7 +1501,8 @@ export class SemanticNbeTypeChecker {
         if (containsForeignMetavariable(preparedExpected, prepared.value.state)) {
             return unsupported("metavariable");
         }
-        const synthesized = isLocalMeta(prepared.value.ast, prepared.value.state)
+        const synthesized = (isLocalMeta(prepared.value.ast, prepared.value.state)
+            || inferredPairMotive(prepared.value.ast, prepared.value.state))
             ? this.checkTermAgainstExpected(prepared.value.ast, preparedExpected, prepared.value.context, prepared.value.state)
             : this.synthesize(prepared.value.ast, prepared.value.context, prepared.value.state);
         if (synthesized.status !== "success")
@@ -2096,6 +2120,35 @@ export class SemanticNbeTypeChecker {
             : resolvedExpected.type === "P" || resolvedExpected.type === "->"
                 ? resolvedExpected
                 : this.kernel.tryWhnf(resolvedExpected, context, kernelOptions(state));
+        const pairMotive = expectedWhnf?.type === "S"
+            ? inferredPairMotive(ast, state)
+            : null;
+        if (pairMotive) {
+            // Comma syntax supplies an anonymous family template. Elaborate
+            // it from the Sigma target before checking either component, then
+            // let ordinary constructor synthesis/conversion validate the pair.
+            const motiveDomain = cloneSyntax(expectedWhnf.nodes[0]);
+            const motiveBody = instantiateBinder(expectedWhnf.nodes[1], expectedWhnf.name, expectedWhnf.bondVarId, makeVariable(pairMotive.name, pairMotive.bondVarId));
+            // Other constraints can still refer to the template's old metas.
+            // Solve them in their lexical scopes before replacing the nodes.
+            const bodyContext = prependContext([pairMotive.name, motiveDomain, pairMotive.bondVarId], context);
+            for (const [meta, value, scope] of [
+                [pairMotive.nodes[0], motiveDomain, context],
+                [pairMotive.nodes[1], motiveBody, bodyContext]
+            ]) {
+                if (!ensureLocalMetaIsType(meta, scope, state))
+                    return unsupported("metavariable");
+                const bound = this.bindMeta(meta.name, value, scope, state);
+                if (bound === "budget-exhausted")
+                    return unsupported("budget-exhausted");
+                if (bound === "unsupported")
+                    return unsupported("conversion-unsupported");
+                if (bound === "unequal")
+                    return invalid("argument-type-mismatch");
+            }
+            pairMotive.nodes = pairMotive.nodes.map(node => resolveMetas(node, state));
+            state.hadElaborationChanges = true;
+        }
         if (ast.type === "L" && (expectedWhnf?.type === "P" || expectedWhnf?.type === "->")) {
             const expectedDomain = expectedWhnf.nodes?.[0];
             const annotatedDomain = ast.nodes?.[0];
@@ -2159,13 +2212,14 @@ export class SemanticNbeTypeChecker {
             return success(cloneSyntax(resolvedExpected));
         }
         if (isLocalMeta(ast, state)) {
+            const expectedType = reduceBetaSpine(resolvedExpected);
             if (!state.metaExpectedTypes.has(ast.name)) {
-                recordMetaExpectedType(ast.name, expected, state);
+                recordMetaExpectedType(ast.name, expectedType, state);
                 state.metaAllowedContextIds.set(ast.name, new Set(context.map(([, , id]) => id).filter(validId)));
             }
             if (state.annotateTerm)
-                ast.checked = cloneSyntax(expected);
-            return success(cloneSyntax(expected));
+                ast.checked = cloneSyntax(expectedType);
+            return success(cloneSyntax(expectedType));
         }
         const actual = this.synthesize(ast, context, state);
         if (actual.status !== "success") {

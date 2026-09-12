@@ -22,6 +22,7 @@ const getElement = id => {
             innerText: "",
             value: "",
             focus() { },
+            replaceChildren() { },
             parentElement: { scrollTo() { } }
         });
     }

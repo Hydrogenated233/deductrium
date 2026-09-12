@@ -1,5 +1,5 @@
 import { TR } from "../lang.js";
-import { Assist } from "./assist.js";
+import { Assist, type Goal } from "./assist.js";
 import { AST, ASTParser } from "./astparser.js";
 import { Context, Core } from "./core.js";
 import { TTCoreConfig, TTCoreEngine } from "./engine.js";
@@ -12,7 +12,7 @@ const commandMethods = new Set([
     "construct", "assumption", "simp", "simpa", "eq", "exact", "apply",
     "specialize", "rw", "rwb", "trunc", "rfl", "simpl", "fnext", "sup",
     "obtain", "have", "hyp", "induction", "destruct", "use", "ex", "left",
-    "right", "case", "expand"
+    "right", "case", "expand", "clear", "revert", "refine"
 ]);
 export const TT_ASSIST_COMMANDS = [...commandMethods]
     .map(name => name === "construct" ? "constructor" : name).concat("qed");
@@ -24,7 +24,8 @@ export function isTTAssistTacticUnlocked(name: string, unlocked?: ReadonlySet<st
             || unlocked.has("hyp") && unlocked.has("destruct");
     }
     const aliases: Record<string, string> = {
-        have: "hyp", use: "ex", rcases: "destruct", cases: "destruct", induction: "destruct"
+        have: "hyp", use: "ex", rcases: "destruct", cases: "destruct", induction: "destruct",
+        intros: "intro", clear: "intro", revert: "intro", refine: "apply"
     };
     return !unlocked || unlocked.has(name) || !!aliases[name] && unlocked.has(aliases[name]);
 }
@@ -51,6 +52,8 @@ export type TTAssistGoalSnapshot = {
     context: Context;
     type: AST;
     holeName: string;
+    /** Stable for this proof session, independent of the current goal queue position. */
+    id?: string;
 };
 
 export type TTAssistSnapshot = {
@@ -73,6 +76,8 @@ export class TTAssistEngine {
     private targetSource = "";
     private history: string[] = [];
     private options: TTAssistOptions = null;
+    private goalIds = new WeakMap<Goal, string>();
+    private nextGoalId = 0;
 
     constructor(engine = new TTCoreEngine()) {
         this.engine = engine;
@@ -126,10 +131,17 @@ export class TTAssistEngine {
         this.assist = null;
         this.targetSource = "";
         this.history = [];
+        this.goalIds = new WeakMap();
+        this.nextGoalId = 0;
     }
 
     private createAssist() {
         if (!this.targetSource) throw new Error(TR("空表达式"));
+        // A replay is a new proof-session instance. Reset the deterministic
+        // counter so undo/history restoration keeps the same IDs. The GUI's
+        // contextKey separates identical IDs belonging to different proofs.
+        this.goalIds = new WeakMap();
+        this.nextGoalId = 0;
         Assist.disableMultipleApply = this.options?.disableMultipleApply ?? true;
         Assist.disableDestructConds = this.options?.disableDestructConds ?? true;
         Assist.disableDestructEq = this.options?.disableDestructEq ?? true;
@@ -152,6 +164,7 @@ export class TTAssistEngine {
         // so values such as `@0` are still rejected as proof targets.
         if (!isProofTargetSort(type)) throw new Error(TR("不是命题类型"));
         this.assist = new Assist(this.engine.core, target);
+        this.registerGoals();
         this.history = [];
     }
 
@@ -219,6 +232,16 @@ export class TTAssistEngine {
         }
         const tactic = assist[tacticName];
         tactic.call(assist, parameter);
+        this.registerGoals();
+    }
+
+    private registerGoals() {
+        if (!this.assist) return;
+        for (const goal of this.assist.goal) {
+            if (!this.goalIds.has(goal)) {
+                this.goalIds.set(goal, `goal-${this.nextGoalId++}`);
+            }
+        }
     }
 
     private snapshot(): TTAssistSnapshot {
@@ -281,7 +304,8 @@ export class TTAssistEngine {
                     id
                 ]),
                 type: this.presentAst(surfaceType, explicitAtNames, localNames),
-                holeName: goal.ast.name
+                holeName: goal.ast.name,
+                id: this.goalIds.get(goal)
             } as TTAssistGoalSnapshot;
         });
 
