@@ -87,7 +87,7 @@ npm run package
 
 ### GitHub Release 自动打包
 
-`.github/workflows/release.yml` 会在推送 `hott-v*` 标签时自动运行测试、构建发布包并创建 GitHub Release：
+`.github/workflows/release.yml` 会在推送 `hott-v*` 标签时自动执行类型检查、构建、发布包内容检查和进程冒烟测试，然后创建 GitHub Release。完整回归在发布前由本地运行 `npm test`；workflow 通过 `npm run package -- -SkipRegressionTests` 跳过重复执行，本地默认的 `npm run package` 仍包含完整回归：
 
 ```powershell
 git tag hott-v2026.08.16

@@ -65,7 +65,7 @@ The script runs regression tests, type-checks, and builds the project. It then s
 
 ### Automated GitHub Releases
 
-`.github/workflows/release.yml` runs the tests, builds the archive, and creates a GitHub Release whenever a `hott-v*` tag is pushed:
+`.github/workflows/release.yml` type-checks, builds, validates the package contents, runs the packaged process smoke test, and creates a GitHub Release whenever a `hott-v*` tag is pushed. Run the full regression suite locally with `npm test` before releasing; the workflow uses `npm run package -- -SkipRegressionTests` to avoid repeating it. The default local `npm run package` still includes the full suite:
 
 ```powershell
 git tag hott-v2026.08.16

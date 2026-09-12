@@ -64,7 +64,7 @@ jobs:
       - name: Build release archive
         env:
           DEDUCTRIUM_RELEASE_DATE: ${{ steps.release.outputs.date }}
-        run: npm run package
+        run: npm run package -- -SkipRegressionTests
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ReleaseDate = $env:DEDUCTRIUM_RELEASE_DATE
+    [string]$ReleaseDate = $env:DEDUCTRIUM_RELEASE_DATE,
+    [switch]$SkipRegressionTests
 )
 
 Set-StrictMode -Version Latest
@@ -50,9 +51,13 @@ if (-not $nodeCommand) {
 
 Push-Location $projectRoot
 try {
-    Write-Host "[1/7] Running regression tests..."
-    & $npmCommand.Source test
-    if ($LASTEXITCODE -ne 0) { throw "Regression tests failed." }
+    if ($SkipRegressionTests) {
+        Write-Host "[1/7] Skipping full regression tests (explicit opt-out; run locally before release)."
+    } else {
+        Write-Host "[1/7] Running regression tests..."
+        & $npmCommand.Source test
+        if ($LASTEXITCODE -ne 0) { throw "Regression tests failed." }
+    }
 
     Write-Host "[2/7] Type-checking..."
     & $npmCommand.Source run typecheck

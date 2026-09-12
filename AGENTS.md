@@ -137,9 +137,12 @@ npm run package
 
 - GitHub Pages deployment is intentionally not used. Releases are built by
   `.github/workflows/release.yml` on `hott-v*` tags or manual dispatch. The
-  workflow resolves the date in China Standard Time, runs tests/typecheck/build,
-  invokes `npm run package`, uploads the ZIP, and creates or updates the GitHub
-  Release for that tag.
+  workflow resolves the date in China Standard Time and invokes
+  `npm run package -- -SkipRegressionTests`: typecheck, build, package-content
+  validation, and the packaged process smoke test remain required. Run the full
+  regression suite locally on the commit being released before pushing a tag
+  or dispatching the workflow. Default local `npm run package` still runs it.
+  The workflow uploads the ZIP and creates or updates the GitHub Release.
 - The package script must include only runtime files and `js/`; it must not
   include `src/` or `node_modules/`. Verify the generated ZIP and SHA256 before
   reporting a release.

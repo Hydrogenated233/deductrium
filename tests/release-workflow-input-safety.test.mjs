@@ -5,6 +5,14 @@ import { fileURLToPath } from "node:url";
 
 const workflowUrl = new URL("../.github/workflows/release.yml", import.meta.url);
 const workflow = await readFile(workflowUrl, "utf8");
+const packageScriptUrl = new URL("../scripts/package-release.ps1", import.meta.url);
+const packageScript = await readFile(packageScriptUrl, "utf8");
+assert.match(workflow, /run: npm run package -- -SkipRegressionTests\s*$/m,
+    "release workflow must explicitly skip the locally executed full regression suite");
+assert.match(packageScript, /\[switch\]\$SkipRegressionTests\s*[,)]/,
+    "local packaging must keep full regressions enabled by default");
+assert.match(packageScript, /if \(\$SkipRegressionTests\) \{[^}]*\} else \{\s*Write-Host[^\n]*\s*& \$npmCommand\.Source test\s*if \(\$LASTEXITCODE -ne 0\) \{ throw "Regression tests failed\."/,
+    "only the full regression step may be skipped, and local failures must abort packaging");
 const startCommand = await readFile(new URL("../start.cmd", import.meta.url), "utf8");
 assert.match(startCommand, /node server\.mjs/);
 const stepStart = workflow.indexOf("      - name: Resolve release metadata");
@@ -28,7 +36,6 @@ assert.match(script, /hott-v\(\?<date>\\d\{4\}\\\.\\d\{2\}\\\.\\d\{2\}\)/,
     "a date-like explicit tag no longer controls the archive date");
 
 if (process.platform === "win32") {
-    const packageScriptUrl = new URL("../scripts/package-release.ps1", import.meta.url);
     const parseResult = spawnSync("powershell.exe", [
         "-NoProfile",
         "-NonInteractive",
