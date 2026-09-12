@@ -2706,8 +2706,23 @@ export class SemanticNbeTypeChecker {
             if (reduced)
                 candidate = reduced;
         }
-        if (!this.hasElaborationDefinition(candidate, targetHeadName))
+        if (!this.hasElaborationDefinition(candidate, targetHeadName)) {
+            const { head, args } = flattenApplication(candidate);
+            // Iota reduction can expose an implicit alias in the scrutinee
+            // of an outer eliminator. Elaborate that application before
+            // asking the kernel to resume its blocked computation.
+            if (head?.type === "var" && !head.bondVarId
+                && this.kernel.hasComputeReduction(head.name)
+                && args.some(argument => this.hasElaborationDefinition(argument))) {
+                const expanded = cloneSyntax(candidate);
+                const synthesized = this.synthesize(expanded, context, state);
+                if (synthesized.status === "success") {
+                    const resolved = resolveMetas(expanded, state);
+                    return this.kernel.tryWhnf(resolved, context, kernelOptions(state)) ?? resolved;
+                }
+            }
             return candidate;
+        }
         const expanded = cloneSyntax(candidate);
         if (!this.tryExpandDefinition(expanded, state, true))
             return candidate;
@@ -2740,8 +2755,11 @@ export class SemanticNbeTypeChecker {
             const definitionHeadName = constantHeadName(definition);
             if (targetHeadName === undefined || definitionHeadName === targetHeadName)
                 return true;
+            // A hole-bearing lambda has no constant head until its arguments
+            // are elaborated and beta-reduced. Computation results can expose
+            // it here even when synthesis already expanded the opposite side.
             if (!definitionHeadName)
-                return false;
+                return flattenApplication(definition).head?.type === "L";
             const transparentHead = this.kernel.getDefinitionSource(definitionHeadName);
             // A public wrapper can supply holes to a fully explicit lambda
             // whose body has the target head (for example rec_S1 -> @rec_S1
