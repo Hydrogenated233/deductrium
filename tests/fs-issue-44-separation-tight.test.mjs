@@ -8,6 +8,19 @@ import { expandInferenceSnapshot } from "../js/fs/inference-worker-core.js";
 
 const parser = new ASTParser();
 const assertion = new AssertionSystem();
+
+// Parser roundtrips also preserve grouping before semantic grammar validation.
+for (const [term, expected] of [
+    ["{($0>$1)|x@y}", "{($0\u2192$1)|x@y}"],
+    ["{($0<>$1)|x@y}", "{($0\u2194$1)|x@y}"]
+]) {
+    const ast = parser.parse(term);
+    assert.equal(ast.name, "|}");
+    const tight = parser.stringifyTight(ast);
+    assert.equal(tight, expected, "replacement expression must retain parentheses and Unicode");
+    assert.deepEqual(parser.parse(tight), ast, `replacement expression roundtrip: ${term}`);
+}
+
 const terms = [
     "{p@a|(p=z|p@b)}",
     "{p@a|(~p=z>p@b)}",
