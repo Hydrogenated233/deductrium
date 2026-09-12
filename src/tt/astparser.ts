@@ -243,7 +243,7 @@ export class ASTParser {
         }
         if (ast.type === "W") {
             let s = ""; if (debugBoundVarId && ast.bondVarId) s = "{" + ast.bondVarId + "}";
-            return `(W${ast.name + s}:${this.stringify(nd[0], true)},${this.stringify(nd[1], true)})`;
+            return `(W ${ast.name + s}:${this.stringify(nd[0], true)},${this.stringify(nd[1], true)})`;
         }
         if (ast.type === "S") {
             let s = ""; if (debugBoundVarId && ast.bondVarId) s = "{" + ast.bondVarId + "}";
